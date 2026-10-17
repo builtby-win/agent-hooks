@@ -1,0 +1,50 @@
+{
+  "agent-hooks": {
+    "PostInvocation": [
+      {
+        "command": "agent-hooks hook antigravity --event PostInvocation",
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "agent-hooks hook antigravity --event PostToolUse",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreInvocation": [
+      {
+        "command": "agent-hooks hook antigravity --event PreInvocation",
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "agent-hooks hook antigravity --event PreToolUse",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "agent-hooks hook antigravity --event Stop",
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
+    "enabled": true
+  }
+}

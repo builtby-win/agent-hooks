@@ -1,0 +1,5 @@
+name: agent-hooks
+version: 1.0.0
+description: "Forward Hermes lifecycle events to agent-hooks (never blocks the agent on hook failure)."
+author: agent-hooks
+kind: standalone

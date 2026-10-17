@@ -1,0 +1,80 @@
+name: release
+
+# Windows-only: macOS/Linux binaries are built + uploaded locally on release day.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (must already exist, e.g. v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  BIN: agent-hooks
+  PACKAGE: agent-hooks-cli
+
+jobs:
+  build:
+    name: x86_64-pc-windows-msvc
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --locked -p ${{ env.PACKAGE }} --target x86_64-pc-windows-msvc
+
+      - name: Package (windows)
+        shell: pwsh
+        run: |
+          $Stage = "agent-hooks-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/$env:BIN.exe" "$Stage/"
+          if (Test-Path README.md) { Copy-Item README.md "$Stage/" }
+          Compress-Archive -Path "$Stage/*" -DestinationPath "$Stage.zip"
+          (Get-FileHash "$Stage.zip" -Algorithm SHA256).Hash.ToLower() + "  $Stage.zip" | Out-File "$Stage.zip.sha256" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-hooks-x86_64-pc-windows-msvc
+          path: |
+            agent-hooks-x86_64-pc-windows-msvc.zip
+            agent-hooks-x86_64-pc-windows-msvc.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      # Tag push → github.ref_name is the tag; manual dispatch → inputs.tag.
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT";
+          else echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          files: |
+            agent-hooks-*.zip
+            agent-hooks-*.zip.sha256
+          generate_release_notes: true

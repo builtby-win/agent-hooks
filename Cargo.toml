@@ -1,0 +1,51 @@
+[workspace]
+members = [
+    "crates/agent-hooks-protocol",
+    "crates/agent-hooks-adapters",
+    "crates/agent-hooks-core",
+    "crates/agent-hooks-client",
+    "crates/agent-hooks-cli",
+]
+resolver = "2"
+
+# Shipped inside other apps (back2vibing) and to SSH remotes: optimize for size.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
+[workspace.package]
+version = "0.8.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Winston Zhao"]
+repository = "https://github.com/builtby-win/agent-hooks"
+homepage = "https://builtby.win"
+description = "Universal lifecycle hooks and observability engine for AI coding agent harnesses."
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.38", features = ["full"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+thiserror = "1.0"
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.8", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+toml_edit = "0.20"
+json5 = "0.4"
+tempfile = "3.10"
+futures = "0.3"
+sha2 = "0.10"
+interprocess = { version = "2.2", features = ["tokio"] }
+
+# Local workspace crates
+agent-hooks-protocol = { version = "0.8.0", path = "crates/agent-hooks-protocol" }
+agent-hooks-adapters = { version = "0.8.0", path = "crates/agent-hooks-adapters" }
+agent-hooks-core = { version = "0.8.0", path = "crates/agent-hooks-core" }
+agent-hooks-client = { version = "0.8.0", path = "crates/agent-hooks-client" }

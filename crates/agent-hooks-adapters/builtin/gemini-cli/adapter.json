@@ -1,0 +1,192 @@
+{
+  "id": "gemini-cli",
+  "display_name": "Gemini CLI",
+  "aliases": ["gemini", "google-gemini", "gemini_cli", "gemini-cli"],
+  "default_version": "v1",
+  "detect": {
+    "harness_hint": ["gemini", "gemini-cli", "google-gemini"],
+    "payload_keys_any": [["BeforeTool"], ["AfterTool"], ["BeforeAgent"], ["session_id"]],
+    "event_names": [
+      "SessionStart",
+      "SessionEnd",
+      "PreInvocation",
+      "BeforeAgent",
+      "BeforeModel",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "BeforeTool",
+      "PostToolUse",
+      "AfterTool",
+      "Stop",
+      "AfterAgent",
+      "AfterModel",
+      "Notification"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "json_hooks",
+          "paths": ["~/.gemini/settings.json"],
+          "create": true,
+          "root": "hooks.{event}",
+          "entry_shape": "matcher_group",
+          "entry": {
+            "type": "command",
+            "command": "agent-hooks hook gemini --event {event}",
+            "timeout": 30
+          },
+          "dedupe": "command_subset"
+        }
+      ],
+      "events": {
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "PreInvocation": {"lifecycle": "UserPromptSubmit", "capability": "gate", "install": false},
+        "BeforeAgent": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "BeforeModel": {"lifecycle": "TurnStart", "capability": "gate"},
+        "UserPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate", "install": false},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate", "install": false},
+        "BeforeTool": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe", "install": false},
+        "AfterTool": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true, "install": false},
+        "AfterAgent": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true},
+        "AfterModel": {"lifecycle": "TurnStart", "capability": "observe"},
+        "SessionEnd": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "Notification": {"lifecycle": "Notification", "capability": "observe"}
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID", "conversation_id", "conversationId"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params", "arguments"],
+        "tool_output": ["tool_output", "toolOutput", "output", "result", "content"],
+        "error": ["error", "error_message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "reason", "result", "notification", "text", "content", "body"],
+        "cwd": ["cwd"]
+      },
+      "extraction_overrides": {
+        "Stop": {
+          "summary": [
+            "prompt_response",
+            "promptResponse",
+            "summary",
+            "message",
+            "reason",
+            "result",
+            "notification",
+            "text",
+            "content",
+            "body"
+          ],
+          "flavor_text": [
+            "prompt_response",
+            "promptResponse",
+            "summary",
+            "message",
+            "result",
+            "text",
+            "content",
+            "body"
+          ]
+        },
+        "PreInvocation": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "BeforeAgent": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "UserPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "BeforeTool": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result",
+            "content"
+          ]
+        },
+        "AfterTool": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result",
+            "content"
+          ]
+        },
+        "AfterAgent": {
+          "flavor_text": [
+            "prompt_response",
+            "promptResponse",
+            "summary",
+            "message",
+            "result",
+            "text",
+            "content",
+            "body"
+          ]
+        },
+        "Notification": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        }
+      },
+      "response": {
+        "mode": "json",
+        "inject": {
+          "SessionStart": {"hookSpecificOutput": {"hookEventName": "{event}", "additionalContext": "{additional_context}"}},
+          "BeforeAgent": {"hookSpecificOutput": {"hookEventName": "{event}", "additionalContext": "{additional_context}"}}
+        },
+        "gate": {
+          "allow": {"decision": "allow"},
+          "deny": {"decision": "deny", "reason": "{reason}"}
+        },
+        "observe": {"decision": "allow"},
+        "defer_overrides": {"PreToolUse": {}},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        },
+        "empty_on_undecided": false
+      },
+      "unavailable": ["PermissionRequest", "PostToolUseFailure", "SubagentStart", "SubagentStop"]
+    }
+  }
+}

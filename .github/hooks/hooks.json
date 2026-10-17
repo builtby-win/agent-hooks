@@ -1,0 +1,130 @@
+{
+  "hooks": {
+    "afterTool": [
+      {
+        "command": "agent-hooks hook copilot --event afterTool --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "agentStop": [
+      {
+        "command": "agent-hooks hook copilot --event agentStop --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "beforeTool": [
+      {
+        "command": "agent-hooks hook copilot --event beforeTool --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "notification": [
+      {
+        "command": "agent-hooks hook copilot --event notification --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "agent-hooks hook copilot --event postToolUse --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "agent-hooks hook copilot --event preToolUse --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "promptSubmitted": [
+      {
+        "command": "agent-hooks hook copilot --event promptSubmitted --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "sessionCreated": [
+      {
+        "command": "agent-hooks hook copilot --event sessionCreated --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "sessionDeleted": [
+      {
+        "command": "agent-hooks hook copilot --event sessionDeleted --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "agent-hooks hook copilot --event sessionEnd --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "sessionIdle": [
+      {
+        "command": "agent-hooks hook copilot --event sessionIdle --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "agent-hooks hook copilot --event sessionStart --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "session_end": [
+      {
+        "command": "agent-hooks hook copilot --event session_end --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "session_start": [
+      {
+        "command": "agent-hooks hook copilot --event session_start --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "stop": [
+      {
+        "command": "agent-hooks hook copilot --event stop --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "toolEnd": [
+      {
+        "command": "agent-hooks hook copilot --event toolEnd --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "toolStart": [
+      {
+        "command": "agent-hooks hook copilot --event toolStart --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "turnEnd": [
+      {
+        "command": "agent-hooks hook copilot --event turnEnd --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "turnStop": [
+      {
+        "command": "agent-hooks hook copilot --event turnStop --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "userPromptSubmit": [
+      {
+        "command": "agent-hooks hook copilot --event userPromptSubmit --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "command": "agent-hooks hook copilot --event userPromptSubmitted --socket /tmp/agent-hooks.sock",
+        "timeout": 10
+      }
+    ]
+  }
+}

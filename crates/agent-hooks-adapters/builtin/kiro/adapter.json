@@ -1,0 +1,109 @@
+{
+  "id": "kiro",
+  "display_name": "Kiro",
+  "aliases": ["kiro-cli", "kiro_cli", "kiro"],
+  "default_version": "v1",
+  "detect": {
+    "harness_hint": ["kiro"],
+    "payload_keys_any": [],
+    "event_names": [
+      "agentSpawn",
+      "userPromptSubmit",
+      "preToolUse",
+      "postToolUse",
+      "stop"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "json_hooks",
+          "paths": ["~/.kiro/agents/agent-hooks.json"],
+          "create": true,
+          "root": "hooks.{event}",
+          "entry_shape": "flat",
+          "fixed_fields": {
+            "name": "agent-hooks",
+            "description": "agent-hooks lifecycle hooks",
+            "tools": ["*"]
+          },
+          "entry": {"command": "agent-hooks hook kiro --event {event}"},
+          "dedupe": "command_subset"
+        },
+        {
+          "op": "json_edit",
+          "paths": ["~/.kiro/settings/cli.json"],
+          "pointer": "/chat.defaultAgent",
+          "mode": "set",
+          "value": "agent-hooks",
+          "restore_on_uninstall": true,
+          "only_if_sole_json": "~/.kiro/agents/agent-hooks.json"
+        }
+      ],
+      "host_timeout_secs": 30,
+      "events": {
+        "agentSpawn": {"lifecycle": "SessionStart", "capability": "observe"},
+        "userPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate", "install": false},
+        "preToolUse": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "postToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true}
+      },
+      "extraction_overrides": {
+        "userPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "preToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "postToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "stop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        }
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID", "conversation_id", "conversationId", "thread_id", "threadId"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params"],
+        "tool_output": ["tool_output", "toolOutput", "output", "result"],
+        "error": ["error", "message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "result"],
+        "cwd": ["cwd"]
+      },
+      "response": {
+        "mode": "json",
+        "gate": {
+          "allow": {"decision": "allow"},
+          "deny": {"decision": "deny", "reason": "{reason}"}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        }
+      },
+      "unavailable": ["SessionEnd", "Notification", "PostToolUseFailure", "PermissionRequest", "SubagentStart", "SubagentStop", "TurnStart", "TurnEnd"]
+    }
+  }
+}

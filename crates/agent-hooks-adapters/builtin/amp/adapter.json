@@ -1,0 +1,218 @@
+{
+  "id": "amp",
+  "display_name": "Amp",
+  "aliases": ["ampcode", "sourcegraph-amp", "sourcegraph_amp", "amp"],
+  "default_version": "v1",
+  "detect": {
+    "harness_hint": ["amp", "ampcode", "sourcegraph-amp"],
+    "payload_keys_any": [["session_id"]],
+    "event_names": [
+      "SessionStart",
+      "SessionEnd",
+      "PreToolUse",
+      "ToolStart",
+      "BeforeTool",
+      "PostToolUse",
+      "ToolEnd",
+      "AfterTool",
+      "PermissionRequest",
+      "Notification",
+      "Stop",
+      "TurnEnd",
+      "AgentStop",
+      "session.start",
+      "agent.start",
+      "tool.call",
+      "tool.result",
+      "agent.end",
+      "UserPromptSubmit",
+      "SubagentStart",
+      "SubagentStop"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "stage_assets",
+          "stage_dir": "~/.config/amp/plugins",
+          "assets": [
+            { "path": "agent-hooks.ts", "embedded": "agent-hooks.ts" }
+          ],
+          "managed_marker": "// managed by agent-hooks"
+        }
+      ],
+      "events": {
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "SessionEnd": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "ToolStart": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "BeforeTool": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "ToolEnd": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "AfterTool": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "PermissionRequest": {"lifecycle": "PermissionRequest", "capability": "gate"},
+        "Notification": {"lifecycle": "Notification", "capability": "observe"},
+        "session.start": {"lifecycle": "SessionStart", "capability": "observe"},
+        "agent.start": {"lifecycle": "UserPromptSubmit", "capability": "observe"},
+        "tool.call": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "tool.result": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "agent.end": {"lifecycle": "Stop", "capability": "observe"},
+        "Stop": {"lifecycle": "TurnEnd", "capability": "observe"},
+        "TurnEnd": {"lifecycle": "TurnEnd", "capability": "observe"},
+        "AgentStop": {"lifecycle": "TurnEnd", "capability": "observe"},
+        "UserPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "SubagentStart": {"lifecycle": "SubagentStart", "capability": "gate"},
+        "SubagentStop": {"lifecycle": "SubagentStop", "capability": "continue"}
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID", "thread.id", "conversation_id", "conversationId"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params"],
+        "tool_output": ["tool_output", "toolOutput", "output", "result"],
+        "error": ["error", "error_message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "result", "notification", "text", "content", "body"],
+        "session_title": ["session_title", "sessionTitle", "thread.title"]
+      },
+      "extraction_overrides": {
+        "SubagentStart": {
+          "prompt": [
+            "agent_id",
+            "subagent_id",
+            "id",
+            "agentId"
+          ],
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "SubagentStop": {
+          "tool_name": [
+            "agent_id",
+            "subagent_id",
+            "id",
+            "agentId"
+          ],
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "text",
+            "content",
+            "body"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "ToolStart": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "BeforeTool": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "ToolEnd": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "AfterTool": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "PermissionRequest": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "Notification": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "agent.start": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "tool.call": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "tool.result": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "agent.end": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "text",
+            "content",
+            "body"
+          ]
+        },
+        "UserPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        }
+      },
+      "response": {
+        "mode": "json",
+        "gate": {
+          "allow": {"decision": "allow"},
+          "deny": {"decision": "deny", "reason": "{reason}"}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        },
+        "empty_on_undecided": false
+      },
+      "unavailable": ["PostToolUseFailure", "TurnStart"],
+      "notes": {
+        "post_install": ["Restart amp to load ~/.config/amp/plugins/agent-hooks.ts"]
+      }
+    }
+  }
+}

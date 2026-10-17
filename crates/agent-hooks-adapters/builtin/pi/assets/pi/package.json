@@ -1,0 +1,20 @@
+{
+  "name": "agent-hooks",
+  "version": "0.1.0",
+  "description": "Universal lifecycle hooks and observability engine for Pi",
+  "keywords": [
+    "pi-extension",
+    "pi-package",
+    "agent-hooks",
+    "observability",
+    "hooks"
+  ],
+  "type": "module",
+  "pi": {
+    "name": "agent-hooks",
+    "description": "Forward Pi lifecycle events to the agent-hooks daemon (never blocks the agent).",
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

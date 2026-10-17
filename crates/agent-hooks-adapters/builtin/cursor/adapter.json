@@ -1,0 +1,197 @@
+{
+  "id": "cursor",
+  "display_name": "Cursor",
+  "aliases": ["cursor-agent", "cursor-cli"],
+  "default_version": "v1",
+  "detect": {
+    "harness_hint": ["cursor"],
+    "payload_keys_any": [["cursor_version"], ["workspace_roots"]],
+    "event_names": [
+      "beforeSubmitPrompt",
+      "preToolUse",
+      "beforeMCPExecution",
+      "beforeShellExecution",
+      "beforeReadFile",
+      "postToolUse",
+      "postToolUseFailure",
+      "afterShellExecution",
+      "afterMCPExecution",
+      "afterFileEdit",
+      "afterAgentResponse",
+      "afterAgentThought",
+      "beforeTabFileRead",
+      "afterTabFileEdit",
+      "sessionStart",
+      "sessionEnd",
+      "subagentStart",
+      "subagentStop",
+      "preCompact",
+      "stop"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "json_hooks",
+          "paths": ["~/.cursor/hooks.json", ".cursor/hooks.json"],
+          "create": true,
+          "root": "hooks.{event}",
+          "entry_shape": "flat",
+          "fixed_fields": {"version": 1},
+          "entry": {"command": "agent-hooks hook cursor --event {event}", "timeout": 10},
+          "dedupe": "command_subset",
+          "entry_overrides": {"stop": {"loop_limit": 10}, "subagentStop": {"loop_limit": 10}}
+        }
+      ],
+      "events": {
+        "beforeSubmitPrompt": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "preToolUse": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "beforeMCPExecution": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "beforeShellExecution": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "beforeReadFile": {"lifecycle": "PreToolUse", "capability": "gate", "install": false},
+        "beforeTabFileRead": {"lifecycle": "PreToolUse", "capability": "gate", "install": false},
+        "subagentStart": {"lifecycle": "SubagentStart", "capability": "gate", "install": false},
+        "postToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "postToolUseFailure": {"lifecycle": "PostToolUseFailure", "capability": "observe", "install": false},
+        "afterShellExecution": {"lifecycle": "PostToolUse", "capability": "observe", "install": false},
+        "afterMCPExecution": {"lifecycle": "PostToolUse", "capability": "observe", "install": false},
+        "afterFileEdit": {"lifecycle": "PostToolUse", "capability": "observe", "install": false},
+        "afterAgentResponse": {"lifecycle": "TurnEnd", "capability": "observe", "install": false},
+        "afterAgentThought": {"lifecycle": "TurnEnd", "capability": "observe", "install": false},
+        "afterTabFileEdit": {"lifecycle": "PostToolUse", "capability": "observe", "install": false},
+        "preCompact": {"lifecycle": "TurnEnd", "capability": "observe", "install": false},
+        "sessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "sessionEnd": {"lifecycle": "TurnEnd", "capability": "observe"},
+        "subagentStop": {"lifecycle": "SubagentStop", "capability": "continue", "install": false},
+        "stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true}
+      },
+      "extraction_overrides": {
+        "beforeSubmitPrompt": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "preToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "beforeMCPExecution": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "beforeShellExecution": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "beforeReadFile": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "beforeTabFileRead": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "subagentStart": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "postToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "result_json"
+          ]
+        },
+        "postToolUseFailure": {
+          "flavor_text": [
+            "error",
+            "error_message"
+          ]
+        },
+        "afterShellExecution": {
+          "flavor_text": [
+            "tool_output",
+            "result_json"
+          ]
+        },
+        "afterMCPExecution": {
+          "flavor_text": [
+            "tool_output",
+            "result_json"
+          ]
+        },
+        "afterFileEdit": {
+          "flavor_text": [
+            "tool_output",
+            "result_json"
+          ]
+        },
+        "afterTabFileEdit": {
+          "flavor_text": [
+            "tool_output",
+            "result_json"
+          ]
+        },
+        "subagentStop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "stop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        }
+      },
+      "extraction": {
+        "session_id": ["conversation_id", "session_id", "sessionId", "conversationId"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+        "tool_name": ["tool_name", "toolCall.name"],
+        "tool_input": ["tool_input", "toolCall.args"],
+        "tool_output": ["tool_output", "result_json"],
+        "error": ["error", "error_message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "result"],
+        "cwd": ["workspace_roots", "cwd"]
+      },
+      "response": {
+        "mode": "json",
+        "inject": {
+          "sessionStart": {"additional_context": "{additional_context}"}
+        },
+        "gate": {
+          "allow": {"permission": "allow"},
+          "deny": {"permission": "deny", "user_message": "{reason}", "agent_message": "{reason}"}
+        },
+        "observe": {"decision": "allow"},
+        "defer_overrides": {"PreToolUse": {}, "SubagentStart": {}},
+        "continue": {
+          "continue": {"followup_message": "{reason}"},
+          "stop": {}
+        },
+        "response_overrides": {
+          "UserPromptSubmit": {
+            "allow": {"continue": true},
+            "deny": {"continue": false, "user_message": "{reason}"}
+          }
+        }
+      },
+      "unavailable": ["PermissionRequest", "TurnStart"]
+    }
+  }
+}

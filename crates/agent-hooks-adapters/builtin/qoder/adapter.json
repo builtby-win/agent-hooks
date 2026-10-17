@@ -1,0 +1,203 @@
+{
+  "id": "qoder",
+  "display_name": "Qoder",
+  "aliases": ["qoder-cli", "qoder_cli"],
+  "default_version": "v1",
+  "unverified": true,
+  "detect": {
+    "harness_hint": ["qoder", "qoder-cli"],
+    "payload_keys_any": [["permission_suggestions"], ["mcp_server_name"], ["requested_schema"], ["elicitation_id"]],
+    "event_names": [
+      "SessionStart",
+      "SessionEnd",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "PermissionRequest",
+      "Elicitation",
+      "ElicitationResult",
+      "Notification",
+      "SubagentStart",
+      "SubagentStop",
+      "PreCompact",
+      "PostCompact",
+      "Stop"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "json_hooks",
+          "paths": ["~/.qoder/settings.json", ".qoder/settings.json", ".qoder/settings.local.json"],
+          "create": true,
+          "root": "hooks.{event}",
+          "entry_shape": "matcher_group",
+          "entry": {
+            "type": "command",
+            "command": "agent-hooks hook qoder --event {event}",
+            "timeout": 30
+          },
+          "dedupe": "command_subset",
+          "entry_overrides": {
+            "PreToolUse": {"timeout": 300},
+            "PermissionRequest": {"timeout": 300},
+            "UserPromptSubmit": {"timeout": 60},
+            "SessionEnd": {"timeout": 5}
+          }
+        }
+      ],
+      "events": {
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "SessionEnd": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "UserPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate", "verdicts": ["allow", "deny"]},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate", "verdicts": ["allow", "deny", "ask"]},
+        "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "PostToolUseFailure": {"lifecycle": "PostToolUseFailure", "capability": "observe"},
+        "PermissionRequest": {"lifecycle": "PermissionRequest", "capability": "gate", "verdicts": ["allow", "deny"]},
+        "Elicitation": {"lifecycle": "Notification", "capability": "observe"},
+        "ElicitationResult": {"lifecycle": "Notification", "capability": "observe", "install": false},
+        "Notification": {"lifecycle": "Notification", "capability": "observe"},
+        "SubagentStart": {"lifecycle": "SubagentStart", "capability": "observe"},
+        "SubagentStop": {"lifecycle": "SubagentStop", "capability": "continue"},
+        "PreCompact": {"lifecycle": "PreCompact", "capability": "observe"},
+        "PostCompact": {"lifecycle": "PostCompact", "capability": "observe"},
+        "Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true}
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parent_id", "parentId"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+        "tool_name": ["tool_name", "toolName", "tool", "name", "mcp_server_name", "mcpServerName"],
+        "tool_input": ["tool_input", "toolInput", "input", "params", "arguments"],
+        "tool_output": ["tool_output", "toolOutput", "tool_response", "output", "result", "content"],
+        "error": ["error", "tool_error", "failure", "message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "reason", "result", "action"],
+        "cwd": ["cwd"]
+      },
+      "extraction_overrides": {
+        "Notification": {
+          "prompt": [
+            "message",
+            "title"
+          ],
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "Elicitation": {
+          "prompt": [
+            "message"
+          ],
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "UserPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "tool_response",
+            "output",
+            "result",
+            "content"
+          ]
+        },
+        "PostToolUseFailure": {
+          "flavor_text": [
+            "error",
+            "tool_error",
+            "failure",
+            "message"
+          ]
+        },
+        "PermissionRequest": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "ElicitationResult": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "SubagentStart": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "SubagentStop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "Stop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        }
+      },
+      "response": {
+        "mode": "json",
+        "inject": {
+          "SessionStart": {"hookSpecificOutput": {"hookEventName": "{event}", "additionalContext": "{additional_context}"}},
+          "UserPromptSubmit": {"hookSpecificOutput": {"hookEventName": "{event}", "additionalContext": "{additional_context}"}}
+        },
+        "gate": {
+          "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "allow"}},
+          "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "deny", "permissionDecisionReason": "{reason?}"}},
+          "ask": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "ask", "permissionDecisionReason": "{reason?}"}}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        },
+        "response_overrides": {
+          "PermissionRequest": {
+            "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "decision": {"behavior": "allow", "updatedInput": "{updated_input}", "updatedPermissions": "{updated_permissions}"}}},
+            "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "decision": {"behavior": "deny", "message": "{reason?}"}}}
+          },
+          "UserPromptSubmit": {
+            "allow": {},
+            "deny": {"decision": "block", "reason": "{reason}"}
+          }
+        }
+      },
+      "notes": {
+        "post_install": [
+          "Docs-only adapter (unverified): built from Qoder's published CLI hooks reference; no live run has confirmed event emission, decision enforcement, or installer paths.",
+          "Qoder requires hookSpecificOutput.hookEventName on every event-specific output; this adapter always emits it.",
+          "Elicitation uses an accept/decline/cancel dialect that is not a permission gate, so Elicitation events are observe-only and never answer for the user."
+        ]
+      },
+      "unavailable": ["TurnStart", "TurnEnd"]
+    }
+  }
+}

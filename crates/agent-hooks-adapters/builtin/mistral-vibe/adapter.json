@@ -1,0 +1,148 @@
+{
+  "id": "mistral-vibe",
+  "display_name": "Mistral Vibe",
+  "aliases": ["mistral", "vibe", "mistral-vibe-cli", "vibe-code"],
+  "default_version": "v1",
+  "unverified": true,
+  "detect": {
+    "harness_hint": ["mistral-vibe", "vibe", "mistral"],
+    "payload_keys_any": [["tool_status"], ["tool_output_text"], ["tool_call_id"]],
+    "event_names": [
+      "pre_tool",
+      "post_tool",
+      "post_agent"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "toml_list_hooks",
+          "paths": ["~/.vibe/hooks.toml", ".vibe/hooks.toml"],
+          "create": true,
+          "list_key": "hooks",
+          "entry": {
+            "name": "agent-hooks-{event}",
+            "type": "pre_tool",
+            "command": "agent-hooks hook mistral-vibe --event {event}",
+            "timeout": 60
+          },
+          "entry_overrides": {
+            "PostToolUse": {"name": "agent-hooks-PostToolUse", "type": "post_tool"},
+            "Stop": {"name": "agent-hooks-Stop", "type": "post_agent"}
+          }
+        }
+      ],
+      "events": {
+        "pre_tool": {"lifecycle": "PreToolUse", "capability": "gate", "verdicts": ["allow", "deny"], "install": false},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate", "verdicts": ["allow", "deny"]},
+        "post_tool": {"lifecycle": "PostToolUse", "capability": "observe", "install": false},
+        "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "post_agent": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true, "install": false},
+        "Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true},
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe", "install": false},
+        "SessionEnd": {"lifecycle": "SessionEnd", "capability": "observe", "install": false},
+        "Notification": {"lifecycle": "Notification", "capability": "observe", "install": false}
+      },
+      "extraction_overrides": {
+        "pre_tool": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "post_tool": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "tool_output_text",
+            "toolOutputText",
+            "tool_response",
+            "output",
+            "result"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "tool_output_text",
+            "toolOutputText",
+            "tool_response",
+            "output",
+            "result"
+          ]
+        },
+        "post_agent": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "system_message",
+            "systemMessage"
+          ]
+        },
+        "Stop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "system_message",
+            "systemMessage"
+          ]
+        },
+        "Notification": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        }
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parent_id", "parentId"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params", "arguments"],
+        "tool_output": ["tool_output", "toolOutput", "tool_output_text", "toolOutputText", "tool_response", "output", "result"],
+        "error": ["error", "tool_error", "failure", "message", "reason"],
+        "success": ["success"],
+        "summary": ["summary", "message", "reason", "result", "system_message", "systemMessage"],
+        "cwd": ["cwd"]
+      },
+      "response": {
+        "mode": "json",
+        "gate": {
+          "allow": {},
+          "deny": {"decision": "deny", "reason": "{reason}"}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "deny", "reason": "{reason}"},
+          "stop": {}
+        },
+        "response_overrides": {
+          "PreToolUse": {
+            "allow": {"hook_specific_output": {"tool_input": "{updated_input}"}},
+            "deny": {"decision": "deny", "reason": "{reason}"}
+          }
+        },
+        "allow_requires_tool_input": true
+      },
+      "notes": {
+        "post_install": [
+          "Docs-only adapter (unverified): built from Mistral's published Vibe hooks reference; no live run has confirmed event emission, decision enforcement, or installer paths.",
+          "Mistral hook types are pre_tool/post_tool/post_agent: PreToolUse installs a pre_tool row, PostToolUse a post_tool row, Stop a post_agent row. Lifecycle-only events (session, notification) are normalize-only.",
+          "Project .vibe/hooks.toml loads only in trusted folders; when project and user files share a hook name the project entry wins.",
+          "The strict flag is omitted (fail-open warnings, matching Mistral's default); no question-answer dialect is documented, so this adapter never answers questions."
+        ]
+      },
+      "unavailable": ["PermissionRequest", "PostToolUseFailure", "SubagentStart", "SubagentStop", "TurnStart", "TurnEnd"]
+    }
+  }
+}

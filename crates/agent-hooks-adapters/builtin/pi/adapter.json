@@ -1,0 +1,337 @@
+{
+  "id": "pi",
+  "display_name": "Pi",
+  "aliases": ["pi-agent", "pi_agent"],
+  "default_version": "v1",
+  "detect": {
+    "harness_hint": ["pi", "pi-agent", "pi_agent"],
+    "payload_keys_any": [["session_id", "sessionId"], ["tool_name", "toolName", "tool"]],
+    "event_names": [
+      "SessionStart",
+      "SessionEnd",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "PermissionRequest",
+      "Notification",
+      "Stop",
+      "TurnStart",
+      "TurnEnd",
+      "SubagentStart",
+      "SubagentStop",
+      "tool_call",
+      "tool_result",
+      "tool_approval_requested",
+      "agent_settled",
+      "session_shutdown",
+      "agent_start"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "stage_assets",
+          "stage_dir": "~/.pi/agent/extensions",
+          "assets": [
+            { "path": "agent-hooks.ts", "embedded": "pi/index.ts" }
+          ],
+          "managed_marker": "//! managed by agent-hooks"
+        }
+      ],
+      "events": {
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "SessionEnd": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "sessionshutdown": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "UserPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "promptsubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "beforesubmitprompt": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "agentstart": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "userbash": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "userpython": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "beforetool": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "toolstart": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "toolcall": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "toolexecutionstart": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "aftertool": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "toolend": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "toolresult": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "toolexecutionend": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "PermissionRequest": {"lifecycle": "PermissionRequest", "capability": "gate"},
+        "toolapprovalrequested": {"lifecycle": "PermissionRequest", "capability": "gate"},
+        "approvalrequested": {"lifecycle": "PermissionRequest", "capability": "gate"},
+        "Notification": {"lifecycle": "Notification", "capability": "observe"},
+        "plan_approval_requested": {"lifecycle": "Notification", "capability": "observe"},
+        "Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when": {"willContinue": true}},
+        "afteragent": {"lifecycle": "Stop", "capability": "continue"},
+        "agentsettled": {"lifecycle": "Stop", "capability": "continue"},
+        "TurnStart": {"lifecycle": "TurnStart", "capability": "observe"},
+        "TurnEnd": {"lifecycle": "TurnEnd", "capability": "observe"},
+        "SubagentStart": {"lifecycle": "SubagentStart", "capability": "gate"},
+        "SubagentStop": {"lifecycle": "SubagentStop", "capability": "continue"}
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID", "conversation_id", "conversationId", "thread_id", "threadId", "id"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params"],
+        "tool_output": ["tool_output", "toolOutput", "output", "result"],
+        "error": ["error", "tool_error", "failure", "message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "result", "reason", "text", "content"],
+        "session_title": ["session_title", "sessionTitle"]
+      },
+      "extraction_overrides": {
+        "PermissionRequest": {
+          "prompt": [
+            "description",
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "input"
+          ],
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "SubagentStart": {
+          "prompt": [
+            "agent_id",
+            "subagent_id",
+            "id"
+          ],
+          "summary": [
+            "description",
+            "prompt"
+          ],
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "SubagentStop": {
+          "tool_name": [
+            "agent_id",
+            "subagent_id",
+            "id"
+          ],
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "text",
+            "content"
+          ]
+        },
+        "UserPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "promptsubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "beforesubmitprompt": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "agentstart": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "userbash": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "userpython": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "beforetool": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "toolstart": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "toolcall": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "toolexecutionstart": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result",
+            "content"
+          ]
+        },
+        "aftertool": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result",
+            "content"
+          ]
+        },
+        "toolend": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result",
+            "content"
+          ]
+        },
+        "toolresult": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result",
+            "content"
+          ]
+        },
+        "toolexecutionend": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result",
+            "content"
+          ]
+        },
+        "toolapprovalrequested": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "approvalrequested": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "Notification": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "plan_approval_requested": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "Stop": {
+          "flavor_text": [
+            "last_assistant_message",
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "afteragent": {
+          "flavor_text": [
+            "last_assistant_message",
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "agentsettled": {
+          "flavor_text": [
+            "last_assistant_message",
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "TurnEnd": {
+          "flavor_text": [
+            "last_assistant_message",
+            "message",
+            "text",
+            "content"
+          ]
+        }
+      },
+      "response": {
+        "mode": "json",
+        "inject": {
+          "SessionStart": {"additional_context": "{additional_context}"},
+          "UserPromptSubmit": {"additional_context": "{additional_context}"}
+        },
+        "gate": {
+          "allow": {"decision": "allow"},
+          "deny": {"decision": "deny", "reason": "{reason}"}
+        },
+        "response_overrides": {
+          "PreToolUse": {
+            "allow": {"decision": "allow", "reply": "{reply}", "answers": "{answer_groups}"},
+            "deny": {"decision": "deny", "reason": "{reason}"}
+          },
+          "PermissionRequest": {
+            "allow": {"decision": "allow", "reply": "{reply}"},
+            "deny": {"decision": "deny", "reason": "{reason}"}
+          }
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        }
+      },
+      "unavailable": ["PostToolUseFailure"],
+      "ask_tools": ["ask"],
+      "notes": {
+        "post_install": ["Restart pi or run /reload to load ~/.pi/agent/extensions/agent-hooks.ts"]
+      }
+    }
+  }
+}

@@ -1,0 +1,205 @@
+{
+  "id": "kimi-code",
+  "display_name": "Kimi Code",
+  "aliases": ["kimi", "kimi_code", "kimi-cli", "kimi_cli"],
+  "default_version": "v1",
+  "unverified": true,
+  "detect": {
+    "harness_hint": ["kimi", "kimi-code", "kimi-cli"],
+    "payload_keys_any": [["client_type"], ["session_title"]],
+    "event_names": [
+      "UserPromptSubmit",
+      "UserPromptQueued",
+      "PreToolUse",
+      "Stop",
+      "TurnStarted",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "PermissionRequest",
+      "PermissionResult",
+      "SessionStart",
+      "SessionEnd",
+      "SessionHeartbeat",
+      "SubagentStart",
+      "SubagentStop",
+      "TaskStarted",
+      "StopFailure"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "toml_list_hooks",
+          "paths": ["~/.kimi-code/config.toml"],
+          "create": true,
+          "list_key": "hooks",
+          "entry": {
+            "event": "{event}",
+            "command": "agent-hooks hook kimi-code --event {event}",
+            "timeout": 30
+          },
+          "entry_overrides": {
+            "PreToolUse": {"timeout": 300},
+            "UserPromptSubmit": {"timeout": 60},
+            "Stop": {"timeout": 60}
+          }
+        }
+      ],
+      "events": {
+        "UserPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate", "verdicts": ["allow", "deny"]},
+        "UserPromptQueued": {"lifecycle": "UserPromptSubmit", "capability": "observe", "install": false},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate", "verdicts": ["allow", "deny"]},
+        "Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true},
+        "TurnStarted": {"lifecycle": "TurnStart", "capability": "observe", "install": false},
+        "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "PostToolUseFailure": {"lifecycle": "PostToolUseFailure", "capability": "observe"},
+        "PermissionRequest": {"lifecycle": "PermissionRequest", "capability": "observe", "install": false},
+        "PermissionResult": {"lifecycle": "Notification", "capability": "observe", "install": false},
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "SessionEnd": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "SessionHeartbeat": {"lifecycle": "Notification", "capability": "observe", "install": false},
+        "SubagentStart": {"lifecycle": "SubagentStart", "capability": "observe"},
+        "SubagentStop": {"lifecycle": "SubagentStop", "capability": "continue"},
+        "TaskStarted": {"lifecycle": "Notification", "capability": "observe", "install": false},
+        "StopFailure": {"lifecycle": "StopFailure", "capability": "observe"}
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parent_id", "parentId"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params", "arguments"],
+        "tool_output": ["tool_output", "toolOutput", "tool_response", "output", "result"],
+        "error": ["error", "tool_error", "failure", "message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "reason", "result"],
+        "cwd": ["cwd"]
+      },
+      "extraction_overrides": {
+        "Stop": {
+          "summary": [
+            "last_assistant_message",
+            "lastAssistantMessage",
+            "summary",
+            "message",
+            "reason"
+          ],
+          "flavor_text": [
+            "last_assistant_message",
+            "lastAssistantMessage",
+            "summary",
+            "message"
+          ]
+        },
+        "UserPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "UserPromptQueued": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "tool_response",
+            "output",
+            "result"
+          ]
+        },
+        "PostToolUseFailure": {
+          "flavor_text": [
+            "error",
+            "tool_error",
+            "failure",
+            "message"
+          ]
+        },
+        "PermissionRequest": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PermissionResult": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "SessionHeartbeat": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "SubagentStart": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "SubagentStop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "TaskStarted": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "StopFailure": {
+          "flavor_text": [
+            "error",
+            "tool_error",
+            "failure",
+            "message"
+          ]
+        }
+      },
+      "response": {
+        "mode": "exit2",
+        "gate": {
+          "allow": {},
+          "deny": {}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {},
+          "stop": {}
+        }
+      },
+      "notes": {
+        "post_install": [
+          "Docs-only adapter (unverified): built from Kimi Code's published hooks reference; no live run has confirmed event emission, blocking, or installer paths.",
+          "Kimi blocks on exit code 2 with the stderr text as the reason, so this adapter uses exit2 response mode: denies exit 2, everything else exits 0 (fail-open, matching Kimi's own hook-error semantics).",
+          "Only UserPromptSubmit, PreToolUse, and Stop are blockable; permission events are observational and Kimi documents no native question-answer reply dialect, so this adapter never answers questions.",
+          "The config home is relocatable via KIMI_CODE_HOME; this adapter installs to ~/.kimi-code/config.toml."
+        ]
+      },
+      "unavailable": ["TurnEnd"]
+    }
+  }
+}

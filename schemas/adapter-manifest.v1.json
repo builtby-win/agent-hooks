@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/builtby-win/agent-hooks/main/schemas/adapter-manifest.v1.json",
+  "title": "Adapter Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "display_name", "default_version", "versions"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "display_name": { "type": "string", "minLength": 1 },
+    "aliases": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "default_version": { "type": "string", "minLength": 1 },
+    "extends": { "type": "string", "minLength": 1, "description": "Base manifest id to inherit from (builtin id or another loaded manifest's id). The base resolves recursively first, then merges with local: scalars/options take local when present (non-empty) else base; events, extraction_overrides and response_overrides merge per key with local winning; extraction merges per field (local replaces when non-empty, summary when set); install, unavailable and ask_tools take local when non-empty else base; response gate/observe/continue take local when set, mode takes local only when non-default, empty_on_undecided is OR-combined. Resolved manifests are fully materialized with extends removed." },
+    "min_agent_hooks": { "type": "string" },
+    "unverified": { "type": "boolean", "default": false, "description": "Docs-only adapter: built from the harness's published hook contract but never exercised against the live CLI." },
+    "detect": { "$ref": "#/$defs/DetectSpec" },
+    "versions": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/VersionSpec" },
+      "minProperties": 1
+    }
+  },
+  "$defs": {
+    "DetectSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harness_hint": { "type": "array", "items": { "type": "string" } },
+        "payload_keys_any": {
+          "type": "array",
+          "items": { "type": "array", "items": { "type": "string" } }
+        },
+        "event_names": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "VersionSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "verified_against": { "type": "string", "description": "Harness version this spec was last confirmed against a live run (e.g. \"1.4.6\"). Informational only." },
+        "install": { "type": "array", "items": { "$ref": "#/$defs/InstallOp" } },
+        "events": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/EventSpec" }
+        },
+        "extraction": { "$ref": "#/$defs/ExtractionSpec" },
+        "extraction_overrides": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } }
+          }
+        },
+        "response": { "$ref": "#/$defs/ResponseSpec" },
+        "unavailable": { "type": "array", "items": { "type": "string" } },
+        "ask_tools": { "type": "array", "items": { "anyOf": [{ "type": "string" }, { "type": "object", "required": ["tool"], "properties": { "tool": { "type": "string" }, "questions": { "type": "string" }, "text": { "type": "string" }, "options": { "type": "string" }, "label": { "type": "string" }, "id": { "type": "string" } }, "additionalProperties": false }] }, "description": "Tool names whose PreToolUse input carries user questions to lift into a normalized Question prompt (e.g. omp ask, AskUserQuestion)" },
+        "ignore_cwd_patterns": { "type": "array", "items": { "type": "string" }, "description": "Patterns in cwd candidate paths that should be rejected (e.g. '.gemini') and resolved via ancestor or git worktree search" },
+        "notes": { "$ref": "#/$defs/Notes" }
+      }
+    },
+    "EventSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lifecycle", "capability"],
+      "properties": {
+        "lifecycle": { "$ref": "#/$defs/LifecycleRef" },
+        "capability": { "$ref": "#/$defs/Capability" },
+        "install": { "type": "boolean", "default": true },
+        "entry_shape": { "type": "string", "enum": ["flat", "matcher_group", "named", "command"] },
+        "demote_when_subagent": { "type": "boolean", "default": false },
+        "question_prompt": { "type": "string", "enum": ["question", "permission", "none"] },
+        "demote_when": {
+          "type": "object",
+          "additionalProperties": { "type": ["boolean", "string", "number"] },
+          "description": "Stop-lifecycle events only: event demotes to TurnEnd (derived status stays Running) when every listed payload key equals its value, e.g. {\"fullyIdle\": false}"
+        },
+        "verdicts": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["allow", "deny", "ask"] },
+          "description": "Per-event verdicts the host honors; absent = all supported; ask disallowed -> deny fallback"
+        },
+        "question_payload_heuristic": {
+          "type": "boolean",
+          "default": false,
+          "description": "Inspect PreToolUse payload for embedded question structures or confirmation flows"
+        }
+      }
+    },
+    "Capability": {
+      "type": "string",
+      "enum": ["gate", "observe", "continue"]
+    },
+    "LifecycleRef": {
+      "type": "string",
+      "enum": [
+        "SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+        "PostToolUseFailure", "PermissionRequest", "Notification", "SubagentStart", "SubagentStop",
+        "TurnStart", "TurnEnd", "Stop",
+        "PreCompact", "PostCompact", "Interrupt", "PostToolBatch", "PreLLMCall", "PostLLMCall", "StopFailure", "ToolUseStart",
+        "sessionstart", "sessionend", "userpromptsubmit", "pretooluse", "posttooluse",
+        "posttoolusefailure", "permissionrequest", "notification", "subagentstart", "subagentstop",
+        "turnstart", "turnend", "stop",
+        "precompact", "postcompact", "interrupt", "posttoolbatch", "prellmcall", "postllmcall", "stopfailure", "toolusestart",
+        "session_start", "session_end", "user_prompt_submit", "pre_tool_use", "post_tool_use",
+        "post_tool_use_failure", "permission_request", "subagent_start", "subagent_stop",
+        "turn_start", "turn_end", "pre_compact", "post_compact", "post_tool_batch", "pre_llm_call", "post_llm_call", "stop_failure", "tool_use_start"
+      ]
+    },
+    "ExtractionSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "parent_session_id": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "prompt": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "tool_name": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "tool_input": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "tool_output": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "error": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "success": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "cwd": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "summary": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "flavor_text": { "type": "array", "items": { "type": "string" }, "description": "Ordered raw payload paths for optional display text, bounded to 300 Unicode characters. Also supported in extraction_overrides per hook." }
+      }
+    },
+    "ExtractionSource": {
+      "anyOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transcript"],
+          "properties": {
+            "transcript": { "$ref": "#/$defs/TranscriptExtract" }
+          }
+        }
+      ]
+    },
+    "TranscriptExtract": {
+      "type": "string",
+      "enum": ["first_prompt", "first_timestamp"]
+    },
+    "ResponseSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "$ref": "#/$defs/ResponseMode" },
+        "gate": { "$ref": "#/$defs/GateResponse" },
+        "observe": {},
+        "continue": { "$ref": "#/$defs/ContinueResponse" },
+        "response_overrides": {
+          "type": "object",
+          "description": "Per-lifecycle gate response overrides keyed by lifecycle name (e.g. UserPromptSubmit)",
+          "additionalProperties": { "$ref": "#/$defs/GateResponse" }
+        },
+        "empty_on_undecided": { "type": "boolean" },
+        "allow_requires_tool_input": { "type": "boolean", "default": false, "description": "For allow responses, {updated_input} falls back to the original PreToolUse input when no structured question answers were supplied." },
+        "question_answer_strategy": {
+          "type": "string",
+          "enum": ["deny_block_reason"],
+          "description": "Custom strategy for delivering structured question answers back to the agent harness (e.g. deny_block_reason for Codex)"
+        }
+      }
+    },
+    "ResponseMode": {
+      "type": "string",
+      "enum": ["json", "exit2"]
+    },
+    "GateResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow", "deny"],
+      "properties": {
+        "allow": {},
+        "deny": {},
+        "ask": {"description": "Escalation template; absent means deny fallback."}
+      }
+    },
+    "ContinueResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["continue", "stop"],
+      "properties": {
+        "continue": {},
+        "stop": {}
+      }
+    },
+    "Notes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "post_install": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "EntryShape": {
+      "type": "string",
+      "enum": ["flat", "matcher_group", "named"]
+    },
+    "EditMode": {
+      "type": "string",
+      "enum": ["append_unique", "set", "remove"]
+    },
+    "AssetSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string" },
+        "embedded": { "type": "string" },
+        "template": {}
+      }
+    },
+    "InstallOp": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "paths", "root", "entry_shape", "entry"],
+          "properties": {
+            "op": { "const": "json_hooks" },
+            "paths": { "type": "array", "items": { "type": "string" } },
+            "create": { "type": "boolean" },
+            "root": { "type": "string" },
+            "entry_shape": { "$ref": "#/$defs/EntryShape" },
+            "name": { "type": "string" },
+            "fixed_fields": { "type": "object" },
+            "entry": {},
+            "dedupe": { "type": "string" },
+            "entry_overrides": { "type": "object" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "paths", "root", "entry_shape", "entry"],
+          "properties": {
+            "op": { "const": "toml_hooks" },
+            "paths": { "type": "array", "items": { "type": "string" } },
+            "create": { "type": "boolean" },
+            "root": { "type": "string" },
+            "entry_shape": { "$ref": "#/$defs/EntryShape" },
+            "entry": {}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "paths", "list_key", "entry"],
+          "properties": {
+            "op": { "const": "toml_list_hooks" },
+            "paths": { "type": "array", "items": { "type": "string" } },
+            "create": { "type": "boolean" },
+            "list_key": { "type": "string" },
+            "entry": {},
+            "entry_overrides": { "type": "object" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "stage_dir", "assets"],
+          "properties": {
+            "op": { "const": "stage_assets" },
+            "stage_dir": { "type": "string" },
+            "assets": { "type": "array", "items": { "$ref": "#/$defs/AssetSpec" } },
+            "managed_marker": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "command"],
+          "properties": {
+            "op": { "const": "run_command" },
+            "command": { "type": "string" },
+            "optional": { "type": "boolean" },
+            "undo": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "paths", "pointer", "mode"],
+          "properties": {
+            "op": { "const": "json_edit" },
+            "paths": { "type": "array", "items": { "type": "string" } },
+            "pointer": { "type": "string" },
+            "mode": { "$ref": "#/$defs/EditMode" },
+            "value": {}
+          }
+        }
+      ]
+    }
+  }
+}

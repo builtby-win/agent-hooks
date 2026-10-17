@@ -1,0 +1,444 @@
+{
+  "aliases": [
+    "muse-code",
+    "muse-cli"
+  ],
+  "default_version": "v1",
+  "detect": {
+    "event_names": [
+      "Interrupt",
+      "Notification",
+      "PermissionRequest",
+      "PostCompact",
+      "PostLLMCall",
+      "PostToolBatch",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "PreCompact",
+      "PreLLMCall",
+      "PreToolUse",
+      "SessionEnd",
+      "SessionFork",
+      "SessionStart",
+      "Stop",
+      "StopFailure",
+      "SubagentStart",
+      "SubagentStop",
+      "ToolUseStart",
+      "UserPromptSubmit"
+    ],
+    "harness_hint": [
+      "muse",
+      "muse-code",
+      "muse-cli"
+    ],
+    "payload_keys_any": []
+  },
+  "display_name": "Muse",
+  "id": "muse",
+  "versions": {
+    "v1": {
+      "verified_against": "1.4.7",
+      "events": {
+        "Interrupt": {
+          "capability": "observe",
+          "install": true,
+          "lifecycle": "Interrupt"
+        },
+        "Notification": {
+          "capability": "observe",
+          "lifecycle": "Notification"
+        },
+        "PermissionRequest": {
+          "capability": "gate",
+          "lifecycle": "PermissionRequest",
+          "verdicts": [
+            "allow",
+            "deny"
+          ]
+        },
+        "PostCompact": {
+          "capability": "observe",
+          "lifecycle": "PostCompact"
+        },
+        "PostLLMCall": {
+          "capability": "observe",
+          "lifecycle": "PostLLMCall"
+        },
+        "PostToolBatch": {
+          "lifecycle": "PostToolBatch",
+          "capability": "gate",
+          "verdicts": [
+            "allow",
+            "deny"
+          ]
+        },
+        "PostToolUse": {
+          "capability": "observe",
+          "lifecycle": "PostToolUse"
+        },
+        "PostToolUseFailure": {
+          "capability": "observe",
+          "lifecycle": "PostToolUseFailure"
+        },
+        "PreCompact": {
+          "capability": "observe",
+          "lifecycle": "PreCompact"
+        },
+        "PreLLMCall": {
+          "capability": "observe",
+          "lifecycle": "PreLLMCall"
+        },
+        "PreToolUse": {
+          "capability": "gate",
+          "lifecycle": "PreToolUse",
+          "verdicts": [
+            "allow",
+            "deny"
+          ]
+        },
+        "SessionEnd": {
+          "capability": "observe",
+          "lifecycle": "SessionEnd"
+        },
+        "SessionFork": {
+          "lifecycle": "SessionStart",
+          "capability": "observe"
+        },
+        "SessionStart": {
+          "capability": "observe",
+          "lifecycle": "SessionStart"
+        },
+        "Stop": {
+          "capability": "continue",
+          "demote_when_subagent": true,
+          "lifecycle": "Stop"
+        },
+        "StopFailure": {
+          "capability": "observe",
+          "lifecycle": "StopFailure"
+        },
+        "SubagentStart": {
+          "capability": "observe",
+          "lifecycle": "SubagentStart"
+        },
+        "SubagentStop": {
+          "capability": "continue",
+          "lifecycle": "SubagentStop"
+        },
+        "ToolUseStart": {
+          "lifecycle": "ToolUseStart",
+          "capability": "observe"
+        },
+        "UserPromptSubmit": {
+          "capability": "gate",
+          "lifecycle": "UserPromptSubmit",
+          "verdicts": [
+            "allow",
+            "deny"
+          ]
+        }
+      },
+      "extraction": {
+        "cwd": [
+          "cwd"
+        ],
+        "error": [
+          "error_details",
+          "error",
+          "error_message"
+        ],
+        "parent_session_id": [
+          "parent_session_id",
+          "parentSessionId",
+          {
+            "session_link": {
+              "root": "~/.local/share/muse/sessions",
+              "child_from": "session_id",
+              "link_key": "child_session_id"
+            }
+          }
+        ],
+        "prompt": [
+          "prompt"
+        ],
+        "session_id": [
+          "session_id",
+          "sessionId"
+        ],
+        "success": [
+          "success"
+        ],
+        "summary": [
+          "last_assistant_message",
+          "reason",
+          "message"
+        ],
+        "tool_input": [
+          "tool_input"
+        ],
+        "tool_name": [
+          "tool_name",
+          "toolName"
+        ],
+        "tool_output": [
+          "tool_response",
+          "tool_output",
+          "toolOutput"
+        ]
+      },
+      "extraction_overrides": {
+        "PostLLMCall": {
+          "summary": [
+            "output_text_preview"
+          ],
+          "flavor_text": [
+            "output_text_preview"
+          ]
+        },
+        "PostToolUseFailure": {
+          "error": [
+            "error",
+            "error_message"
+          ],
+          "tool_name": [
+            "tool_name"
+          ],
+          "flavor_text": [
+            "error",
+            "error_message"
+          ]
+        },
+        "Stop": {
+          "summary": [
+            "last_assistant_message",
+            "summary",
+            "message",
+            "reason"
+          ],
+          "flavor_text": [
+            "last_assistant_message",
+            "summary",
+            "message"
+          ]
+        },
+        "StopFailure": {
+          "error": [
+            "error_details",
+            "error",
+            "error_message"
+          ],
+          "flavor_text": [
+            "error_details",
+            "error",
+            "error_message"
+          ]
+        },
+        "SubagentStart": {
+          "prompt": [
+            "subagent_id"
+          ],
+          "tool_name": [
+            "subagent_id"
+          ],
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "SubagentStop": {
+          "summary": [
+            "result",
+            "summary",
+            "message"
+          ],
+          "tool_name": [
+            "subagent_id"
+          ],
+          "flavor_text": [
+            "result",
+            "summary",
+            "message"
+          ]
+        },
+        "SessionFork": {
+          "session_id": [
+            "fork_session_id",
+            "session_id",
+            "sessionId"
+          ]
+        },
+        "Notification": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "PermissionRequest": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_response",
+            "tool_output",
+            "toolOutput"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "UserPromptSubmit": {
+          "flavor_text": [
+            "prompt"
+          ]
+        }
+      },
+      "install": [
+        {
+          "op": "json_hooks",
+          "paths": [
+            "~/.config/muse/settings.json"
+          ],
+          "create": true,
+          "root": "hooks.{event}",
+          "entry_shape": "matcher_group",
+          "entry": {
+            "type": "command",
+            "command": "agent-hooks hook muse --event {event}",
+            "timeout": 5
+          },
+          "dedupe": "command_subset",
+          "fixed_fields": {
+            "schema_version": 1
+          },
+          "entry_overrides": {
+            "Interrupt": {
+              "async": true
+            },
+            "ToolUseStart": {
+              "async": true
+            },
+            "PreToolUse": {
+              "timeout": 600
+            },
+            "PermissionRequest": {
+              "timeout": 600
+            },
+            "UserPromptSubmit": {
+              "timeout": 600
+            },
+            "PostToolBatch": {
+              "timeout": 600
+            }
+          }
+        },
+        {
+          "op": "json_hooks",
+          "paths": [
+            ".muse/hooks.json"
+          ],
+          "create": true,
+          "root": "hooks.{event}",
+          "entry_shape": "matcher_group",
+          "entry": {
+            "type": "command",
+            "command": "agent-hooks hook muse --event {event}",
+            "timeout": 5
+          },
+          "dedupe": "command_subset",
+          "entry_overrides": {
+            "Interrupt": {
+              "async": true
+            },
+            "ToolUseStart": {
+              "async": true
+            },
+            "PreToolUse": {
+              "timeout": 600
+            },
+            "PermissionRequest": {
+              "timeout": 600
+            },
+            "UserPromptSubmit": {
+              "timeout": 600
+            },
+            "PostToolBatch": {
+              "timeout": 600
+            }
+          }
+        }
+      ],
+      "notes": {
+        "post_install": [
+          "Project hooks (.muse/hooks.json) run only after you trust the project folder; user hooks need no separate trust step. A malformed project hooks file contributes no handlers (startup warns); a malformed user settings hooks block warns and runs without hooks.",
+          "Muse discovers and validates hooks at session startup: start a new session to reload. There is no per-hook trust command.",
+          "Interrupt and ToolUseStart install as async fire-and-forget observe hooks (synchronous cancellation hooks are not admitted).",
+          "PostToolBatch and StopFailure are staged schema values and remain production-dark in muse-bin-1.4.6 (binary strings); they are mapped per contract but may never fire until downstream runtime acceptance lands."
+        ]
+      },
+      "response": {
+        "continue": {
+          "continue": {
+            "decision": "block",
+            "reason": "{reason}"
+          },
+          "stop": {}
+        },
+        "empty_on_undecided": false,
+        "gate": {
+          "allow": {},
+          "deny": {
+            "decision": "block",
+            "reason": "{reason}"
+          }
+        },
+        "observe": {},
+        "response_overrides": {
+          "PermissionRequest": {
+            "allow": {
+              "hookSpecificOutput": {
+                "decision": {
+                  "behavior": "allow"
+                },
+                "hookEventName": "{event}"
+              }
+            },
+            "deny": {
+              "hookSpecificOutput": {
+                "decision": {
+                  "behavior": "deny",
+                  "message": "{reason}"
+                },
+                "hookEventName": "{event}"
+              }
+            }
+          },
+          "PreToolUse": {
+            "allow": {
+              "hookSpecificOutput": {
+                "hookEventName": "{event}",
+                "permissionDecision": "allow",
+                "updatedInput": "{updated_input}"
+              }
+            },
+            "deny": {
+              "hookSpecificOutput": {
+                "hookEventName": "{event}",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "{reason}"
+              }
+            }
+          }
+        },
+        "allow_requires_tool_input": true
+      },
+      "unavailable": [
+        "TurnEnd"
+      ]
+    }
+  }
+}

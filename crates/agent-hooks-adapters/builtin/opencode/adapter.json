@@ -1,0 +1,298 @@
+{
+  "id": "opencode",
+  "display_name": "OpenCode",
+  "aliases": [
+    "opencode-ai"
+  ],
+  "default_version": "v1",
+  "detect": {
+    "harness_hint": [
+      "opencode"
+    ],
+    "payload_keys_any": [
+      [
+        "sessionID"
+      ],
+      [
+        "callID"
+      ]
+    ],
+    "event_names": [
+      "session.created",
+      "session.deleted",
+      "session.idle",
+      "session.updated",
+      "tool.execute.before",
+      "tool.execute.after",
+      "permission.ask",
+      "chat.message",
+      "session.status",
+      "session.busy",
+      "session.title"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "stage_assets",
+          "stage_dir": "~/.config/opencode/plugins",
+          "assets": [
+            {
+              "path": "agent-hooks.ts",
+              "embedded": "index.ts"
+            }
+          ],
+          "managed_marker": "// managed by agent-hooks"
+        }
+      ],
+      "events": {
+        "session.created": {
+          "lifecycle": "SessionStart",
+          "capability": "observe"
+        },
+        "session.deleted": {
+          "lifecycle": "SessionEnd",
+          "capability": "observe"
+        },
+        "session.idle": {
+          "lifecycle": "Stop",
+          "capability": "observe"
+        },
+        "session.busy": {
+          "lifecycle": "TurnStart",
+          "capability": "observe"
+        },
+        "session.title": {
+          "lifecycle": "TurnEnd",
+          "capability": "observe"
+        },
+        "tool.execute.before": {
+          "lifecycle": "PreToolUse",
+          "capability": "gate"
+        },
+        "tool.execute.after": {
+          "lifecycle": "PostToolUse",
+          "capability": "observe"
+        },
+        "permission.ask": {
+          "lifecycle": "PermissionRequest",
+          "capability": "gate",
+          "verdicts": [
+            "allow",
+            "deny",
+            "ask"
+          ]
+        },
+        "chat.message": {
+          "lifecycle": "UserPromptSubmit",
+          "capability": "gate"
+        },
+        "question.asked": {
+          "lifecycle": "PermissionRequest",
+          "capability": "gate",
+          "verdicts": [
+            "allow",
+            "deny"
+          ]
+        },
+        "question.replied": {
+          "lifecycle": "Notification",
+          "capability": "observe"
+        },
+        "permission.asked": {
+          "lifecycle": "Notification",
+          "capability": "observe"
+        },
+        "permission.replied": {
+          "lifecycle": "Notification",
+          "capability": "observe"
+        }
+      },
+      "extraction_overrides": {
+        "session.idle": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "tool.execute.before": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "tool.execute.after": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result",
+            "content"
+          ]
+        },
+        "permission.ask": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "chat.message": {
+          "flavor_text": [
+            "parts",
+            "message",
+            "prompt"
+          ]
+        },
+        "question.asked": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "question.replied": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "permission.asked": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "permission.replied": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        }
+      },
+      "extraction": {
+        "cwd": ["cwd", "directory"],
+        "session_id": [
+          "sessionID",
+          "sessionId",
+          "session_id",
+          "conversation_id",
+          "conversationId",
+          "thread_id",
+          "threadId",
+          "info.id"
+        ],
+        "parent_session_id": [
+          "parent_session_id",
+          "parentSessionId",
+          "parentSessionID",
+          "parent_id",
+          "parentId",
+          "parentID",
+          "parent_session_hash",
+          "parentSessionHash",
+          "session.parent_id",
+          "session.parent_session_id",
+          "session.parentSessionId",
+          "session.parent_session_hash",
+          "properties.session.parent_id",
+          "properties.session.parent_session_id"
+        ],
+        "prompt": [
+          "prompt",
+          "user_prompt",
+          "userPrompt",
+          "message",
+          "parts",
+          "input",
+          "content"
+        ],
+        "tool_name": [
+          "tool_name",
+          "toolName",
+          "tool",
+          "name"
+        ],
+        "tool_input": [
+          "tool_input",
+          "toolInput",
+          "input",
+          "params",
+          "arguments",
+          "args"
+        ],
+        "tool_output": [
+          "tool_output",
+          "toolOutput",
+          "output",
+          "result",
+          "content"
+        ],
+        "error": [
+          "error",
+          "error_message"
+        ],
+        "success": [
+          "success"
+        ],
+        "summary": [
+          "summary",
+          "message",
+          "result"
+        ],
+        "session_title": [
+          "session_title",
+          "sessionTitle"
+        ]
+      },
+      "response": {
+        "mode": "json",
+        "gate": {
+          "allow": {
+            "decision": "allow"
+          },
+          "deny": {
+            "decision": "deny",
+            "reason": "{reason}"
+          }
+        },
+        "observe": {},
+        "response_overrides": {
+          "PermissionRequest": {
+            "allow": {
+              "decision": "allow",
+              "reply": "{reply}",
+              "answers": "{answer_groups}"
+            },
+            "deny": {
+              "decision": "deny",
+              "reply": "deny",
+              "reason": "{reason}"
+            }
+          },
+          "permission.ask": {
+            "allow": {
+              "decision": "allow",
+              "reply": "{reply}",
+              "answers": "{answer_groups}"
+            },
+            "deny": {
+              "decision": "deny",
+              "reply": "deny",
+              "reason": "{reason}"
+            },
+            "ask": {
+              "decision": "ask",
+              "reply": "ask",
+              "reason": "{reason}"
+            }
+          }
+        }
+      },
+      "unavailable": [
+        "PostToolUseFailure",
+        "TurnStart"
+      ]
+    }
+  }
+}

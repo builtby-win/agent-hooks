@@ -1,0 +1,134 @@
+{
+  "id": "jcode",
+  "display_name": "JCode",
+  "aliases": ["jcode-cli", "jcode_cli", "jcode"],
+  "default_version": "v1",
+  "detect": {
+    "harness_hint": ["jcode"],
+    "payload_keys_any": [["JCODE_HOOK_PAYLOAD"]],
+    "event_names": [
+      "session_start",
+      "turn_start",
+      "post_tool",
+      "turn_end",
+      "session_end",
+      "userPromptSubmit",
+      "preToolUse",
+      "postToolUse",
+      "stop"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "toml_hooks",
+          "paths": ["~/.jcode/config.toml"],
+          "create": true,
+          "root": "hooks.{event}",
+          "entry_shape": "command",
+          "entry": {
+            "type": "command",
+            "command": "agent-hooks hook jcode --event {event}",
+            "timeout": 30
+          }
+        }
+      ],
+      "events": {
+        "session_start": {"lifecycle": "SessionStart", "capability": "observe"},
+        "turn_start": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "post_tool": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "turn_end": {"lifecycle": "TurnEnd", "capability": "observe"},
+        "session_end": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "userPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate", "install": false},
+        "preToolUse": {"lifecycle": "PreToolUse", "capability": "gate", "install": false},
+        "postToolUse": {"lifecycle": "PostToolUse", "capability": "observe", "install": false},
+        "stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true, "install": false}
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID", "conversation_id", "conversationId", "thread_id", "threadId"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params"],
+        "tool_output": ["tool_output", "toolOutput", "output", "result"],
+        "error": ["error", "message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "result"],
+        "cwd": ["cwd"]
+      },
+      "extraction_overrides": {
+        "session_start": {
+          "tmux_pane_id": [
+            "client_tmux_pane"
+          ],
+          "tmux_session_name": [
+            "client_tmux_session"
+          ],
+          "tmux_window_index": [
+            "client_tmux_window_index"
+          ]
+        },
+        "turn_start": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "post_tool": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "userPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "preToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "postToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "stop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        }
+      },
+      "response": {
+        "mode": "json",
+        "gate": {
+          "allow": {"decision": "allow"},
+          "deny": {"decision": "deny", "reason": "{reason}"}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        }
+      },
+      "unavailable": ["PostToolUseFailure", "PermissionRequest", "Notification", "SubagentStart", "SubagentStop", "TurnStart"]
+    }
+  }
+}

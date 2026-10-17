@@ -1,0 +1,263 @@
+{
+  "id": "qwen-code",
+  "display_name": "Qwen Code",
+  "aliases": ["qwen", "qwen_code", "qwen-cli", "qwen_cli"],
+  "default_version": "v1",
+  "unverified": true,
+  "detect": {
+    "harness_hint": ["qwen", "qwen-code", "qwen-cli"],
+    "payload_keys_any": [["tool_use_id"], ["duration_ms"], ["is_interrupt"]],
+    "event_names": [
+      "SessionStart",
+      "SessionEnd",
+      "UserPromptSubmit",
+      "UserPromptExpansion",
+      "PreToolUse",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "PostToolBatch",
+      "PermissionRequest",
+      "Notification",
+      "SubagentStart",
+      "SubagentStop",
+      "PreCompact",
+      "PostCompact",
+      "Stop",
+      "StopFailure",
+      "TodoCreated",
+      "TodoCompleted"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "json_hooks",
+          "paths": ["~/.qwen/settings.json", ".qwen/settings.json"],
+          "create": true,
+          "root": "hooks.{event}",
+          "entry_shape": "matcher_group",
+          "entry": {
+            "type": "command",
+            "command": "agent-hooks hook qwen-code --event {event}",
+            "timeout": 30
+          },
+          "dedupe": "command_subset",
+          "entry_overrides": {
+            "PreToolUse": {"timeout": 300},
+            "PermissionRequest": {"timeout": 300},
+            "UserPromptSubmit": {"timeout": 60},
+            "SessionEnd": {"timeout": 5}
+          }
+        }
+      ],
+      "events": {
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "SessionEnd": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "SessionDelete": {"lifecycle": "SessionEnd", "capability": "observe", "install": false},
+        "UserPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate", "verdicts": ["allow", "deny"]},
+        "UserPromptExpansion": {"lifecycle": "UserPromptSubmit", "capability": "observe", "install": false},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate", "verdicts": ["allow", "deny", "ask"]},
+        "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "PostToolUseFailure": {"lifecycle": "PostToolUseFailure", "capability": "observe"},
+        "PostToolBatch": {"lifecycle": "PostToolBatch", "capability": "observe"},
+        "PermissionRequest": {"lifecycle": "PermissionRequest", "capability": "gate", "verdicts": ["allow", "deny"]},
+        "PermissionDenied": {"lifecycle": "Notification", "capability": "observe", "install": false},
+        "Notification": {"lifecycle": "Notification", "capability": "observe"},
+        "MessageDisplay": {"lifecycle": "Notification", "capability": "observe", "install": false},
+        "SubagentStart": {"lifecycle": "SubagentStart", "capability": "observe"},
+        "SubagentStop": {"lifecycle": "SubagentStop", "capability": "continue"},
+        "PreCompact": {"lifecycle": "PreCompact", "capability": "observe"},
+        "PostCompact": {"lifecycle": "PostCompact", "capability": "observe"},
+        "TodoCreated": {"lifecycle": "Notification", "capability": "observe"},
+        "TodoCompleted": {"lifecycle": "Notification", "capability": "observe"},
+        "InstructionsLoaded": {"lifecycle": "Notification", "capability": "observe", "install": false},
+        "Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true},
+        "StopFailure": {"lifecycle": "StopFailure", "capability": "observe"}
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parent_id", "parentId"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params", "arguments"],
+        "tool_output": ["tool_output", "toolOutput", "tool_response", "output", "result"],
+        "error": ["error", "tool_error", "failure", "message", "is_interrupt"],
+        "success": ["success"],
+        "summary": ["summary", "message", "reason", "result", "stop_reason"],
+        "cwd": ["cwd"]
+      },
+      "extraction_overrides": {
+        "Stop": {
+          "summary": [
+            "last_assistant_message",
+            "lastAssistantMessage",
+            "summary",
+            "message",
+            "reason",
+            "result",
+            "stop_reason"
+          ],
+          "flavor_text": [
+            "last_assistant_message",
+            "lastAssistantMessage",
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "Notification": {
+          "prompt": [
+            "message",
+            "title"
+          ],
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "UserPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "UserPromptExpansion": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "tool_response",
+            "output",
+            "result"
+          ]
+        },
+        "PostToolUseFailure": {
+          "flavor_text": [
+            "error",
+            "tool_error",
+            "failure",
+            "message"
+          ]
+        },
+        "PermissionRequest": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PermissionDenied": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "MessageDisplay": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "SubagentStart": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "SubagentStop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "TodoCreated": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "TodoCompleted": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "InstructionsLoaded": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "StopFailure": {
+          "flavor_text": [
+            "error",
+            "tool_error",
+            "failure",
+            "message"
+          ]
+        }
+      },
+      "response": {
+        "mode": "json",
+        "inject": {
+          "SessionStart": {"hookSpecificOutput": {"hookEventName": "{event}", "additionalContext": "{additional_context}"}},
+          "UserPromptSubmit": {"hookSpecificOutput": {"hookEventName": "{event}", "additionalContext": "{additional_context}"}}
+        },
+        "gate": {
+          "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "allow"}},
+          "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "deny", "permissionDecisionReason": "{reason?}"}},
+          "ask": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "ask", "permissionDecisionReason": "{reason?}"}}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        },
+        "response_overrides": {
+          "PreToolUse": {
+            "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "allow", "additionalContext": "{answers}"}},
+            "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "deny", "permissionDecisionReason": "{reason?}"}},
+            "ask": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "ask", "permissionDecisionReason": "{reason?}"}}
+          },
+          "PermissionRequest": {
+            "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "decision": {"behavior": "allow", "updatedInput": "{updated_input}", "updatedPermissions": "{updated_permissions}"}}},
+            "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "decision": {"behavior": "deny", "message": "{reason?}"}}}
+          },
+          "UserPromptSubmit": {
+            "allow": {},
+            "deny": {"decision": "block", "reason": "{reason}"}
+          }
+        }
+      },
+      "notes": {
+        "post_install": [
+          "Docs-only adapter (unverified): built from Qwen Code's published hooks reference; no live run has confirmed event emission, decision enforcement, or installer paths.",
+          "Command-hook timeouts of 1000 or more are read as milliseconds by Qwen; this adapter installs small second values only (30-300). Do not raise a gate timeout to 1000+.",
+          "PostToolBatch is mapped observe-only: its decision output format is not documented, so the adapter never blocks on it."
+        ]
+      },
+      "unavailable": ["TurnStart", "TurnEnd"]
+    }
+  }
+}

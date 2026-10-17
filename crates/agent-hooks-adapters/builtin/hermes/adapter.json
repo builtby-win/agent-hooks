@@ -1,0 +1,287 @@
+{
+  "id": "hermes",
+  "display_name": "Hermes",
+  "aliases": ["hermes-agent", "hermes_agent", "hermes"],
+  "default_version": "v1",
+  "detect": {
+    "harness_hint": ["hermes"],
+    "payload_keys_any": [],
+    "event_names": [
+      "SessionStart",
+      "SessionEnd",
+      "UserPromptSubmit",
+      "promptSubmit",
+      "beforeSubmitPrompt",
+      "PreToolUse",
+      "beforeTool",
+      "toolStart",
+      "PostToolUse",
+      "afterTool",
+      "toolEnd",
+      "PostToolUseFailure",
+      "PermissionRequest",
+      "Notification",
+      "SubagentStart",
+      "SubagentStop",
+      "Stop",
+      "turnEnd",
+      "agentStop",
+      "on_session_start",
+      "pre_llm_call",
+      "pre_tool_call",
+      "post_tool_call",
+      "pre_approval_request",
+      "post_approval_response",
+      "subagent_start",
+      "subagent_stop",
+      "on_session_end"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "stage_assets",
+          "stage_dir": "~/.hermes/plugins/agent-hooks",
+          "assets": [
+            { "path": "__init__.py", "embedded": "__init__.py" },
+            { "path": "plugin.yaml", "embedded": "plugin.yaml" }
+          ],
+          "managed_marker": "# managed by agent-hooks"
+        }
+      ],
+      "events": {
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "SessionEnd": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "UserPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "promptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "beforeSubmitPrompt": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "beforeTool": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "toolStart": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "afterTool": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "toolEnd": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "PostToolUseFailure": {"lifecycle": "PostToolUseFailure", "capability": "observe"},
+        "PermissionRequest": {"lifecycle": "PermissionRequest", "capability": "gate"},
+        "Notification": {"lifecycle": "Notification", "capability": "observe"},
+        "SubagentStart": {"lifecycle": "SubagentStart", "capability": "gate"},
+        "SubagentStop": {"lifecycle": "SubagentStop", "capability": "continue"},
+        "Stop": {"lifecycle": "Stop", "capability": "continue"},
+        "turnEnd": {"lifecycle": "Stop", "capability": "continue"},
+        "agentStop": {"lifecycle": "Stop", "capability": "continue"},
+        "on_session_start": {"lifecycle": "SessionStart", "capability": "observe"},
+        "pre_llm_call": {"lifecycle": "TurnStart", "capability": "observe"},
+        "pre_tool_call": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "post_tool_call": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "pre_approval_request": {"lifecycle": "PermissionRequest", "capability": "observe"},
+        "post_approval_response": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "subagent_start": {"lifecycle": "SubagentStart", "capability": "observe"},
+        "subagent_stop": {"lifecycle": "SubagentStop", "capability": "observe"},
+        "on_session_end": {"lifecycle": "Stop", "capability": "observe"}
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID", "conversation_id", "conversationId", "thread_id", "threadId"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params"],
+        "tool_output": ["tool_output", "toolOutput", "output", "result"],
+        "error": ["error", "message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "result"]
+      },
+      "extraction_overrides": {
+        "PermissionRequest": {
+          "prompt": [
+            "description",
+            "command"
+          ],
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "SubagentStart": {
+          "prompt": [
+            "agent_id",
+            "subagent_id",
+            "id"
+          ],
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "SubagentStop": {
+          "tool_name": [
+            "agent_id",
+            "subagent_id",
+            "id"
+          ],
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "UserPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "promptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "beforeSubmitPrompt": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "beforeTool": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "toolStart": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "afterTool": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "toolEnd": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "PostToolUseFailure": {
+          "flavor_text": [
+            "error",
+            "message"
+          ]
+        },
+        "Notification": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "Stop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "turnEnd": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "agentStop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "pre_tool_call": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "post_tool_call": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "pre_approval_request": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "post_approval_response": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "subagent_start": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "subagent_stop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "on_session_end": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        }
+      },
+      "response": {
+        "mode": "json",
+        "gate": {
+          "allow": {"decision": "allow"},
+          "deny": {"decision": "deny", "reason": "{reason}"}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        }
+      },
+      "unavailable": ["TurnEnd"],
+      "notes": {
+        "post_install": ["Restart hermes to load ~/.hermes/plugins/agent-hooks"]
+      }
+    }
+  }
+}

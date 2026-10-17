@@ -1,0 +1,257 @@
+{
+  "id": "copilot",
+  "display_name": "GitHub Copilot",
+  "aliases": ["github-copilot", "github_copilot", "copilot-cli", "copilot_cli", "copilot"],
+  "default_version": "v1",
+  "detect": {
+    "harness_hint": ["copilot", "github-copilot", "github"],
+    "payload_keys_any": [["session_id"]],
+    "event_names": [
+      "userPromptSubmitted",
+      "userPromptSubmit",
+      "promptSubmitted",
+      "agentStop",
+      "stop",
+      "turnEnd",
+      "turnStop",
+      "sessionIdle",
+      "sessionStart",
+      "session_start",
+      "sessionCreated",
+      "sessionEnd",
+      "session_end",
+      "sessionDeleted",
+      "preToolUse",
+      "toolStart",
+      "beforeTool",
+      "postToolUse",
+      "toolEnd",
+      "afterTool",
+      "permissionRequest",
+      "PermissionRequest",
+      "preCompact",
+      "notification"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "json_hooks",
+          "paths": [".github/hooks/hooks.json", "~/.copilot/hooks.json"],
+          "create": true,
+          "root": "hooks.{event}",
+          "entry_shape": "flat",
+          "entry": {"command": "agent-hooks hook copilot --event {event}", "timeout": 10},
+          "dedupe": "command_subset"
+        }
+      ],
+      "events": {
+        "userPromptSubmitted": {"lifecycle": "UserPromptSubmit", "capability": "gate"},
+        "userPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate", "install": false},
+        "promptSubmitted": {"lifecycle": "UserPromptSubmit", "capability": "gate", "install": false},
+        "agentStop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true},
+        "stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true, "install": false},
+        "turnEnd": {"lifecycle": "Stop", "capability": "continue", "install": false},
+        "turnStop": {"lifecycle": "Stop", "capability": "continue", "install": false},
+        "sessionIdle": {"lifecycle": "Stop", "capability": "continue", "install": false},
+        "sessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "session_start": {"lifecycle": "SessionStart", "capability": "observe", "install": false},
+        "sessionCreated": {"lifecycle": "SessionStart", "capability": "observe", "install": false},
+        "sessionEnd": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "session_end": {"lifecycle": "SessionEnd", "capability": "observe", "install": false},
+        "sessionDeleted": {"lifecycle": "SessionEnd", "capability": "observe", "install": false},
+        "preToolUse": {"lifecycle": "PreToolUse", "capability": "gate"},
+        "toolStart": {"lifecycle": "PreToolUse", "capability": "gate", "install": false},
+        "beforeTool": {"lifecycle": "PreToolUse", "capability": "gate", "install": false},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate", "install": false},
+        "permissionRequest": {"lifecycle": "PermissionRequest", "capability": "gate", "verdicts": ["allow", "deny"]},
+        "PermissionRequest": {"lifecycle": "PermissionRequest", "capability": "gate", "verdicts": ["allow", "deny"], "install": false},
+        "preCompact": {"lifecycle": "PreCompact", "capability": "observe", "install": false},
+        "postToolUse": {"lifecycle": "PostToolUse", "capability": "observe", "install": false},
+        "toolEnd": {"lifecycle": "PostToolUse", "capability": "observe", "install": false},
+        "afterTool": {"lifecycle": "PostToolUse", "capability": "observe", "install": false},
+        "notification": {"lifecycle": "Notification", "capability": "observe", "install": false}
+      },
+      "extraction_overrides": {
+        "userPromptSubmitted": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "userPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "promptSubmitted": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "agentStop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "text",
+            "content"
+          ]
+        },
+        "stop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "text",
+            "content"
+          ]
+        },
+        "turnEnd": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "text",
+            "content"
+          ]
+        },
+        "turnStop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "text",
+            "content"
+          ]
+        },
+        "sessionIdle": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "text",
+            "content"
+          ]
+        },
+        "preToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "toolStart": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "beforeTool": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "permissionRequest": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PermissionRequest": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "postToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "toolEnd": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "afterTool": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "output",
+            "result"
+          ]
+        },
+        "notification": {
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        }
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID", "conversation_id", "conversationId"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "toolArgs", "tool_args", "params", "arguments"],
+        "tool_output": ["tool_output", "toolOutput", "output", "result"],
+        "error": ["error", "error_message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "reason", "result", "text", "content"],
+        "cwd": ["cwd"]
+      },
+      "response": {
+        "mode": "json",
+        "gate": {
+          "allow": {"decision": "allow"},
+          "deny": {"decision": "deny", "reason": "{reason}"}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        },
+        "empty_on_undecided": false,
+        "response_overrides": {
+          "PreToolUse": {
+            "allow": {"permissionDecision": "allow"},
+            "deny": {"permissionDecision": "deny", "permissionDecisionReason": "{reason?}"}
+          },
+          "PermissionRequest": {
+            "allow": {"behavior": "allow"},
+            "deny": {"behavior": "deny", "message": "{reason?}"}
+          }
+        }
+      },
+      "notes": {
+        "post_install": [
+          "permissionRequest, preToolUse gating, and ask_user question lifting are docs-only (unverified): built from GitHub's hooks reference, not yet exercised against a live Copilot CLI.",
+          "preToolUse command hooks are fail-closed on error but fail-open on timeout; an allow on a sandbox-bypass request does not pre-approve the escape (only deny propagates), so the user is still prompted.",
+          "Under cloud agent there is no user: ask becomes deny and ask_user produces no useful result."
+        ]
+      },
+      "ask_tools": ["ask_user", "AskUserQuestion"],
+      "unavailable": ["PostToolUseFailure", "SubagentStart", "SubagentStop", "TurnStart", "TurnEnd"]
+    }
+  }
+}

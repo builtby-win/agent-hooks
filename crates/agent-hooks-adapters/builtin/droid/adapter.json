@@ -1,0 +1,156 @@
+{
+  "id": "droid",
+  "display_name": "Factory Droid",
+  "aliases": ["factory-droid", "factory_droid", "factory"],
+  "default_version": "v1",
+  "unverified": true,
+  "detect": {
+    "harness_hint": ["droid", "factory-droid", "factory"],
+    "payload_keys_any": [["task_name"], ["task_result"], ["has_images"], ["session_duration_ms"], ["tool_execution_count"]],
+    "event_names": [
+      "SessionStart",
+      "SessionEnd",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "Notification",
+      "SubagentStop",
+      "PreCompact",
+      "Stop"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "install": [
+        {
+          "op": "json_hooks",
+          "paths": ["~/.factory/hooks.json", ".factory/hooks.json"],
+          "create": true,
+          "root": "{event}",
+          "entry_shape": "matcher_group",
+          "entry": {
+            "type": "command",
+            "command": "agent-hooks hook droid --event {event}",
+            "timeout": 30
+          },
+          "dedupe": "command_subset",
+          "entry_overrides": {
+            "PreToolUse": {"timeout": 60}
+          }
+        }
+      ],
+      "events": {
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "SessionEnd": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "UserPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate", "verdicts": ["allow", "deny"]},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate", "verdicts": ["allow", "deny", "ask"]},
+        "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "Notification": {"lifecycle": "Notification", "capability": "observe"},
+        "SubagentStop": {"lifecycle": "SubagentStop", "capability": "continue"},
+        "PreCompact": {"lifecycle": "PreCompact", "capability": "observe"},
+        "Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true}
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parent_id", "parentId"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params", "arguments"],
+        "tool_output": ["tool_output", "toolOutput", "tool_response", "toolResponse", "output", "result"],
+        "error": ["error", "tool_error", "task_error", "taskError", "message"],
+        "success": ["success"],
+        "summary": ["summary", "message", "reason", "result", "task_result", "taskResult"],
+        "cwd": ["cwd"]
+      },
+      "extraction_overrides": {
+        "Notification": {
+          "prompt": [
+            "message",
+            "title"
+          ],
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "SubagentStop": {
+          "prompt": [
+            "task_name",
+            "taskName"
+          ],
+          "tool_name": [
+            "task_name",
+            "taskName"
+          ],
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "task_result",
+            "taskResult"
+          ]
+        },
+        "UserPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "tool_response",
+            "toolResponse",
+            "output",
+            "result"
+          ]
+        },
+        "Stop": {
+          "flavor_text": [
+            "summary",
+            "message",
+            "result",
+            "task_result",
+            "taskResult"
+          ]
+        }
+      },
+      "response": {
+        "mode": "json",
+        "gate": {
+          "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "allow"}},
+          "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "deny", "permissionDecisionReason": "{reason?}"}},
+          "ask": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "ask", "permissionDecisionReason": "{reason?}"}}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        },
+        "response_overrides": {
+          "UserPromptSubmit": {
+            "allow": {},
+            "deny": {"decision": "block", "reason": "{reason}"}
+          }
+        }
+      },
+      "notes": {
+        "post_install": [
+          "Docs-only adapter (unverified): built from Factory's published hooks reference; no live Droid run has confirmed event emission, decision enforcement, or installer paths.",
+          "Standalone hooks.json files are keyed directly by event name (installer root {event}), unlike Claude's hooks.{event} nesting. Droid also reads a hooks key inside settings.json; this adapter installs only the standalone files."
+        ]
+      },
+      "unavailable": ["PermissionRequest", "PostToolUseFailure", "SubagentStart", "TurnStart", "TurnEnd"]
+    }
+  }
+}

@@ -1,0 +1,206 @@
+{
+  "id": "claude-code",
+  "display_name": "Claude Code",
+  "aliases": ["claude", "anthropic", "claude_code"],
+  "default_version": "v1",
+  "detect": {
+    "harness_hint": ["claude", "claude-code", "anthropic"],
+    "payload_keys_any": [["transcript_path"], ["hook_event_name"]],
+    "event_names": [
+      "SessionStart",
+      "SessionEnd",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "PermissionRequest",
+      "Notification",
+      "SubagentStart",
+      "SubagentStop",
+      "Stop"
+    ]
+  },
+  "versions": {
+    "v1": {
+      "verified_against": "2.1.296",
+      "install": [
+        {
+          "op": "json_hooks",
+          "paths": ["~/.claude/settings.json", ".claude/settings.json"],
+          "create": true,
+          "root": "hooks.{event}",
+          "entry_shape": "matcher_group",
+          "entry": {
+            "type": "command",
+            "command": "agent-hooks hook claude --event {event}",
+            "timeout": 30
+          },
+          "dedupe": "command_subset",
+          "entry_overrides": {
+            "SessionEnd": {"timeout": 5},
+            "UserPromptSubmit": {"timeout": 30},
+            "PreToolUse": {"timeout": 600},
+            "PermissionRequest": {"timeout": 600}
+          }
+        }
+      ],
+      "events": {
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe"},
+        "SessionEnd": {"lifecycle": "SessionEnd", "capability": "observe"},
+        "UserPromptSubmit": {"lifecycle": "UserPromptSubmit", "capability": "gate", "verdicts": ["allow", "deny"]},
+        "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate", "verdicts": ["allow", "deny", "ask"], "question_prompt": "none"},
+        "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
+        "PostToolUseFailure": {"lifecycle": "PostToolUseFailure", "capability": "observe"},
+        "PermissionRequest": {"lifecycle": "PermissionRequest", "capability": "gate", "verdicts": ["allow", "deny"], "question_prompt": "permission"},
+        "Notification": {"lifecycle": "Notification", "capability": "observe"},
+        "SubagentStart": {"lifecycle": "SubagentStart", "capability": "observe"},
+        "SubagentStop": {"lifecycle": "SubagentStop", "capability": "continue"},
+        "Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when_subagent": true}
+      },
+      "extraction": {
+        "session_id": ["session_id", "sessionId", "sessionID", "conversation_id", "conversationId", "thread_id", "threadId"],
+        "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+        "tool_name": ["tool_name", "toolName", "tool", "name"],
+        "tool_input": ["tool_input", "toolInput", "input", "params", "arguments"],
+        "tool_output": ["tool_output", "toolOutput", "tool_response", "output", "result", "content", "output_preview", "duration_ms"],
+        "error": ["error", "tool_error", "failure", "message", "is_interrupt"],
+        "success": ["success"],
+        "summary": ["summary", "message", "reason", "result", "stop_reason"],
+        "cwd": ["cwd"]
+      },
+      "extraction_overrides": {
+        "Stop": {
+          "summary": [
+            "last_assistant_message",
+            "lastAssistantMessage",
+            "summary",
+            "message",
+            "reason",
+            "result",
+            "stop_reason"
+          ],
+          "flavor_text": [
+            "last_assistant_message",
+            "lastAssistantMessage",
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "Notification": {
+          "prompt": [
+            "message",
+            "title"
+          ],
+          "flavor_text": [
+            "message",
+            "text",
+            "content"
+          ]
+        },
+        "SubagentStart": {
+          "prompt": [
+            "agent_id",
+            "agentId",
+            "subagent_id",
+            "subagentId",
+            "id",
+            "agent_type"
+          ],
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "SubagentStop": {
+          "tool_name": [
+            "agent_id",
+            "agentId",
+            "subagent_id",
+            "subagentId",
+            "id",
+            "agent_type"
+          ],
+          "flavor_text": [
+            "summary",
+            "message",
+            "result"
+          ]
+        },
+        "UserPromptSubmit": {
+          "flavor_text": [
+            "prompt",
+            "user_prompt",
+            "userPrompt",
+            "message",
+            "content"
+          ]
+        },
+        "PreToolUse": {
+          "flavor_text": [
+            "description"
+          ]
+        },
+        "PostToolUse": {
+          "flavor_text": [
+            "tool_output",
+            "toolOutput",
+            "tool_response",
+            "output",
+            "result",
+            "content",
+            "output_preview",
+            "duration_ms"
+          ]
+        },
+        "PostToolUseFailure": {
+          "flavor_text": [
+            "error",
+            "tool_error",
+            "failure",
+            "message"
+          ]
+        },
+        "PermissionRequest": {
+          "flavor_text": [
+            "description"
+          ]
+        }
+      },
+      "response": {
+        "mode": "json",
+        "inject": {
+          "SessionStart": {"hookSpecificOutput": {"hookEventName": "{event}", "additionalContext": "{additional_context}"}},
+          "UserPromptSubmit": {"hookSpecificOutput": {"hookEventName": "{event}", "additionalContext": "{additional_context}"}}
+        },
+        "gate": {
+          "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "allow"}},
+          "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "deny", "permissionDecisionReason": "{reason?}"}},
+          "ask": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "ask", "permissionDecisionReason": "{reason?}"}}
+        },
+        "observe": {},
+        "continue": {
+          "continue": {"decision": "block", "reason": "{reason}"},
+          "stop": {}
+        },
+      "response_overrides": {
+          "PreToolUse": {
+            "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "allow", "additionalContext": "{answers}"}},
+            "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "deny", "permissionDecisionReason": "{reason?}"}},
+            "ask": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "ask", "permissionDecisionReason": "{reason?}"}}
+          },
+          "PermissionRequest": {
+            "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "decision": {"behavior": "allow", "updatedInput": "{updated_input}", "updatedPermissions": "{updated_permissions}"}}},
+            "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "decision": {"behavior": "deny", "message": "{reason?}"}}}
+          },
+          "UserPromptSubmit": {
+            "allow": {},
+            "deny": {"decision": "block", "reason": "{reason}"}
+          }
+        }
+      },
+      "unavailable": ["TurnStart", "TurnEnd"],
+      "ask_tools": ["AskUserQuestion"]
+    }
+  }
+}

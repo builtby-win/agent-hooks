@@ -21,6 +21,12 @@
   },
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["droid"],
+        "documentation": ["https://docs.factory.com/harness/hooks.md"],
+        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "resume": {"argv": ["droid", "--resume", "{session_ref}"], "session_ref": "id"}
+      },
       "install": [
         {
           "op": "json_hooks",

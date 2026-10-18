@@ -22,6 +22,12 @@
   },
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["claude"],
+        "documentation": ["https://code.claude.com/docs/en/cli-reference"],
+        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "resume": {"argv": ["claude", "--resume", "{session_ref}"], "session_ref": "id"}
+      },
       "verified_against": "2.1.296",
       "install": [
         {

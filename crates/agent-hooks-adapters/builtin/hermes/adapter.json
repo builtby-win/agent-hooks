@@ -39,6 +39,12 @@
   },
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["hermes"],
+        "documentation": ["https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks"],
+        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "resume": {"argv": ["hermes", "--resume", "{session_ref}"], "session_ref": "id"}
+      },
       "install": [
         {
           "op": "stage_assets",

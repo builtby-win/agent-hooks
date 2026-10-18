@@ -31,6 +31,12 @@
   },
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["cursor-agent", "cursor-agent.cmd"],
+        "documentation": ["https://docs.cursor.com/cli/reference"],
+        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "resume": {"argv": ["cursor-agent", "--resume", "{session_ref}"], "session_ref": "id"}
+      },
       "install": [
         {
           "op": "json_hooks",

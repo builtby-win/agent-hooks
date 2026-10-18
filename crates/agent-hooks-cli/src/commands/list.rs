@@ -45,6 +45,16 @@ pub fn run(args: ListAdaptersArgs) -> anyhow::Result<()> {
                     "default_version": m.default_version,
                     "unverified": m.unverified,
                     "verified_against": vs.and_then(|v| v.verified_against.clone()),
+                    "agent_cli": vs.and_then(|v| v.agent_cli.clone()),
+                    "resume_status": if vs
+                        .and_then(|v| v.agent_cli.as_ref())
+                        .and_then(|agent_cli| agent_cli.resume.as_ref())
+                        .is_some()
+                    {
+                        "supported"
+                    } else {
+                        "unknown"
+                    },
                     "config_paths": install_paths(m),
                     "events": vs.map(|v| v.events.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
                     "unavailable": vs.map(|v| v.unavailable.clone()).unwrap_or_default(),

@@ -679,6 +679,38 @@ impl PartialEq<str> for AskToolSpec {
 }
 
 // ---------------------------------------------------------------------------
+// Agent CLI metadata
+// ---------------------------------------------------------------------------
+
+/// Installed agent CLI details and safe, tokenized command recipes for consumers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentCliSpec {
+    pub executables: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documentation: Vec<String>,
+    pub recipe_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<ResumeCommandSpec>,
+}
+
+/// A resume argv template. `{session_ref}` is substituted as one argv value,
+/// never as shell syntax.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeCommandSpec {
+    pub argv: Vec<String>,
+    pub session_ref: SessionRefKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRefKind {
+    Id,
+    IdOrPath,
+}
+
+// ---------------------------------------------------------------------------
 // VersionSpec
 // ---------------------------------------------------------------------------
 
@@ -720,6 +752,10 @@ pub struct VersionSpec {
     /// the generated README table and `list-adapters --json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_against: Option<String>,
+    /// Agent CLI launch metadata. This is versioned with the adapter behavior,
+    /// but its command recipes are informational until a consumer executes them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_cli: Option<AgentCliSpec>,
 }
 
 /// One `ignore_when` rule, matched against every object nested anywhere in
@@ -842,6 +878,37 @@ impl AdapterManifest {
     /// Semantic validation of manifest structure.
     pub fn validate(&self) -> Result<(), AdapterError> {
         for (ver_name, vs) in &self.versions {
+            if let Some(agent_cli) = &vs.agent_cli {
+                if agent_cli.executables.is_empty()
+                    || agent_cli.executables.iter().any(String::is_empty)
+                    || agent_cli.recipe_source.is_empty()
+                    || agent_cli.documentation.iter().any(String::is_empty)
+                {
+                    return Err(AdapterError::InvalidConfig(format!(
+                        "adapter '{}' version '{}' has incomplete agent_cli metadata",
+                        self.id, ver_name
+                    )));
+                }
+                if let Some(resume) = &agent_cli.resume {
+                    let Some(executable) = resume.argv.first() else {
+                        return Err(AdapterError::InvalidConfig(format!(
+                            "adapter '{}' version '{}' resume argv is empty",
+                            self.id, ver_name
+                        )));
+                    };
+                    let placeholder_count = resume
+                        .argv
+                        .iter()
+                        .map(|arg| arg.matches("{session_ref}").count())
+                        .sum::<usize>();
+                    if !agent_cli.executables.contains(executable) || placeholder_count != 1 {
+                        return Err(AdapterError::InvalidConfig(format!(
+                            "adapter '{}' version '{}' resume argv must start with a configured executable and contain exactly one {{session_ref}}",
+                            self.id, ver_name
+                        )));
+                    }
+                }
+            }
             for (ev_name, ev_spec) in &vs.events {
                 if ev_spec.capability == Capability::Gate && ev_spec.verdicts.as_ref().map(|v| v.is_empty()).unwrap_or(false) {
                     tracing::warn!(
@@ -1119,7 +1186,7 @@ impl AdapterManifest {
     /// `events` / `extraction_overrides` merge per key (`L` wins);
     /// `extraction` merges per field (`L` replaces iff non-empty, `summary`
     /// iff `Some`); `install` / `unavailable` / `ask_tools` take `L` iff
-    /// non-empty; `notes` takes `L` iff `Some`; `response` merges per field.
+    /// non-empty; `notes` and `agent_cli` take `L` iff `Some`; `response` merges per field.
     fn merge_version(base: &VersionSpec, local: &VersionSpec) -> VersionSpec {
         let mut events = base.events.clone();
         for (key, spec) in &local.events {
@@ -1160,6 +1227,7 @@ impl AdapterManifest {
                 .verified_against
                 .clone()
                 .or_else(|| base.verified_against.clone()),
+            agent_cli: local.agent_cli.clone().or_else(|| base.agent_cli.clone()),
             ignore_when: if local.ignore_when.is_empty() {
                 base.ignore_when.clone()
             } else {

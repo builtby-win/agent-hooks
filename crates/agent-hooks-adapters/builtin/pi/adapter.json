@@ -29,6 +29,12 @@
   },
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["pi"],
+        "documentation": ["https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#cli-usage"],
+        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "resume": {"argv": ["pi", "--session", "{session_ref}"], "session_ref": "id_or_path"}
+      },
       "install": [
         {
           "op": "stage_assets",

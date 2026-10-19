@@ -41,6 +41,7 @@
       "additionalProperties": false,
       "properties": {
         "verified_against": { "type": "string", "description": "Harness version this spec was last confirmed against a live run (e.g. \"1.4.6\"). Informational only." },
+        "agent_cli": { "$ref": "#/$defs/AgentCliSpec" },
         "install": { "type": "array", "items": { "$ref": "#/$defs/InstallOp" } },
         "events": {
           "type": "object",
@@ -59,6 +60,36 @@
         "ask_tools": { "type": "array", "items": { "anyOf": [{ "type": "string" }, { "type": "object", "required": ["tool"], "properties": { "tool": { "type": "string" }, "questions": { "type": "string" }, "text": { "type": "string" }, "options": { "type": "string" }, "label": { "type": "string" }, "id": { "type": "string" } }, "additionalProperties": false }] }, "description": "Tool names whose PreToolUse input carries user questions to lift into a normalized Question prompt (e.g. omp ask, AskUserQuestion)" },
         "ignore_cwd_patterns": { "type": "array", "items": { "type": "string" }, "description": "Patterns in cwd candidate paths that should be rejected (e.g. '.gemini') and resolved via ancestor or git worktree search" },
         "notes": { "$ref": "#/$defs/Notes" }
+      }
+    },
+    "AgentCliSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executables", "recipe_source"],
+      "properties": {
+        "executables": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "documentation": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "recipe_source": { "type": "string", "minLength": 1 },
+        "resume": { "$ref": "#/$defs/ResumeCommandSpec" },
+        "start": { "$ref": "#/$defs/PromptCommandSpec" },
+        "exec": { "$ref": "#/$defs/PromptCommandSpec" }
+      }
+    },
+    "PromptCommandSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv"],
+      "properties": {
+        "argv": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "ResumeCommandSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv", "session_ref"],
+      "properties": {
+        "argv": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } },
+        "session_ref": { "type": "string", "enum": ["id", "id_or_path"] }
       }
     },
     "EventSpec": {

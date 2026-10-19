@@ -666,6 +666,28 @@ Source of truth: `schemas/adapter-manifest.v1.json`. Manifests load with `serde(
 
 Top level: `id`, `display_name`, `aliases`, `default_version`, `extends?`, `min_agent_hooks?`, `unverified?`, `detect?`, `versions: {v1: {...}}`. Every builtin ships one version (`v1`). Add a version (`v2`) when the harness changes its contract (renamed events, new config path); the installer resolves `--adapter-version` or `default_version`, and old binaries keep working against the old version. `unverified: true` marks a docs-only adapter — built from the published hook contract but never run against the live CLI. It surfaces in `list-adapters` / `status` output and is sticky through `extends`; clear it only after live fixtures confirm the contract. Set `verified_against` (on the version spec, e.g. `"1.4.6"`) to the harness release you last checked live; it is informational and feeds the Supported Harnesses table, which `scripts/gen-adapter-table.py` regenerates (CI fails if it is stale).
 
+### `agent_cli`: versioned installed-agent commands
+
+A version may include optional `agent_cli` metadata for consumers that launch an agent: executable candidates, documentation URLs, the source of each seeded recipe, and tokenized `resume`, `start`, and `exec` argv. `{session_ref}` is one argument placeholder; `session_ref` identifies whether the reference is an ID or an ID/path. Consumers should resolve an executable and spawn argv directly, never interpolate the reference into a shell string. Recipes seeded from another project are implementation evidence, not claims of official support; `documentation` links identify the upstream docs available for the agent. `list-adapters --json` includes this metadata and a `resume_status` for the default version: `supported` means a recipe exists, while `unknown` means no recipe is currently recorded (not that the agent is known to lack resume support).
+
+```json
+"agent_cli": {
+  "executables": ["claude"],
+  "documentation": ["https://code.claude.com/docs/en/cli-reference"],
+  "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+  "resume": {
+    "argv": ["claude", "--resume", "{session_ref}"],
+    "session_ref": "id"
+  },
+  "start": {"argv": ["claude", "{prompt}"]},
+  "exec": {"argv": ["claude", "-p", "{prompt}"]}
+}
+```
+
+- `start` launches the interactive TUI with an initial prompt (`claude "<prompt>"`, `codex "<prompt>"`).
+- `exec` is the non-interactive one-shot form for scripts and CI (`claude -p "<prompt>"`, `codex exec "<prompt>"`).
+- `{prompt}` is one argv value, exactly once per recipe, same rules as `{session_ref}`. Absent `start`/`exec` means no recipe is recorded, not that the agent lacks the mode. Only Claude Code and Codex are seeded so far; the herdr source covers resume only.
+
 ### `events`: host event → lifecycle + capability
 
 ```json

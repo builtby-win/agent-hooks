@@ -30,6 +30,12 @@
   },
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["qwen"],
+        "documentation": ["https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/"],
+        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "resume": {"argv": ["qwen", "--resume", "{session_ref}"], "session_ref": "id"}
+      },
       "install": [
         {
           "op": "json_hooks",

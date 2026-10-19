@@ -80,14 +80,14 @@ uses `{hookSpecificOutput: {decision: {behavior: allow|deny, message}}}`;
 and trusts its exact hash in `/hooks`. The installer cannot silently register hooks —
 it must print follow-up instructions. `--dangerously-bypass-hook-trust` exists for CI.
 
-**Antigravity** — five events only: `PreToolUse`, `PostToolUse`, `PreInvocation`,
-`PostInvocation`, `Stop`. **No session events at all** — the daemon's lazy
-registration (upsert on first PreInvocation/PreToolUse keyed off `conversationId`)
-remains the registration path. Named-bundle config: each top-level key is a hook
-group with its own `enabled` flag. camelCase payload (`toolCall.{name,args}`,
-`workspacePaths`, `transcriptPath`). Response vocabulary differs per event, and
-observation events reject any field: stdout must be `{}` (protojson strictness —
-currently special-cased in `daemon.rs`).
+**Antigravity** — `SessionStart`, `PreToolUse`, `PostToolUse`, `PreInvocation`,
+`PostInvocation`, `Stop`. `SessionStart` marks the conversation start;
+`PreInvocation`/`PostInvocation` bracket model calls; `PreInvocation` is a user
+prompt submission only when `invocationNum` is zero. `SessionEnd` is
+unavailable. Named-bundle config: each top-level key is a hook group with its
+own `enabled` flag. camelCase payload (`toolCall.{name,args}`,
+`workspacePaths`, `transcriptPath`). Observation events require `{}` output
+(protojson strictness — special-cased in `daemon.rs`).
 
 **Pi / Oh My Pi** — no hook config surface at all. Extensions are TypeScript modules
 auto-discovered from `~/.pi/agent/extensions/` (or omp: `~/.omp/plugins`, registered
@@ -165,11 +165,11 @@ Two additions, both derived from the research:
    | Capability | Meaning | Examples |
    |---|---|---|
    | `gate` | can block/allow before the action | `PreToolUse`, `UserPromptSubmit`, `PermissionRequest`, `beforeShellExecution`, `beforeReadFile` |
-   | `observe` | fire-and-forget; response is discardable or must be empty | `PostToolUse`, `sessionEnd`, `preCompact`, Antigravity `Pre/PostInvocation` |
+   | `observe` | fire-and-forget; response is discardable or must be empty | `PostToolUse`, `sessionEnd`, `preCompact`, Antigravity `SessionStart` and `PostInvocation`; `PreInvocation` maps to `UserPromptSubmit` only when `invocationNum` is zero |
    | `continue` | can force the agent to keep going | `Stop`, `SubagentStop` (all harnesses that support it) |
 
 2. **Availability.** A manifest declares which lifecycle events the harness *cannot*
-   emit (Antigravity: no `SessionStart`/`SessionEnd`). `agent-hooks status` and docs
+   emit (Antigravity: no `SessionEnd`; Cursor: no `PermissionRequest`). `agent-hooks status` and docs
    render this truthfully instead of assuming all harnesses are equal.
 
 ---

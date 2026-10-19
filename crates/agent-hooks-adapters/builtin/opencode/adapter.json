@@ -36,8 +36,12 @@
       "agent_cli": {
         "executables": ["opencode"],
         "documentation": ["https://opencode.ai/docs/cli/"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
-        "resume": {"argv": ["opencode", "--session", "{session_ref}"], "session_ref": "id"}
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start, exec, models, model_args: opencode --help; opencode run --help; opencode models --help (CLI help, checked against installed versions)",
+        "resume": {"argv": ["opencode", "--session", "{session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["opencode", "--prompt", "{prompt}"], "model_unsupported": true},
+        "exec": {"argv": ["opencode", "run", "{prompt}"]},
+        "models": {"argv": ["opencode", "models"]},
+        "model_args": ["--model", "{model}"]
       },
       "install": [
         {

@@ -6,15 +6,20 @@
   "detect": {
     "harness_hint": ["antigravity"],
     "payload_keys_any": [["conversationId", "workspacePaths"], ["toolCall"]],
-    "event_names": ["PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"]
+    "event_names": ["SessionStart", "PreInvocation", "PostInvocation", "PreToolUse", "PostToolUse", "Stop"]
   },
   "versions": {
     "v1": {
       "agent_cli": {
         "executables": ["agy"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
-        "resume": {"argv": ["agy", "--conversation", "{session_ref}"], "session_ref": "id"}
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start, exec, models, model_args: agy --help; agy models (CLI help, checked against installed versions)",
+        "resume": {"argv": ["agy", "--conversation", "{session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["agy", "--prompt-interactive", "{prompt}"]},
+        "exec": {"argv": ["agy", "--print", "{prompt}"]},
+        "models": {"argv": ["agy", "models"]},
+        "model_args": ["--model", "{model}"]
       },
+      "verified_against": "1.4.2",
       "install": [
         {
           "op": "json_hooks",
@@ -32,8 +37,9 @@
         }
       ],
       "events": {
-        "PreInvocation": {"lifecycle": "UserPromptSubmit", "capability": "observe", "entry_shape": "flat"},
-        "PostInvocation": {"lifecycle": "TurnStart", "capability": "observe", "entry_shape": "flat"},
+        "SessionStart": {"lifecycle": "SessionStart", "capability": "observe", "entry_shape": "flat"},
+        "PreInvocation": {"lifecycle": "PreLLMCall", "capability": "observe", "entry_shape": "flat"},
+        "PostInvocation": {"lifecycle": "PostLLMCall", "capability": "observe", "entry_shape": "flat"},
         "PreToolUse": {"lifecycle": "PreToolUse", "capability": "gate", "verdicts": ["allow", "deny", "ask"]},
         "PostToolUse": {"lifecycle": "PostToolUse", "capability": "observe"},
         "Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when": {"fullyIdle": false}, "entry_shape": "flat"}
@@ -75,7 +81,7 @@
         "session_id": ["conversationId", "conversation_id", "sessionId", "session_id"],
         "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
         "cwd": ["workspacePaths", "toolCall.args.Cwd", "cwd", "workspace_path"],
-        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content", {"transcript": "first_prompt"}],
+        "prompt": ["prompt", "user_prompt", "userPrompt", "message", "input", "content", {"transcript": "latest_prompt"}],
         "tool_name": ["toolCall.name", "tool_name"],
         "tool_input": ["toolCall.args", "tool_input"],
         "tool_output": ["tool_output", "toolOutput", "output", "result", "content"],
@@ -98,7 +104,7 @@
         }
       },
       "ignore_cwd_patterns": [".gemini"],
-      "unavailable": ["SessionStart", "SessionEnd", "PermissionRequest", "Notification", "SubagentStart", "SubagentStop"]
+      "unavailable": ["SessionEnd", "PermissionRequest", "Notification", "SubagentStart", "SubagentStop"]
     }
   }
 }

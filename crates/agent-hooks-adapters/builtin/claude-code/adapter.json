@@ -25,10 +25,12 @@
       "agent_cli": {
         "executables": ["claude"],
         "documentation": ["https://code.claude.com/docs/en/cli-reference"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start, exec, model_args, model_aliases: claude --help; claude -p /model (CLI help, checked against installed versions)",
         "resume": {"argv": ["claude", "--resume", "{session_ref}"], "session_ref": "id"},
         "start": {"argv": ["claude", "{prompt}"]},
-        "exec": {"argv": ["claude", "-p", "{prompt}"]}
+        "exec": {"argv": ["claude", "-p", "{prompt}"]},
+        "model_aliases": ["sonnet", "opus", "haiku", "fable", "best", "sonnet[1m]", "opus[1m]", "fable[1m]", "opusplan", "default"],
+        "model_args": ["--model", "{model}"]
       },
       "verified_against": "2.1.296",
       "install": [

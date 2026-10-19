@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Mirrors `AdapterRegistry::get_versioned` matching: exact id/alias first,
 /// then lenient substring (guarded against short-hint false positives).
-fn find_manifest(harness: &str) -> Option<AdapterManifest> {
+pub(crate) fn find_manifest(harness: &str) -> Option<AdapterManifest> {
     let norm = normalize_hint(harness);
     if norm.is_empty() {
         return None;
@@ -2803,7 +2803,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
         );
     }
 
-    /// Antigravity's named bundle: lifecycle events (PreInvocation,
+    /// Antigravity's named bundle: lifecycle events (SessionStart, PreInvocation,
     /// PostInvocation, Stop) must be flat command objects — its parser drops
     /// the whole file when they are matcher-wrapped — while tool events keep
     /// matcher groups.
@@ -2862,7 +2862,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
             true,
         )
         .expect("install");
-        assert_eq!(added, 5);
+        assert_eq!(added, 6);
         assert!(touched);
 
         let doc: serde_json::Value =
@@ -2870,7 +2870,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
         let bundle = &doc["agent-hooks"];
         assert_eq!(bundle["enabled"], serde_json::json!(true));
 
-        for ev in ["PreInvocation", "PostInvocation", "Stop"] {
+        for ev in ["SessionStart", "PreInvocation", "PostInvocation", "Stop"] {
             let arr = bundle[ev]
                 .as_array()
                 .unwrap_or_else(|| panic!("{ev} array"));
@@ -2951,6 +2951,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
             |ev: &str| serde_json::json!({"type": "command", "command": ours(ev), "timeout": 30});
         let stale = serde_json::json!({
             "agent-hooks": {
+                "SessionStart": [{"matcher": "*", "hooks": [cmd_entry("SessionStart")]}],
                 "enabled": true,
                 "PreInvocation": [{"matcher": "*", "hooks": [cmd_entry("PreInvocation")]}],
                 "PostInvocation": [{"matcher": "*", "hooks": [cmd_entry("PostInvocation")]}],
@@ -3009,15 +3010,15 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
             )
         };
 
-        // PreToolUse is already in shape (skipped by dedupe); the other four
-        // events get written.
+        // PreToolUse is already in shape; the four lifecycle events and
+        // PostToolUse get written.
         let (added, _) = run(&manifest).expect("heal");
-        assert_eq!(added, 4);
+        assert_eq!(added, 5);
 
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&target).expect("read")).expect("json");
         let bundle = &doc["agent-hooks"];
-        for ev in ["PreInvocation", "PostInvocation", "Stop"] {
+        for ev in ["SessionStart", "PreInvocation", "PostInvocation", "Stop"] {
             let arr = bundle[ev]
                 .as_array()
                 .unwrap_or_else(|| panic!("{ev} array"));

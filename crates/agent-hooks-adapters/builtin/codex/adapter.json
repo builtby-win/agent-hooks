@@ -26,10 +26,12 @@
       "agent_cli": {
         "executables": ["codex"],
         "documentation": ["https://developers.openai.com/codex/cli/reference/"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start, exec, models, model_args: codex --help; codex exec --help; codex debug models (CLI help, checked against installed versions)",
         "resume": {"argv": ["codex", "resume", "{session_ref}"], "session_ref": "id"},
         "start": {"argv": ["codex", "{prompt}"]},
-        "exec": {"argv": ["codex", "exec", "{prompt}"]}
+        "exec": {"argv": ["codex", "exec", "{prompt}"]},
+        "models": {"argv": ["codex", "debug", "models"], "id_fields": ["slug"]},
+        "model_args": ["--model", "{model}"]
       },
       "install": [
         {

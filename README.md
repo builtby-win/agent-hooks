@@ -57,7 +57,7 @@ Source of truth: `crates/agent-hooks-adapters/builtin/*/adapter.json`. `agent-ho
 | Factory Droid | `droid` (`factory-droid`, `factory_droid`, `factory`) | `~/.factory/hooks.json`, `.factory/hooks.json` | `json_hooks, matcher_group` | Docs-only |
 | Gemini CLI | `gemini-cli` (`gemini`, `google-gemini`, `gemini_cli`) | `~/.gemini/settings.json` | `json_hooks, matcher_group` | Verified |
 | GitHub Copilot | `copilot` (`github-copilot`, `github_copilot`, `copilot-cli`, `copilot_cli`) | `.github/hooks/hooks.json`, `~/.copilot/hooks.json` | `json_hooks, flat` | Verified |
-| Google Antigravity | `antigravity` (`google-antigravity`, `antigravity-cli`) | `.agents/hooks.json`, `~/.gemini/config/hooks.json` | `json_hooks, named` | Verified |
+| Google Antigravity | `antigravity` (`google-antigravity`, `antigravity-cli`) | `.agents/hooks.json`, `~/.gemini/config/hooks.json` | `json_hooks, named` | Verified (1.4.2) |
 | Hermes | `hermes` (`hermes-agent`, `hermes_agent`) | `~/.hermes/plugins/agent-hooks` | `stage_assets` | Verified |
 | JCode | `jcode` (`jcode-cli`, `jcode_cli`) | `~/.jcode/config.toml` | `toml_hooks, command` | Verified |
 | Kimi Code | `kimi-code` (`kimi`, `kimi_code`, `kimi-cli`, `kimi_cli`) | `~/.kimi-code/config.toml` | `toml_list_hooks` | Docs-only |
@@ -686,7 +686,28 @@ A version may include optional `agent_cli` metadata for consumers that launch an
 
 - `start` launches the interactive TUI with an initial prompt (`claude "<prompt>"`, `codex "<prompt>"`).
 - `exec` is the non-interactive one-shot form for scripts and CI (`claude -p "<prompt>"`, `codex exec "<prompt>"`).
-- `{prompt}` is one argv value, exactly once per recipe, same rules as `{session_ref}`. Absent `start`/`exec` means no recipe is recorded, not that the agent lacks the mode. Only Claude Code and Codex are seeded so far; the herdr source covers resume only.
+- `{prompt}` is one argv value, exactly once per recipe, same rules as `{session_ref}`. Absent `start`/`exec` means no recipe is recorded, not that the agent lacks the mode. `start`/`exec` are seeded from each CLI's own `--help` (Claude Code, Codex, Antigravity, Muse, omp, pi, OpenCode); the herdr source covers resume only.
+- `models` is an argv that prints the models the installed CLI supports (`codex debug models`, `agy models`, `opencode models`, `omp models --json`, `pi --list-models`). No model names are tracked in manifests. `id_fields` (JSON output: collect every string under those keys) or `id_column` (text output: Nth whitespace-separated column, default 0; `skip_lines` drops a header row, `provider_column` makes ids `<provider>/<id>` for CLIs like pi where a bare id is ambiguous across providers) tell agent-hooks which tokens are model ids so `--model` can be checked.
+- `model_aliases` is a fixed list for CLIs with no listing command. Claude Code uses its `--model` aliases (`sonnet`, `opus`, `haiku`, `fable`, ...; as printed by `claude -p /model`). Muse has neither; `muse model-profile show <id>` inspects one known id.
+- `model_args` (e.g. `["--model", "{model}"]`) is spliced into `start`/`exec` after the executable and any leading subcommand (`codex exec`, `opencode run`). A recipe with `"model_unsupported": true` (OpenCode's TUI has no model flag) refuses `--model`.
+
+### Launching agents: `start`, `exec`, `models`
+
+```bash
+agent-hooks models --harness codex
+agent-hooks start --harness codex --model gpt-5.6-luna "fix the failing test"
+agent-hooks exec  --harness claude-code --model haiku "summarize README.md"
+agent-hooks exec  --harness opencode --dry-run --model alibaba/qwen-flash "hi"   # prints resolved argv as JSON
+```
+
+These are thin wrappers over the recipes above. They are deliberately strict:
+
+- `--harness` must be an exact id or alias (no fuzzy matching), and the recipe must exist.
+- `--model` must be one the agent itself reports (its `models` command, or `model_aliases`); otherwise the command fails and lists what is available. Agents that cannot list models (Muse), or whose listing fails, need `--unchecked` to pass a model through unverified. Claude Code accepts full model IDs, which are not in its alias list, so those also need `--unchecked`.
+- The prompt and model are single argv values, never shell text. A prompt or model starting with `-` is rejected (the agent would parse it as an option), as is an empty prompt.
+- Manifests that define what gets spawned come only from the built-in and user tiers (`~/.config/agent-hooks/adapters`). The project tier (`./.agent-hooks/adapters`) is ignored here: a cloned repo must not be able to choose the executable that runs.
+- On Unix the agent replaces the agent-hooks process (`exec`), so terminal, signals and exit code are the agent's own. On Windows the agent is spawned and its exit code propagated; npm `.cmd` shims such as `pi` and `omp` are not resolved there, so this path is untested.
+- Listing output formats are the agents' own and can change between versions; the parsers are pinned by captured fixtures in the tests.
 
 ### `events`: host event → lifecycle + capability
 
@@ -847,7 +868,7 @@ Timeout guidance: gate entries must exceed the daemon's ~330s hold budget or the
 
 ### `unavailable` + `notes`
 
-`unavailable` declares lifecycle events the harness can **never** emit (Antigravity: no `SessionStart`/`SessionEnd`; Cursor: no `PermissionRequest`). `status` and docs render this truthfully instead of assuming parity. `notes.post_install` prints after install — **trust steps live here**, not in prose: Codex skips every non-managed hook until its exact hash is reviewed in `/hooks` (`--dangerously-bypass-hook-trust` for CI); Claude gates on workspace trust; Cursor hot-reloads on save (restart or re-save to pick up hooks).
+`unavailable` declares lifecycle events the harness can **never** emit (Antigravity: no `SessionEnd`; Cursor: no `PermissionRequest`). `status` and docs render this truthfully instead of assuming parity. `notes.post_install` prints after install — **trust steps live here**, not in prose: Codex skips every non-managed hook until its exact hash is reviewed in `/hooks` (`--dangerously-bypass-hook-trust` for CI); Claude gates on workspace trust; Cursor hot-reloads on save (restart or re-save to pick up hooks).
 
 ### `extends` merge rules
 
@@ -862,7 +883,7 @@ Read this before writing an adapter. Each is a real incident or a load-bearing i
 1. **Weak stops (`demote_when`).** Some harnesses fire `Stop` when the agent is _not_ done. Antigravity emits `Stop` with `fullyIdle: false` while background tasks run — treating it as `Stop` flips status to `Idle`, consumers conclude the turn ended, and follow-up automation misfires. The adapter declares `"Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when": {"fullyIdle": false}}`; the engine checks **all** listed keys equal the payload (strict equality, top-level keys) and maps matches to `TurnEnd` (status stays `Running`). Rule: if a harness's stop event can fire mid-work, capture both payloads (idle and non-idle) as fixtures and set `demote_when` on the non-idle shape.
 2. **Strict observe hosts.** Antigravity's protojson rejects unknown stdout fields on observation events — printing a reason or decision JSON breaks the hook. Hence `observe: {}` is explicit in the manifest and the engine renders exactly `{}`. Rule: when in doubt, capture a `PostToolUse` fixture and check what the harness tolerates; default to `{}`.
 3. **Codex trust gate.** Codex skips unreviewed hooks silently — the installer exits 0, hooks are in the file, nothing fires. This is not detectable programmatically; the adapter's `notes.post_install` must say "review the hash in `/hooks`". Same class: Claude workspace-trust dialog. Rule: every adapter with out-of-band trust documents it in `post_install`; installers that print nothing are lying.
-4. **Session-less harnesses.** Antigravity has no session events; registration is lazy (upsert on first `PreInvocation`/`PreToolUse` keyed off `conversationId`). Consumers must not assume `SessionStart` precedes tool events. Rule: list never-emitted lifecycles in `unavailable`; consumers handle tool events with no prior session.
+4. **Antigravity model invocations.** `SessionStart` starts the conversation; `PreInvocation` fires before each model call. Only `invocationNum: 0` is the user's submitted turn; later calls after tool results must not be treated as new prompts. The daemon still upserts sessions from `conversationId` on any event to tolerate missing or reordered hooks.
 5. **Daemon down at hook time.** The shim never blocks the agent: local-hooks decision stands (allow when nothing matches), rendered in the harness dialect, exit 0. Daemon-down + no local hooks = allow with a stderr warning. Rule: local hooks are fail-open by design; the daemon hold path (`decide: true` subscriber) is the only fail-closed path, and unanswered holds deny on timeout.
 6. **Parallel hook aggregation.** Harnesses like grok-cli run all matching hook commands concurrently and merge (any exit-2 blocks; `additionalContext` accumulates). Our merge mirrors it: deny > ask > allow across local entries, then daemon verdict merged the same way. Rule: keep entries independent — ordering is not guaranteed.
 7. **Ask without a dialog.** `ask` on an event whose `verdicts` exclude it degrades to deny (fail-safe). Rationale: showing nothing and allowing is the dangerous direction; blocking with the question as the reason preserves the human-in-the-loop intent everywhere.

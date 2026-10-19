@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-hooks-adapters"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "agent-hooks-protocol",
  "async-trait",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agent-hooks-cli"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "agent-hooks-adapters",
  "agent-hooks-client",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agent-hooks-client"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "agent-hooks-adapters",
  "agent-hooks-core",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "agent-hooks-core"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "agent-hooks-adapters",
  "agent-hooks-protocol",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "agent-hooks-protocol"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "serde",

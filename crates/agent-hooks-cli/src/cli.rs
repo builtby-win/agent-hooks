@@ -37,6 +37,15 @@ pub enum Commands {
     /// Scaffold, validate, test, and manage declarative adapter manifests
     Adapter(AdapterArgs),
 
+    /// Start an installed agent interactively with an initial prompt
+    Start(AgentLaunchArgs),
+
+    /// Run an installed agent non-interactively with a prompt
+    Exec(AgentLaunchArgs),
+
+    /// Print the models an installed agent's own CLI reports
+    Models(ModelsArgs),
+
     /// List all supported harnesses, aliases, and hook file locations
     #[command(name = "list-adapters")]
     ListAdapters(ListAdaptersArgs),
@@ -206,6 +215,35 @@ pub struct StatusArgs {
     /// Output machine-readable JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct AgentLaunchArgs {
+    /// Harness id or alias (see `list-adapters`)
+    #[arg(long)]
+    pub harness: String,
+
+    /// Model to use; must be one the agent reports (list with `agent-hooks models`)
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Pass --model through without checking it against the agent's model list
+    #[arg(long, requires = "model")]
+    pub unchecked: bool,
+
+    /// Print the resolved argv as JSON instead of running it
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Prompt, passed to the agent as a single argument
+    pub prompt: String,
+}
+
+#[derive(Parser, Debug)]
+pub struct ModelsArgs {
+    /// Harness id or alias (see `list-adapters`)
+    #[arg(long)]
+    pub harness: String,
 }
 
 #[derive(Parser, Debug)]

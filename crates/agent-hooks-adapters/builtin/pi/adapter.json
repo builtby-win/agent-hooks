@@ -32,8 +32,12 @@
       "agent_cli": {
         "executables": ["pi"],
         "documentation": ["https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#cli-usage"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
-        "resume": {"argv": ["pi", "--session", "{session_ref}"], "session_ref": "id_or_path"}
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start, exec, models, model_args: pi --help (CLI help, checked against installed versions)",
+        "resume": {"argv": ["pi", "--session", "{session_ref}"], "session_ref": "id_or_path"},
+        "start": {"argv": ["pi", "{prompt}"]},
+        "exec": {"argv": ["pi", "--print", "{prompt}"]},
+        "models": {"argv": ["pi", "--list-models"], "id_column": 1, "provider_column": 0, "skip_lines": 1},
+        "model_args": ["--model", "{model}"]
       },
       "install": [
         {

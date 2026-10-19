@@ -23,36 +23,65 @@ fn load_adapter() -> DeclarativeAdapter {
 }
 
 #[test]
-fn manifest_antigravity_preinvocation_transcript_prompt() {
+fn manifest_antigravity_session_and_invocation_lifecycle() {
     let adapter = load_adapter();
-
-    // PreInvocation with invocationNum 0 + transcriptPath (adapted from fixture 1c):
-    // prompt comes from the transcript via the {"transcript": "first_prompt"} source.
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let transcript_file = temp_dir.path().join("transcript.jsonl");
     std::fs::write(
         &transcript_file,
-        r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>\nImplement OAuth flow\n</USER_REQUEST>"}"#,
+        concat!(
+            "{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"content\":\"<USER_REQUEST>First request</USER_REQUEST>\"}\n",
+            "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"Working\"}\n",
+            "{\"step_index\":2,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"content\":\"<USER_REQUEST>Second request</USER_REQUEST>\"}\n"
+        ),
     )
     .expect("write transcript");
-    let payload = format!(
-        r#"{{
-            "conversationId": "c3b14a3e-bf6a-400d-aada-4e41e43612f5",
-            "invocationNum": 0,
-            "transcriptPath": "{}"
-        }}"#,
-        transcript_file.display()
-    );
-    let event = adapter
-        .parse_event(&make_input("PreInvocation", &payload))
-        .expect("parse PreInvocation");
-    assert_eq!(event.session_id, "c3b14a3e-bf6a-400d-aada-4e41e43612f5");
-    match event.lifecycle {
-        AgentLifecycle::UserPromptSubmit { user_prompt } => {
-            assert_eq!(user_prompt.as_deref(), Some("Implement OAuth flow"));
-        }
-        ref other => panic!("expected UserPromptSubmit, got {:?}", other),
-    }
+
+    let session = adapter
+        .parse_event(&make_input(
+            "SessionStart",
+            r#"{"conversationId":"ag-1","workspacePaths":["/tmp/project"]}"#,
+        ))
+        .expect("parse SessionStart");
+    assert!(matches!(
+        session.lifecycle,
+        AgentLifecycle::SessionStart { .. }
+    ));
+
+    let pre_prompt = adapter
+        .parse_event(&make_input(
+            "PreInvocation",
+            &format!(
+                r#"{{"conversationId":"ag-1","invocationNum":0,"initialNumSteps":3,"transcriptPath":"{}"}}"#,
+                transcript_file.display()
+            ),
+        ))
+        .expect("parse first model invocation");
+    assert!(matches!(
+        pre_prompt.lifecycle,
+        AgentLifecycle::UserPromptSubmit {
+            user_prompt: Some(ref prompt)
+        } if prompt == "Second request"
+    ));
+
+    let pre_tool_loop = adapter
+        .parse_event(&make_input(
+            "PreInvocation",
+            r#"{"conversationId":"ag-1","invocationNum":1,"initialNumSteps":3}"#,
+        ))
+        .expect("parse model invocation after tool");
+    assert!(matches!(
+        pre_tool_loop.lifecycle,
+        AgentLifecycle::PreLLMCall
+    ));
+
+    let post = adapter
+        .parse_event(&make_input(
+            "PostInvocation",
+            r#"{"conversationId":"ag-1","invocationNum":0,"initialNumSteps":1}"#,
+        ))
+        .expect("parse PostInvocation");
+    assert!(matches!(post.lifecycle, AgentLifecycle::PostLLMCall));
 }
 
 #[test]
@@ -539,15 +568,15 @@ fn manifest_antigravity_declares_no_ask_tools() {
 
 use agent_hooks_protocol::NormalizedStatus;
 
-// Legacy decide_status: preinvocation/postinvocation → busy (never a completion);
-// only a fully idle Stop ends the turn.
+// PreInvocation invocationNum 0 marks a submitted user turn; subsequent model
+// calls in that same turn are PreLLMCall and must not rebind the session.
 #[test]
 fn antigravity_invocations_are_busy_and_only_idle_stop_completes() {
     let adapter = load_adapter();
     let pre = adapter
         .parse_event(&make_input(
             "PreInvocation",
-            r#"{"conversationId":"ag-1","workspacePaths":["/Users/me/proj"],"prompt":"go"}"#,
+            r#"{"conversationId":"ag-1","workspacePaths":["/Users/me/proj"],"invocationNum":0,"prompt":"go"}"#,
         ))
         .unwrap();
     assert!(matches!(
@@ -561,8 +590,8 @@ fn antigravity_invocations_are_busy_and_only_idle_stop_completes() {
             r#"{"conversationId":"ag-1","workspacePaths":["/Users/me/proj"]}"#,
         ))
         .unwrap();
-    // Legacy postinvocation: busy, busy-gated (B2V treats top-level TurnEnd as a no-op).
-    assert!(matches!(post.lifecycle, AgentLifecycle::TurnStart { .. }));
+    // PostInvocation ends one model call, not the user turn; Stop is authoritative.
+    assert!(matches!(post.lifecycle, AgentLifecycle::PostLLMCall));
     assert_eq!(post.status, NormalizedStatus::Running);
     let weak = adapter
         .parse_event(&make_input(
@@ -585,9 +614,8 @@ fn antigravity_invocations_are_busy_and_only_idle_stop_completes() {
     );
 }
 
-// Live parity e2e (antigravity scenario): legacy statuses per step —
-// PreInvocation busy, PreToolUse(ask_question) waiting, PostToolUse busy,
-// PostInvocation busy (gated turn step), Stop idle.
+// Live parity e2e (Antigravity): model invocation events and tools stay busy;
+// only an idle Stop completes the visible turn.
 #[test]
 fn antigravity_parity_scenario_statuses() {
     let adapter = load_adapter();
@@ -599,7 +627,7 @@ fn antigravity_parity_scenario_statuses() {
     let cases = [
         (
             "PreInvocation",
-            r#""prompt":"list the files""#.to_string(),
+            r#""invocationNum":0,"prompt":"list the files""#.to_string(),
             NormalizedStatus::Running,
         ),
         ("PreToolUse", tc("run_command"), NormalizedStatus::Running),

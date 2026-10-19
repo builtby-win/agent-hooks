@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod agent;
 pub mod answer;
 pub mod answer_tui;
 pub mod daemon;

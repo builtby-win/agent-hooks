@@ -35,6 +35,9 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(agent_hooks_client::default_socket_path);
             rt.block_on(commands::answer::run(socket, args.auto, args.line))
         }
+        Commands::Start(args) => commands::agent::launch(commands::agent::Mode::Start, args),
+        Commands::Exec(args) => commands::agent::launch(commands::agent::Mode::Exec, args),
+        Commands::Models(args) => commands::agent::models(args),
         Commands::Install(args) => commands::install::run(args),
         Commands::Uninstall(args) => commands::uninstall::run(args),
         Commands::Status(args) => commands::status::run(args),

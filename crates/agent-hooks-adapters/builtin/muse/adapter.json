@@ -38,6 +38,13 @@
   "id": "muse",
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["muse"],
+        "recipe_source": "start, exec, model_args: muse --help; muse exec --help",
+        "start": {"argv": ["muse", "{prompt}"]},
+        "exec": {"argv": ["muse", "exec", "{prompt}"]},
+        "model_args": ["--model", "{model}"]
+      },
       "verified_against": "1.4.7",
       "events": {
         "Interrupt": {

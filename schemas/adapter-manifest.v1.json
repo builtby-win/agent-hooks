@@ -72,7 +72,22 @@
         "recipe_source": { "type": "string", "minLength": 1 },
         "resume": { "$ref": "#/$defs/ResumeCommandSpec" },
         "start": { "$ref": "#/$defs/PromptCommandSpec" },
-        "exec": { "$ref": "#/$defs/PromptCommandSpec" }
+        "exec": { "$ref": "#/$defs/PromptCommandSpec" },
+        "models": { "$ref": "#/$defs/ModelsCommandSpec" },
+        "model_aliases": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "model_args": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "ModelsCommandSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv"],
+      "properties": {
+        "argv": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "id_fields": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "id_column": { "type": "integer", "minimum": 0 },
+        "provider_column": { "type": "integer", "minimum": 0 },
+        "skip_lines": { "type": "integer", "minimum": 0 }
       }
     },
     "PromptCommandSpec": {
@@ -80,7 +95,8 @@
       "additionalProperties": false,
       "required": ["argv"],
       "properties": {
-        "argv": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } }
+        "argv": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } },
+        "model_unsupported": { "type": "boolean" }
       }
     },
     "ResumeCommandSpec": {

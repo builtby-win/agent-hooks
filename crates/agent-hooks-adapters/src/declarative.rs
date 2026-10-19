@@ -156,6 +156,50 @@ fn extract_first_prompt(transcript_path: &str) -> Option<String> {
     }
     None
 }
+fn extract_latest_prompt(transcript_path: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const MAX_TAIL: u64 = 1024 * 1024;
+
+    let path = crate::traits::expand_tilde_path(transcript_path);
+    let mut file = std::fs::File::open(&path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(MAX_TAIL);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next();
+    }
+    for line in lines.rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let is_user = value.get("source").and_then(|s| s.as_str()) == Some("USER_EXPLICIT")
+            || value.get("type").and_then(|s| s.as_str()) == Some("USER_INPUT");
+        if !is_user {
+            continue;
+        }
+        let Some(content) = value.get("content").and_then(|c| c.as_str()) else {
+            continue;
+        };
+        if let Some(start) = content.find("<USER_REQUEST>") {
+            let after = &content[start + "<USER_REQUEST>".len()..];
+            if let Some(end) = after.find("</USER_REQUEST>") {
+                let prompt = after[..end].trim();
+                if !prompt.is_empty() {
+                    return Some(prompt.to_string());
+                }
+            }
+        }
+        let content = content.trim();
+        if !content.is_empty() {
+            return Some(content.to_string());
+        }
+    }
+    None
+}
 
 /// Parent of a child session, read from the harness's session store (see
 /// [`SessionLinkSpec`]). Bounded: only the newest day directories, the newest
@@ -267,6 +311,11 @@ fn extract_string_via_sources(
                             return Some(s);
                         }
                     }
+                    TranscriptExtract::LatestPrompt => {
+                        if let Some(s) = extract_latest_prompt(&tp) {
+                            return Some(s);
+                        }
+                    }
                     TranscriptExtract::FirstTimestamp => {
                         if let Some(ts) = extract_first_timestamp(&tp) {
                             return Some(ts.to_string());
@@ -318,6 +367,11 @@ fn extract_value_via_sources(
                 match tr.transcript {
                     TranscriptExtract::FirstPrompt => {
                         if let Some(s) = extract_first_prompt(&tp) {
+                            return Some(serde_json::Value::String(s));
+                        }
+                    }
+                    TranscriptExtract::LatestPrompt => {
+                        if let Some(s) = extract_latest_prompt(&tp) {
                             return Some(serde_json::Value::String(s));
                         }
                     }
@@ -1867,10 +1921,21 @@ impl HarnessAdapter for DeclarativeAdapter {
         })
         .ok_or_else(|| AdapterError::UnsupportedEvent("unknown event".to_string()))?;
 
-        let spec = self
+        let mut spec = self
             .find_event_spec(&host_event)
             .map(|(_, s)| s.clone())
             .ok_or_else(|| AdapterError::UnsupportedEvent(host_event.clone()))?;
+        if self.manifest.id == "antigravity" && host_event == "PreInvocation" {
+            spec.lifecycle = if payload_for_fields
+                .get("invocationNum")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+            {
+                LifecycleRef::UserPromptSubmit
+            } else {
+                LifecycleRef::PreLLMCall
+            };
+        }
 
         // capture for format_response
         {

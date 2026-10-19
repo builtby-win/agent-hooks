@@ -157,6 +157,7 @@ pub enum EditMode {
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptExtract {
     FirstPrompt,
+    LatestPrompt,
     FirstTimestamp,
 }
 
@@ -698,6 +699,43 @@ pub struct AgentCliSpec {
     /// Non-interactive one-shot run (e.g. `claude -p "<prompt>"`, `codex exec "<prompt>"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<PromptCommandSpec>,
+    /// Command that prints the models the installed CLI can use. Output is
+    /// passed through verbatim; models are never tracked in the manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<ModelsCommandSpec>,
+    /// Stable aliases for CLIs with no listing command (e.g. Claude Code's
+    /// `sonnet`/`opus`); printed by `models` when `models` is absent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_aliases: Vec<String>,
+    /// Args selecting a model (e.g. `["--model", "{model}"]`), spliced right
+    /// after the executable of `start`/`exec`. `{model}` is one argv value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_args: Vec<String>,
+}
+
+/// A model-listing argv; runs as-is, no placeholders. Stdout is read to
+/// validate `--model`: JSON output yields every string under `id_fields`;
+/// otherwise each line's `id_column`th (default 0) whitespace-separated token
+/// is a model id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelsCommandSpec {
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub id_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_column: Option<usize>,
+    /// Text output only: ids are `<provider>/<id>`, with the provider read
+    /// from this column (for CLIs where a bare id is ambiguous across providers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_column: Option<usize>,
+    /// Text output only: leading lines to ignore (a header row).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skip_lines: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// A prompt-carrying argv template. `{prompt}` is substituted as one argv
@@ -706,6 +744,10 @@ pub struct AgentCliSpec {
 #[serde(deny_unknown_fields)]
 pub struct PromptCommandSpec {
     pub argv: Vec<String>,
+    /// This mode has no model option (e.g. OpenCode's TUI), so `--model` is
+    /// refused rather than passed to a flag the CLI does not know.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_unsupported: bool,
 }
 
 /// A resume argv template. `{session_ref}` is substituted as one argv value,
@@ -893,55 +935,7 @@ impl AdapterManifest {
     pub fn validate(&self) -> Result<(), AdapterError> {
         for (ver_name, vs) in &self.versions {
             if let Some(agent_cli) = &vs.agent_cli {
-                if agent_cli.executables.is_empty()
-                    || agent_cli.executables.iter().any(String::is_empty)
-                    || agent_cli.recipe_source.is_empty()
-                    || agent_cli.documentation.iter().any(String::is_empty)
-                {
-                    return Err(AdapterError::InvalidConfig(format!(
-                        "adapter '{}' version '{}' has incomplete agent_cli metadata",
-                        self.id, ver_name
-                    )));
-                }
-                if let Some(resume) = &agent_cli.resume {
-                    let Some(executable) = resume.argv.first() else {
-                        return Err(AdapterError::InvalidConfig(format!(
-                            "adapter '{}' version '{}' resume argv is empty",
-                            self.id, ver_name
-                        )));
-                    };
-                    let placeholder_count = resume
-                        .argv
-                        .iter()
-                        .map(|arg| arg.matches("{session_ref}").count())
-                        .sum::<usize>();
-                    if !agent_cli.executables.contains(executable) || placeholder_count != 1 {
-                        return Err(AdapterError::InvalidConfig(format!(
-                            "adapter '{}' version '{}' resume argv must start with a configured executable and contain exactly one {{session_ref}}",
-                            self.id, ver_name
-                        )));
-                    }
-                }
-            }
-            if let Some(agent_cli) = &vs.agent_cli {
-                for (kind, spec) in [("start", &agent_cli.start), ("exec", &agent_cli.exec)] {
-                    let Some(spec) = spec else { continue };
-                    let placeholder_count = spec
-                        .argv
-                        .iter()
-                        .map(|arg| arg.matches("{prompt}").count())
-                        .sum::<usize>();
-                    let valid_executable = spec
-                        .argv
-                        .first()
-                        .is_some_and(|exe| agent_cli.executables.contains(exe));
-                    if !valid_executable || placeholder_count != 1 {
-                        return Err(AdapterError::InvalidConfig(format!(
-                            "adapter '{}' version '{}' {} argv must start with a configured executable and contain exactly one {{prompt}}",
-                            self.id, ver_name, kind
-                        )));
-                    }
-                }
+                self.validate_agent_cli(ver_name, agent_cli)?;
             }
             for (ev_name, ev_spec) in &vs.events {
                 if ev_spec.capability == Capability::Gate && ev_spec.verdicts.as_ref().map(|v| v.is_empty()).unwrap_or(false) {
@@ -951,6 +945,51 @@ impl AdapterManifest {
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// `agent_cli` argv templates run unshelled, so each must start with one
+    /// of the declared executables and carry its placeholder exactly once.
+    fn validate_agent_cli(&self, ver_name: &str, cli: &AgentCliSpec) -> Result<(), AdapterError> {
+        let err = |msg: String| {
+            Err(AdapterError::InvalidConfig(format!(
+                "adapter '{}' version '{}' {msg}",
+                self.id, ver_name
+            )))
+        };
+        if cli.executables.is_empty()
+            || cli.executables.iter().any(String::is_empty)
+            || cli.recipe_source.is_empty()
+            || cli.documentation.iter().any(String::is_empty)
+            || cli.model_aliases.iter().any(String::is_empty)
+        {
+            return err("has incomplete agent_cli metadata".into());
+        }
+        let valid_argv = |argv: &[String], placeholder: &str| {
+            let count: usize = argv.iter().map(|a| a.matches(placeholder).count()).sum();
+            argv.first().is_some_and(|exe| cli.executables.contains(exe))
+                && (placeholder.is_empty() || count == 1)
+        };
+        if let Some(resume) = &cli.resume {
+            if !valid_argv(&resume.argv, "{session_ref}") {
+                return err("resume argv must start with a configured executable and contain exactly one {session_ref}".into());
+            }
+        }
+        for (kind, spec) in [("start", &cli.start), ("exec", &cli.exec)] {
+            if let Some(spec) = spec {
+                if !valid_argv(&spec.argv, "{prompt}") {
+                    return err(format!("{kind} argv must start with a configured executable and contain exactly one {{prompt}}"));
+                }
+            }
+        }
+        if let Some(models) = &cli.models {
+            if !valid_argv(&models.argv, "") || (!models.id_fields.is_empty() && models.id_column.is_some()) {
+                return err("models argv must start with a configured executable and must not mix id_fields with id_column".into());
+            }
+        }
+        if !cli.model_args.is_empty() && !valid_model_args(&cli.model_args) {
+            return err("model_args must contain exactly one {model}".into());
         }
         Ok(())
     }
@@ -991,6 +1030,19 @@ impl AdapterManifest {
             dirs.push(PathBuf::from(home).join(".config/agent-hooks/adapters"));
         }
         dirs
+    }
+
+    /// Tier dirs trusted to define commands that agent-hooks itself spawns
+    /// (`start`/`exec`/`models`): user config only. The project tier lives in
+    /// the cwd, so a cloned repo must not pick the executable that runs.
+    pub fn trusted_tier_dirs() -> Vec<PathBuf> {
+        let project = std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.join(".agent-hooks/adapters"));
+        Self::tier_dirs()
+            .into_iter()
+            .filter(|d| Some(d) != project.as_ref())
+            .collect()
     }
 
     /// Scan one tier directory. Two layouts are accepted, path-sorted:
@@ -1372,4 +1424,8 @@ impl AdapterManifest {
             },
         }
     }
+}
+
+fn valid_model_args(args: &[String]) -> bool {
+    args.iter().map(|a| a.matches("{model}").count()).sum::<usize>() == 1
 }

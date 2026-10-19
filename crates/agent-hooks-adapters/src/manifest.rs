@@ -692,6 +692,20 @@ pub struct AgentCliSpec {
     pub recipe_source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<ResumeCommandSpec>,
+    /// Interactive launch with an initial prompt (e.g. `claude "<prompt>"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<PromptCommandSpec>,
+    /// Non-interactive one-shot run (e.g. `claude -p "<prompt>"`, `codex exec "<prompt>"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<PromptCommandSpec>,
+}
+
+/// A prompt-carrying argv template. `{prompt}` is substituted as one argv
+/// value, never as shell syntax.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptCommandSpec {
+    pub argv: Vec<String>,
 }
 
 /// A resume argv template. `{session_ref}` is substituted as one argv value,
@@ -905,6 +919,26 @@ impl AdapterManifest {
                         return Err(AdapterError::InvalidConfig(format!(
                             "adapter '{}' version '{}' resume argv must start with a configured executable and contain exactly one {{session_ref}}",
                             self.id, ver_name
+                        )));
+                    }
+                }
+            }
+            if let Some(agent_cli) = &vs.agent_cli {
+                for (kind, spec) in [("start", &agent_cli.start), ("exec", &agent_cli.exec)] {
+                    let Some(spec) = spec else { continue };
+                    let placeholder_count = spec
+                        .argv
+                        .iter()
+                        .map(|arg| arg.matches("{prompt}").count())
+                        .sum::<usize>();
+                    let valid_executable = spec
+                        .argv
+                        .first()
+                        .is_some_and(|exe| agent_cli.executables.contains(exe));
+                    if !valid_executable || placeholder_count != 1 {
+                        return Err(AdapterError::InvalidConfig(format!(
+                            "adapter '{}' version '{}' {} argv must start with a configured executable and contain exactly one {{prompt}}",
+                            self.id, ver_name, kind
                         )));
                     }
                 }

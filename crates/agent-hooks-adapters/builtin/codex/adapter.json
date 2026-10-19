@@ -27,7 +27,9 @@
         "executables": ["codex"],
         "documentation": ["https://developers.openai.com/codex/cli/reference/"],
         "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
-        "resume": {"argv": ["codex", "resume", "{session_ref}"], "session_ref": "id"}
+        "resume": {"argv": ["codex", "resume", "{session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["codex", "{prompt}"]},
+        "exec": {"argv": ["codex", "exec", "{prompt}"]}
       },
       "install": [
         {

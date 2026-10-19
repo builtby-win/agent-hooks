@@ -668,7 +668,7 @@ Top level: `id`, `display_name`, `aliases`, `default_version`, `extends?`, `min_
 
 ### `agent_cli`: versioned installed-agent commands
 
-A version may include optional `agent_cli` metadata for consumers that launch an agent: executable candidates, documentation URLs, the source of each seeded recipe, and tokenized resume argv. `{session_ref}` is one argument placeholder; `session_ref` identifies whether the reference is an ID or an ID/path. Consumers should resolve an executable and spawn argv directly, never interpolate the reference into a shell string. Recipes seeded from another project are implementation evidence, not claims of official support; `documentation` links identify the upstream docs available for the agent. `list-adapters --json` includes this metadata and a `resume_status` for the default version: `supported` means a recipe exists, while `unknown` means no recipe is currently recorded (not that the agent is known to lack resume support).
+A version may include optional `agent_cli` metadata for consumers that launch an agent: executable candidates, documentation URLs, the source of each seeded recipe, and tokenized `resume`, `start`, and `exec` argv. `{session_ref}` is one argument placeholder; `session_ref` identifies whether the reference is an ID or an ID/path. Consumers should resolve an executable and spawn argv directly, never interpolate the reference into a shell string. Recipes seeded from another project are implementation evidence, not claims of official support; `documentation` links identify the upstream docs available for the agent. `list-adapters --json` includes this metadata and a `resume_status` for the default version: `supported` means a recipe exists, while `unknown` means no recipe is currently recorded (not that the agent is known to lack resume support).
 
 ```json
 "agent_cli": {
@@ -678,9 +678,15 @@ A version may include optional `agent_cli` metadata for consumers that launch an
   "resume": {
     "argv": ["claude", "--resume", "{session_ref}"],
     "session_ref": "id"
-  }
+  },
+  "start": {"argv": ["claude", "{prompt}"]},
+  "exec": {"argv": ["claude", "-p", "{prompt}"]}
 }
 ```
+
+- `start` launches the interactive TUI with an initial prompt (`claude "<prompt>"`, `codex "<prompt>"`).
+- `exec` is the non-interactive one-shot form for scripts and CI (`claude -p "<prompt>"`, `codex exec "<prompt>"`).
+- `{prompt}` is one argv value, exactly once per recipe, same rules as `{session_ref}`. Absent `start`/`exec` means no recipe is recorded, not that the agent lacks the mode. Only Claude Code and Codex are seeded so far; the herdr source covers resume only.
 
 ### `events`: host event → lifecycle + capability
 

@@ -56,8 +56,8 @@ Source of truth: `crates/agent-hooks-adapters/builtin/*/adapter.json`. `agent-ho
 | Cursor | `cursor` (`cursor-agent`, `cursor-cli`) | `~/.cursor/hooks.json`, `.cursor/hooks.json` | `json_hooks, flat` | Verified |
 | Factory Droid | `droid` (`factory-droid`, `factory_droid`, `factory`) | `~/.factory/hooks.json`, `.factory/hooks.json` | `json_hooks, matcher_group` | Docs-only |
 | Gemini CLI | `gemini-cli` (`gemini`, `google-gemini`, `gemini_cli`) | `~/.gemini/settings.json` | `json_hooks, matcher_group` | Verified |
-| GitHub Copilot | `copilot` (`github-copilot`, `github_copilot`, `copilot-cli`, `copilot_cli`) | `.github/hooks/hooks.json`, `~/.copilot/hooks.json` | `json_hooks, flat` | Verified |
-| Google Antigravity | `antigravity` (`google-antigravity`, `antigravity-cli`) | `.agents/hooks.json`, `~/.gemini/config/hooks.json` | `json_hooks, named` | Verified (1.4.2) |
+| GitHub Copilot | `copilot` (`github-copilot`, `github_copilot`, `copilot-cli`, `copilot_cli`) | `~/.copilot/settings.json`, `.github/hooks/hooks.json` | `json_hooks, flat` | Verified |
+| Google Antigravity | `antigravity` (`google-antigravity`, `antigravity-cli`) | `~/.gemini/config/hooks.json`, `.agents/hooks.json` | `json_hooks, named` | Verified (1.4.2) |
 | Hermes | `hermes` (`hermes-agent`, `hermes_agent`) | `~/.hermes/plugins/agent-hooks` | `stage_assets` | Verified |
 | JCode | `jcode` (`jcode-cli`, `jcode_cli`) | `~/.jcode/config.toml` | `toml_hooks, command` | Verified |
 | Kimi Code | `kimi-code` (`kimi`, `kimi_code`, `kimi-cli`, `kimi_cli`) | `~/.kimi-code/config.toml` | `toml_list_hooks` | Docs-only |

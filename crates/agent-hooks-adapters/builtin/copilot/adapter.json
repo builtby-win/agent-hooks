@@ -44,7 +44,7 @@
       "install": [
         {
           "op": "json_hooks",
-          "paths": [".github/hooks/hooks.json", "~/.copilot/hooks.json"],
+          "paths": ["~/.copilot/settings.json", ".github/hooks/hooks.json"],
           "create": true,
           "root": "hooks.{event}",
           "entry_shape": "flat",

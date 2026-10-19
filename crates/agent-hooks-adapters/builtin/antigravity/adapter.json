@@ -23,7 +23,7 @@
       "install": [
         {
           "op": "json_hooks",
-          "paths": [".agents/hooks.json", "~/.gemini/config/hooks.json"],
+          "paths": ["~/.gemini/config/hooks.json", ".agents/hooks.json"],
           "create": true,
           "root": "{name}.{event}",
           "entry_shape": "named",

@@ -38,6 +38,13 @@
         "matcher": "*"
       }
     ],
+    "SessionStart": [
+      {
+        "command": "agent-hooks hook antigravity --event SessionStart",
+        "timeout": 30,
+        "type": "command"
+      }
+    ],
     "Stop": [
       {
         "command": "agent-hooks hook antigravity --event Stop",

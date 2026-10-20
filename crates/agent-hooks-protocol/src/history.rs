@@ -12,10 +12,10 @@ pub const HISTORY_API_VERSION: u32 = 2;
 /// Where stored messages come from: hook events only, never transcripts.
 pub const HISTORY_CAPTURE_SOURCE: &str = "hooks";
 
-/// Assistant entries hold the harness `Stop.summary` string exactly as the
-/// adapter normalized it. Upstream may omit or abbreviate it; the store never
+/// Assistant entries hold normalized `TurnEnd.assistant_message` or
+/// `Stop.summary` text. Upstream may omit or abbreviate it; the store never
 /// invents the absent native reply.
-pub const HISTORY_ASSISTANT_CONTENT_SOURCE: &str = "stop_summary";
+pub const HISTORY_ASSISTANT_CONTENT_SOURCE: &str = "assistant_text";
 
 /// Origin used when a hook carries no `agent_hooks.origin` extension.
 pub const LOCAL_ORIGIN: &str = "local";

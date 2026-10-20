@@ -290,6 +290,10 @@
           ]
         },
         "Stop": {
+          "message_id": [
+            "message_id",
+            "messageId"
+          ],
           "summary": [
             "last_assistant_message",
             "summary",
@@ -307,6 +311,10 @@
           ]
         },
         "afteragent": {
+          "message_id": [
+            "message_id",
+            "messageId"
+          ],
           "summary": [
             "last_assistant_message",
             "summary",
@@ -324,6 +332,10 @@
           ]
         },
         "agentsettled": {
+          "message_id": [
+            "message_id",
+            "messageId"
+          ],
           "summary": [
             "last_assistant_message",
             "summary",
@@ -341,6 +353,10 @@
           ]
         },
         "agent_end": {
+          "message_id": [
+            "message_id",
+            "messageId"
+          ],
           "summary": [
             "last_assistant_message",
             "summary",
@@ -358,6 +374,10 @@
           ]
         },
         "session_stop": {
+          "message_id": [
+            "message_id",
+            "messageId"
+          ],
           "summary": [
             "last_assistant_message",
             "summary",
@@ -375,6 +395,13 @@
           ]
         },
         "TurnEnd": {
+          "assistant_message": [
+            "last_assistant_message"
+          ],
+          "message_id": [
+            "message_id",
+            "messageId"
+          ],
           "flavor_text": [
             "last_assistant_message",
             "message",

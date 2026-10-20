@@ -235,6 +235,11 @@ pub struct ExtractionSpec {
     pub cwd: Vec<ExtractionSource>,
     #[serde(default)]
     pub summary: Option<Vec<ExtractionSource>>,
+    /// Printed assistant reply of a turn (e.g. pi/omp `turn_end`
+    /// `last_assistant_message`). Dedicated field: never falls back to the
+    /// generic `summary` sources, so unrelated text is never attributed.
+    #[serde(default)]
+    pub assistant_message: Vec<ExtractionSource>,
     /// Session title pushed by plugin harnesses (pi/omp/opencode). Passthrough
     /// only: set when the payload carries a non-empty title, else None.
     #[serde(default)]
@@ -269,6 +274,7 @@ impl ExtractionSpec {
             "cwd" => &self.cwd,
             "session_title" => &self.session_title,
             "flavor_text" => &self.flavor_text,
+            "assistant_message" => &self.assistant_message,
             "message_id" => &self.message_id,
             "tool_call_id" => &self.tool_call_id,
             "summary" => {
@@ -346,6 +352,12 @@ impl ExtractionSpec {
             "cwd" => &["cwd", "workspacePaths", "workspace_roots"],
             "session_title" => &["session_title", "sessionTitle"],
             "flavor_text" => &["flavor_text", "flavorText", "display_text", "displayText"],
+            "assistant_message" => &[
+                "assistant_message",
+                "assistantMessage",
+                "last_assistant_message",
+                "lastAssistantMessage",
+            ],
             "message_id" => &["message_id", "messageId"],
             // Dotted `toolCall.id`/`tool_call.id` name the harness's own tool container
             // (Antigravity, Cursor); they are exact paths, never a recursive id search.
@@ -392,6 +404,7 @@ impl Default for ExtractionSpec {
             success: Vec::new(),
             cwd: Vec::new(),
             summary: None,
+            assistant_message: Vec::new(),
             session_title: Vec::new(),
             flavor_text: Vec::new(),
             message_id: Vec::new(),
@@ -1586,6 +1599,11 @@ impl AdapterManifest {
                 local.cwd.clone()
             },
             summary: local.summary.clone().or_else(|| base.summary.clone()),
+            assistant_message: if local.assistant_message.is_empty() {
+                base.assistant_message.clone()
+            } else {
+                local.assistant_message.clone()
+            },
         }
     }
 

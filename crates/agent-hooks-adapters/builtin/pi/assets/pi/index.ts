@@ -307,16 +307,35 @@ export function assistantText(value: unknown): string {
     .join("\n");
 }
 
-// Text of the newest assistant message in `messages` that has any.
-function lastAssistantReply(messages: unknown): string {
-  if (!Array.isArray(messages)) return "";
+// Newest assistant message in `messages` that has any chat text.
+function newestAssistantMessage(messages: unknown): Fields | undefined {
+  if (!Array.isArray(messages)) return undefined;
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = fields(messages[index]);
     if (message.role !== "assistant") continue;
-    const text = assistantText(message);
-    if (text) return text;
+    if (assistantText(message)) return message;
   }
-  return "";
+  return undefined;
+}
+
+// Text of the newest assistant message in `messages` that has any.
+function lastAssistantReply(messages: unknown): string {
+  const message = newestAssistantMessage(messages);
+  return message ? assistantText(message) : "";
+}
+
+// Stable id for a native assistant message: its timestamp when present
+// (`assistant:<ts>`), else its provider responseId. Returns undefined when
+// the payload carries neither — the reply is then captured at Stop only, so
+// an unidentified TurnEnd row cannot duplicate it.
+function assistantMessageId(message: unknown, payload: unknown): string | undefined {
+  const m = fields(message);
+  const timestamp = m.timestamp;
+  if (typeof timestamp === "number" || (typeof timestamp === "string" && timestamp.trim())) {
+    return `assistant:${typeof timestamp === "string" ? timestamp.trim() : timestamp}`;
+  }
+  const responseId = m.responseId ?? fields(payload).responseId ?? fields(payload).response_id;
+  return typeof responseId === "string" && responseId.trim() ? responseId.trim() : undefined;
 }
 
 // Explicit child marker set by launchers that fork outside the harness.
@@ -620,6 +639,11 @@ const planApprovalPending = new Set<string>();
 // Last non-empty assistant text of the run in progress, per session, taken
 // from turn_end. The terminal event's own payload may not carry the reply.
 const lastAssistantText = new Map<string, string>();
+// Stable identity of that text, per session: the native assistant message
+// timestamp (`assistant:<ts>`) or, when the harness omits it, the provider
+// responseId. The later Stop reuses the same id so the history writer dedups
+// the TurnEnd row and the Stop row into one. Small strings only.
+const lastAssistantId = new Map<string, string>();
 // Per session, whether the current run already emitted a Stop carrying the
 // reply. omp fires both agent_end and session_stop per run; once one has
 // delivered the reply the other is dropped, but a Stop without a reply never
@@ -1000,15 +1024,34 @@ export default function agentHooks(pi: any): void {
         const p = payload ?? {};
         const key = sessionKey(p, context);
         if (nativeEvent === "turn_start") stopEmitted.delete(key);
+        // The turn's printed reply is captured here, while the run is still
+        // Running: a run that never settles (background jobs, willContinue
+        // hops) still leaves its assistant text in history via TurnEnd. The
+        // reply rides only with its native identity so the later Stop reuses
+        // the same message_id and the writer dedups the pair. Tool-only turns
+        // carry no assistant text and keep the previous turn's reply.
+        let turnReply: { readonly text: string; readonly id: string } | undefined;
         if (nativeEvent === "turn_end") {
           const message = fields(p.message);
           const text = message.role === "assistant" ? assistantText(message) : "";
-          if (text) lastAssistantText.set(key, text);
+          if (text) {
+            lastAssistantText.set(key, text);
+            const id = assistantMessageId(message, p);
+            if (id) {
+              lastAssistantId.set(key, id);
+              turnReply = { text, id };
+            } else {
+              // No native timestamp/response id: the reply is captured once at
+              // Stop, and a stale id from an earlier turn must not tag it.
+              lastAssistantId.delete(key);
+            }
+          }
         }
         // While a plan awaits approval, the turn omp opens and aborts for the
         // dialog would flip the session from waiting back to running.
         if (planApprovalPending.has(key) && (nativeEvent === "turn_start" || nativeEvent === "turn_end")) return;
-        emit(agentEvent, p, context);
+        if (turnReply) emit(agentEvent, { ...p, last_assistant_message: turnReply.text, message_id: turnReply.id }, context);
+        else emit(agentEvent, p, context);
         // A plan awaiting approval parks the session on the user: surface it
         // as a question-type notification (WaitingForInput).
         if (nativeEvent === "tool_result" && isPlanApprovalResult(p)) {
@@ -1029,6 +1072,11 @@ export default function agentHooks(pi: any): void {
       pi.on(nativeEvent, async (payload: any, context: any) => {
         const p = payload ?? {};
         const key = sessionKey(p, context);
+        // A new session registration resets the previous run's cached reply:
+        // keys may fall back to "" when the harness omits the session id.
+        lastAssistantText.delete(key);
+        lastAssistantId.delete(key);
+        stopEmitted.delete(key);
         const text = contextOf(await query("SessionStart", p, context, CONTEXT_TIMEOUT_MS));
         if (text) sessionContext.set(key, text);
         else sessionContext.delete(key);
@@ -1067,11 +1115,29 @@ export default function agentHooks(pi: any): void {
         const key = sessionKey(p, context);
         if (planApprovalPending.has(key)) return;
         if (stopEmitted.get(key)) return;
-        const reply =
-          assistantText(p.last_assistant_message) || lastAssistantReply(p.messages) || lastAssistantText.get(key) || "";
+        const newest = newestAssistantMessage(p.messages);
+        const direct = assistantText(p.last_assistant_message) || (newest ? assistantText(newest) : "");
+        const cached = lastAssistantText.get(key) ?? "";
+        const reply = direct || cached;
+        // Same identity the TurnEnd row carried, so the writer merges the pair
+        // into one row: prefer the payload's own native id, then the cached
+        // turn id when the text matches it. Early returns above leave the
+        // cache intact for the run's other terminal callback.
+        let id: string | undefined;
+        if (reply) {
+          if (direct) {
+            id =
+              assistantMessageId(p.last_assistant_message, p) ??
+              (newest ? assistantMessageId(newest, p) : undefined) ??
+              (direct === cached ? lastAssistantId.get(key) : undefined);
+          } else {
+            id = lastAssistantId.get(key);
+          }
+        }
         lastAssistantText.delete(key);
+        lastAssistantId.delete(key);
         stopEmitted.set(key, reply !== "");
-        emit("Stop", reply ? { ...p, last_assistant_message: reply } : p, context);
+        emit("Stop", reply ? { ...p, last_assistant_message: reply, ...(id ? { message_id: id } : {}) } : p, context);
       });
     } catch {
       // Older harness may not know a newer event name — skip it.

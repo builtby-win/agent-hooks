@@ -1760,6 +1760,8 @@ impl DeclarativeAdapter {
         let error_sources = self.get_field_sources("error", host_event_key, lifecycle);
         let success_sources = self.get_field_sources("success", host_event_key, lifecycle);
         let summary_sources = self.get_field_sources("summary", host_event_key, lifecycle);
+        let assistant_message_sources =
+            self.get_field_sources("assistant_message", host_event_key, lifecycle);
 
         match lifecycle {
             LifecycleRef::SessionStart => Ok(AgentLifecycle::SessionStart {
@@ -1889,7 +1891,18 @@ impl DeclarativeAdapter {
                 })
             }
             LifecycleRef::TurnStart => Ok(AgentLifecycle::TurnStart { turn_index: None }),
-            LifecycleRef::TurnEnd => Ok(AgentLifecycle::TurnEnd { turn_index: None }),
+            LifecycleRef::TurnEnd => {
+                // Dedicated assistant-message sources only: never the generic
+                // summary list, so unrelated text is never attributed to the
+                // turn. Status stays Running (see `derived_status`).
+                let assistant_message =
+                    extract_string_via_sources(payload, &assistant_message_sources)
+                        .filter(|s| !s.trim().is_empty());
+                Ok(AgentLifecycle::TurnEnd {
+                    turn_index: None,
+                    assistant_message,
+                })
+            }
             LifecycleRef::Stop => {
                 // A manifest may demote a weak Stop to TurnEnd (derived
                 // status stays Running) on a payload condition — e.g.
@@ -1900,7 +1913,16 @@ impl DeclarativeAdapter {
                     .as_ref()
                     .is_some_and(|when| when.iter().all(|(k, v)| payload.get(k) == Some(v)))
                 {
-                    return Ok(AgentLifecycle::TurnEnd { turn_index: None });
+                    // Weak stop (e.g. omp `agent_end` with `willContinue`):
+                    // carry the printed reply like a TurnEnd so it is
+                    // captured while the status stays Running.
+                    let assistant_message =
+                        extract_string_via_sources(payload, &assistant_message_sources)
+                            .filter(|s| !s.trim().is_empty());
+                    return Ok(AgentLifecycle::TurnEnd {
+                        turn_index: None,
+                        assistant_message,
+                    });
                 }
                 let summary = extract_string_via_sources(payload, &summary_sources)
                     .or_else(|| extract_string_via_sources(payload, &prompt_sources));
@@ -2323,7 +2345,12 @@ impl HarnessAdapter for DeclarativeAdapter {
                     .iter()
                     .any(|p| payload_is_subagent_scoped(p)))
         {
-            lifecycle = AgentLifecycle::TurnEnd { turn_index: None };
+            // Status-only demote: the child's reply belongs to the child
+            // session, never to this turn's assistant capture.
+            lifecycle = AgentLifecycle::TurnEnd {
+                turn_index: None,
+                assistant_message: None,
+            };
         }
         let mut event = AgentEvent::new(self.id(), session_id, lifecycle, context);
         event.passthrough_env = input.passthrough_env.clone();

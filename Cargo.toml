@@ -17,7 +17,7 @@ codegen-units = 1
 strip = true
 
 [workspace.package]
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Winston Zhao"]

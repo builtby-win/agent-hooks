@@ -32,7 +32,8 @@
         "executables": ["kimi"],
         "documentation": ["https://moonshotai.github.io/kimi-code/en/customization/hooks"],
         "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
-        "resume": {"argv": ["kimi", "--session", "{session_ref}"], "session_ref": "id"}
+        "resume": {"argv": ["kimi", "--session", "{session_ref}"], "session_ref": "id"},
+        "yolo_args": ["--yolo"]
       },
       "install": [
         {

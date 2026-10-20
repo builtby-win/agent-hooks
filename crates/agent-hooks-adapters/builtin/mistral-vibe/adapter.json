@@ -15,6 +15,12 @@
   },
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["vibe"],
+        "documentation": ["https://docs.mistral.ai/vibe/code/cli/work-with-cli"],
+        "recipe_source": "Vibe CLI docs: `vibe --agent auto-approve`; no start/exec recipe is currently recorded",
+        "yolo_args": ["--agent", "auto-approve"]
+      },
       "install": [
         {
           "op": "toml_list_hooks",

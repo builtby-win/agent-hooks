@@ -41,7 +41,8 @@
         "start": {"argv": ["opencode", "--prompt", "{prompt}"], "model_unsupported": true},
         "exec": {"argv": ["opencode", "run", "{prompt}"]},
         "models": {"argv": ["opencode", "models"]},
-        "model_args": ["--model", "{model}"]
+        "model_args": ["--model", "{model}"],
+        "yolo_args": ["--auto"]
       },
       "install": [
         {

@@ -57,9 +57,9 @@ fn run_hook(home: &Path, cwd: &Path, socket: &Path, payload: &str) -> serde_json
 
 fn blue_config() -> String {
     r#"{"version": 1, "hooks": {"PreToolUse": [
-      {"when": {"tool": "ask"}, "respond": {"decision": "allow",
+      {"when": {"tool": "ask"}, "respond": {"allow": true,
         "answers": [{"question_id": "favorite_color", "selected_options": ["Blue"]}]}},
-      {"when": {"tool": "Bash"}, "respond": {"decision": "allow"}}
+      {"when": {"tool": "Bash"}, "respond": {"allow": true}}
     ]}}"#
         .to_string()
 }
@@ -80,7 +80,11 @@ fn daemonless_blue_auto_answer_renders_allow() {
     // memory (b2v-pi.ts gatePiToolCall).
     assert_eq!(
         v,
-        serde_json::json!({"decision": "allow", "reply": "allow", "answers": [["Blue"]]})
+        serde_json::json!({
+            "decision": "allow",
+            "reply": "allow",
+            "answers": [{"question_id": "favorite_color", "selected_options": ["Blue"]}]
+        })
     );
 }
 
@@ -93,7 +97,7 @@ fn project_tier_overrides_user_tier() {
     write(
         &cwd.path().join(".agent-hooks/hooks.json"),
         r#"{"version": 1, "hooks": {"PreToolUse": [
-          {"when": {"tool": "Bash"}, "respond": {"decision": "deny", "reason": "project policy"}}
+          {"when": {"tool": "Bash"}, "respond": {"allow": false, "custom_input": "project policy"}}
         ]}}"#,
     );
     let dead = home.path().join("no-daemon.sock");
@@ -102,6 +106,124 @@ fn project_tier_overrides_user_tier() {
     assert_eq!(
         v,
         serde_json::json!({"decision": "deny", "reason": "project policy"})
+    );
+}
+
+#[test]
+fn amp_tool_call_obeys_pre_tool_command_policy() {
+    let home = tempfile::TempDir::new().unwrap();
+    let cwd = tempfile::TempDir::new().unwrap();
+    write(
+        &home.path().join(".agent-hooks.json"),
+        r#"{"version":1,"hooks":{"PreToolUse":[
+            {"when":{"prompt_matches":"policy-marker"},"respond":{"allow":false,"custom_input":"blocked command"}}
+        ]}}"#,
+    );
+    let mut child = Command::new(bin())
+        .args(["hook", "amp", "--event", "tool.call", "--socket"])
+        .arg(home.path().join("no-daemon.sock"))
+        .env("HOME", home.path())
+        .env("AGENT_HOOKS_NO_LOCAL", "")
+        .current_dir(cwd.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(
+        br#"{"thread":{"id":"amp-policy"},"toolUseID":"call-1","tool":"shell_command","input":{"command":"printf policy-marker"}}"#,
+    ).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let verdict: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(verdict, serde_json::json!({"decision":"deny","reason":"blocked command"}));
+}
+
+/// Config whose one PreToolUse entry runs `command` (unix shell).
+#[cfg(unix)]
+fn command_config(tool: &str, command: &str) -> String {
+    serde_json::json!({"version": 1, "hooks": {"PreToolUse": [
+        {"when": {"tool": tool}, "command": command}
+    ]}})
+    .to_string()
+}
+
+#[cfg(unix)]
+#[test]
+fn command_stdout_canonical_decision_answers_like_respond() {
+    let home = tempfile::TempDir::new().unwrap();
+    let cwd = tempfile::TempDir::new().unwrap();
+    let verdict = PromptDecision {
+        answers: vec![agent_hooks_protocol::PromptAnswer {
+            question_id: "favorite_color".to_string(),
+            selected_options: vec!["Blue".to_string()],
+            custom_input: None,
+        }],
+        ..PromptDecision::allow()
+    };
+    write(
+        &home.path().join(".agent-hooks.json"),
+        &command_config(
+            "ask",
+            &format!("printf '%s' '{}'", serde_json::to_string(&verdict).unwrap()),
+        ),
+    );
+    let dead = home.path().join("no-daemon.sock");
+
+    let v = run_hook(home.path(), cwd.path(), &dead, ASK_PAYLOAD);
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "decision": "allow",
+            "reply": "allow",
+            "answers": [{"question_id": "favorite_color", "selected_options": ["Blue"]}]
+        })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn command_stdout_invalid_answer_fails_closed() {
+    let home = tempfile::TempDir::new().unwrap();
+    let cwd = tempfile::TempDir::new().unwrap();
+    write(
+        &home.path().join(".agent-hooks.json"),
+        &command_config(
+            "ask",
+            r#"printf '%s' '{"allow":true,"answers":[{"question_id":"favorite_color","selected_options":["Green"]}]}'"#,
+        ),
+    );
+    let dead = home.path().join("no-daemon.sock");
+
+    let v = run_hook(home.path(), cwd.path(), &dead, ASK_PAYLOAD);
+    assert_eq!(v["decision"], "deny", "{v}");
+    assert!(
+        v["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("invalid local hook response")),
+        "{v}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn command_exit_code_beats_stdout_allow() {
+    let home = tempfile::TempDir::new().unwrap();
+    let cwd = tempfile::TempDir::new().unwrap();
+    write(
+        &home.path().join(".agent-hooks.json"),
+        &command_config(
+            "Bash",
+            r#"printf '%s' '{"allow":true}'; echo vetoed >&2; exit 2"#,
+        ),
+    );
+    let dead = home.path().join("no-daemon.sock");
+
+    let v = run_hook(home.path(), cwd.path(), &dead, BASH_PAYLOAD);
+    assert_eq!(
+        v,
+        serde_json::json!({"decision": "deny", "reason": "vetoed"})
     );
 }
 
@@ -141,6 +263,7 @@ async fn daemon_deny_beats_local_allow() {
         // The daemon says it is holding and which id answers it. No
         // capability table, no id convention, no lifecycle match.
         let hold = event.hold.as_ref().expect("held event carries its hold");
+        assert!(event.answerable, "held event is marked answerable");
         assert!(!hold.interactive, "PreToolUse is a claimed mid-flight hold");
         assert!(hold.verdicts.iter().any(|v| v == "deny"));
         let pid = hold.prompt_id.clone();
@@ -174,7 +297,7 @@ async fn local_ask_survives_daemon_allow() {
     write(
         &home.path().join(".agent-hooks.json"),
         r#"{"version": 1, "hooks": {"PreToolUse": [
-          {"when": {"tool": "Bash"}, "respond": {"decision": "ask", "reason": "sure about this?"}}
+          {"when": {"tool": "Bash"}, "respond": {"allow": false, "ask": true, "custom_input": "sure about this?"}}
         ]}}"#,
     );
     let socket = home.path().join("e2e.sock");
@@ -402,7 +525,12 @@ fn unknown_event_matches_no_local_hooks() {
 fn dead_socket_gate_event_fails_open_fast() {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = tempfile::TempDir::new().unwrap();
-    write(&home.path().join(".agent-hooks.json"), &blue_config());
+    // Only the `ask` tool is configured: Bash matches nothing, so with the
+    // daemon dead there is no verdict from any source.
+    write(
+        &home.path().join(".agent-hooks.json"),
+        r#"{"version": 1, "hooks": {"PreToolUse": [{"when": {"tool": "ask"}, "respond": {"allow": true}}]}}"#,
+    );
     // Nothing listens here: connect-refused exercises the gate retry budget
     // (bounded attempts with backoff) with no daemon running.
     let dead = home.path().join("no-daemon.sock");
@@ -478,7 +606,7 @@ fn exit2_deny_exits_2_with_reason_on_stderr() {
     write(
         &home.path().join(".agent-hooks.json"),
         r#"{"version": 1, "hooks": {"PreToolUse": [
-          {"when": {"tool": "Bash"}, "respond": {"decision": "deny", "reason": "exit2 deny reason"}}
+          {"when": {"tool": "Bash"}, "respond": {"allow": false, "custom_input": "exit2 deny reason"}}
         ]}}"#,
     );
     let dead = home.path().join("no-daemon.sock");
@@ -516,7 +644,7 @@ fn exit2_ask_exits_2_with_question_on_stderr() {
     write(
         &home.path().join(".agent-hooks.json"),
         r#"{"version": 1, "hooks": {"PreToolUse": [
-          {"when": {"tool": "Bash"}, "respond": {"decision": "ask", "reason": "are you quite sure?"}}
+          {"when": {"tool": "Bash"}, "respond": {"allow": false, "ask": true, "custom_input": "are you quite sure?"}}
         ]}}"#,
     );
     let dead = home.path().join("no-daemon.sock");
@@ -557,9 +685,10 @@ fn exit2_allow_exits_0() {
         &dead,
         BASH_PAYLOAD.as_bytes(),
     );
-    // Undecided must not exit 2 (deny) in exit2 mode either.
+    // The plain canned allow is a real decision: exit 0, rendered as an allow
+    // in the pi dialect (never exit 2).
     assert_eq!(o.code, 0, "exit2 allow must exit 0: {}", o.stderr);
-    assert_eq!(stdout_json(&o), serde_json::json!({}));
+    assert_eq!(stdout_json(&o)["decision"], "allow");
 }
 
 // ---------------------------------------------------------------------------

@@ -6,13 +6,32 @@
 //! JSON goes to the script's stdin; session id, harness, and lifecycle ride
 //! along as `AGENT_HOOKS_*` env vars.
 //!
-//! Script protocol (boring, mirrors the harness exit-2 convention):
-//! - exit `0` → allow (continue to next entry / daemon).
+//! Script protocol (boring, mirrors the harness exit-2 convention). Exit
+//! codes keep precedence over stdout:
+//! - exit `0` → no opinion unless stdout carries JSON (see below); continues
+//!   to the next entry / daemon.
 //! - exit `2` → deny; trimmed stderr (capped) becomes the deny reason.
 //! - exit `3` → ask; trimmed stderr (capped) is the question for the
 //!   decider (native harness dialog where supported, else deny fallback).
 //! - any other exit, spawn failure, or timeout → fail-open allow + stderr
 //!   warning. Local hooks must never block the agent.
+//!
+//! Exit-0 stdout JSON, in order:
+//! - a canonical [`PromptDecision`] (the protocol type, parsed by serde with
+//!   unknown fields rejected — identical to the RPC and `respond` schema;
+//!   `allow` is required). JSON with an `allow` key that does not parse, or
+//!   fails answer validation, fails closed (deny with a clear reason), never
+//!   an implicit approval.
+//! - a context-only object (`additional_context`, `additionalContext`, or
+//!   Claude Code's `hookSpecificOutput.additionalContext`): a non-verdict.
+//! - anything else is ignored (JSON objects of neither kind warn).
+//! - stdout past 1 MiB is never parsed or truncated: it is a deny with a
+//!   size error.
+//!
+//! A config entry's `respond` is the same canonical [`PromptDecision`]. Every
+//! local decision is checked with [`PromptDecision::resolve_questions`]
+//! against the event's questions before it is accepted; an invalid answer set
+//! fails closed rather than routing wrong answers.
 
 use crate::cli::InitArgs;
 use std::collections::BTreeMap;
@@ -21,14 +40,19 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use agent_hooks_protocol::event::cap_chars;
-use agent_hooks_protocol::{AgentEvent, AgentLifecycle, PromptAnswer, PromptDecision};
+use agent_hooks_protocol::{AgentEvent, AgentLifecycle, PromptDecision, PromptQuestion};
 use serde::{Deserialize, Serialize};
 
 /// Config file version we understand.
 pub const CONFIG_VERSION: u32 = 1;
 
-/// Default per-command timeout when the entry omits `timeout`.
+/// Default per-command timeout when the entry omits `timeout` and the harness
+/// declares no hook window of its own.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
+/// Grace margin between an inherited harness timeout and our own kill: our
+/// kill fires first so the hook exits with a verdict instead of being killed
+/// mid-write by the harness (whose kill discards the decision either way).
+const INHERITED_TIMEOUT_GRACE_SECS: u64 = 2;
 
 /// Env escape hatch: `AGENT_HOOKS_NO_LOCAL=1` skips local dispatch entirely.
 pub const NO_LOCAL_ENV: &str = "AGENT_HOOKS_NO_LOCAL";
@@ -37,6 +61,9 @@ pub const NO_LOCAL_ENV: &str = "AGENT_HOOKS_NO_LOCAL";
 const MAX_REASON_LEN: usize = 2000;
 /// Cap on injected context per event, summed across hooks.
 const MAX_CONTEXT_LEN: usize = 4000;
+/// Cap on bytes read from a script's stdout. Stdout past this is never
+/// parsed or truncated into a decision: it is denied with a size error.
+const MAX_STDOUT_BYTES: usize = 1024 * 1024;
 
 /// One local hook entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,17 +73,25 @@ pub struct UserHookEntry {
     /// Optional: entries with `respond` answer directly without spawning.
     #[serde(default)]
     pub command: String,
-    /// Seconds before the command is killed (fail-open). Default 10.
-    #[serde(default = "default_timeout")]
-    pub timeout: u64,
+    /// Seconds before the command is killed (fail-open). Omitted inherits the
+    /// harness hook window (minus a grace margin so our kill fires first);
+    /// when the harness declares none, the 10s default applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
     /// Optional match filter: the entry only applies when the event matches.
     /// Absent means "match everything".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<HookMatch>,
-    /// Optional canned response: when the entry matches, answer directly
-    /// without spawning `command`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub respond: Option<HookRespond>,
+    /// Optional canned response, in canonical [`PromptDecision`] terms: when
+    /// the entry matches, answer directly without spawning `command`. Unknown
+    /// keys are a config error (the pre-`PromptDecision` `{decision, reason}`
+    /// shape is rejected, not silently ignored).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_respond"
+    )]
+    pub respond: Option<PromptDecision>,
 }
 
 /// Match filter for a hook entry. Every present field must match
@@ -74,33 +109,49 @@ pub struct HookMatch {
     pub prompt_matches: Option<String>,
 }
 
-/// Canned response for a matched hook entry: no process is spawned.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HookRespond {
-    pub decision: RespondKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub answers: Vec<PromptAnswer>,
-    /// Static text for the model's context, on a matched entry. Carried to
-    /// harnesses whose event declares an `inject` template; dropped elsewhere
-    /// and on deny/ask.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_context: Option<String>,
+fn deserialize_respond<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<PromptDecision>, D::Error> {
+    use serde::de::Error;
+    Option::<serde_json::Value>::deserialize(deserializer)?
+        .map(|v| {
+            serde_json::from_value::<PromptDecision>(v)
+                .map_err(|e| D::Error::custom(format!("respond: {e}")))
+        })
+        .transpose()
 }
 
-/// Canned verdict kind, in `PromptDecision` terms: allow, deny, or escalate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RespondKind {
-    Allow,
-    Deny,
-    Ask,
+/// Questions the event asks, for `resolve_questions` (empty for events with
+/// no prompt).
+fn event_questions(event: &AgentEvent) -> &[PromptQuestion] {
+    match &event.lifecycle {
+        AgentLifecycle::PermissionRequest { prompt } => &prompt.questions,
+        AgentLifecycle::PreToolUse {
+            prompt: Some(prompt),
+            ..
+        } => &prompt.questions,
+        _ => &[],
+    }
 }
 
-fn default_timeout() -> u64 {
-    DEFAULT_TIMEOUT_SECS
+/// Accept a local decision only after `resolve_questions` against the event's
+/// questions. Invalid → deny with a clear reason (fail closed): wrong answers
+/// are never routed to the harness. Deny/ask text is capped; allow-side
+/// `custom_input` is an answer and is never truncated.
+fn accept_decision(event: &AgentEvent, decision: PromptDecision, source: &str) -> PromptDecision {
+    match decision.resolve_questions(event_questions(event)) {
+        Ok(mut d) => {
+            if !d.allow {
+                d.custom_input = d.custom_input.map(|r| cap_chars(&r, MAX_REASON_LEN));
+            }
+            d
+        }
+        Err(e) => {
+            let reason = format!("invalid local hook response from {source}: {e}");
+            eprintln!("agent-hooks: {reason}");
+            PromptDecision::deny(Some(cap_chars(&reason, MAX_REASON_LEN)))
+        }
+    }
 }
 
 /// Whole user-hooks file: `{version, hooks: {Lifecycle: [entries]}}`.
@@ -302,7 +353,7 @@ fn load_merged_from(
         if let Some(canon) = normalize_key(event_name) {
             let entry = UserHookEntry {
                 command: plugin.resolve_command(&hook_def.command),
-                timeout: hook_def.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS),
+                timeout: hook_def.timeout,
                 when: hook_def.when.as_ref().map(|w| HookMatch {
                     tool: w.tool.clone(),
                     prompt_matches: w.prompt_matches.clone(),
@@ -393,14 +444,51 @@ fn join_contexts(contexts: Vec<String>) -> Option<String> {
 /// `{"additional_context": ".."}`, the same key camelCased, or Claude Code's
 /// `{"hookSpecificOutput": {"additionalContext": ".."}}`, so scripts written
 /// for a harness work unchanged. Anything else on stdout is ignored.
-fn parse_context_stdout(stdout: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+fn parse_context_stdout(v: &serde_json::Value) -> Option<String> {
     let text = v
         .get("additional_context")
         .or_else(|| v.get("additionalContext"))
         .or_else(|| v.pointer("/hookSpecificOutput/additionalContext"))?
         .as_str()?;
     (!text.trim().is_empty()).then(|| text.to_string())
+}
+
+/// What exit-0 stdout said.
+enum Stdout {
+    Silent,
+    Context(String),
+    /// JSON that is neither a verdict nor a context shape (the parse error
+    /// explains why); warned about, never an approval or denial.
+    Unrecognized(String),
+    /// A structured verdict attempt: canonical [`PromptDecision`] or the
+    /// parse error.
+    Verdict(Result<PromptDecision, String>),
+}
+
+/// Classify exit-0 stdout. The protocol type is the schema: JSON that parses
+/// as a [`PromptDecision`] is a verdict, and JSON with an `allow` key that
+/// does not (typo, wrong type, stale shape) is a malformed verdict that fails
+/// closed. Without `allow` the context-only shapes apply; anything else is
+/// unrecognized.
+fn parse_stdout(stdout: &str) -> Stdout {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
+        return Stdout::Silent;
+    };
+    let has_allow = value.as_object().is_some_and(|o| o.contains_key("allow"));
+    match serde_json::from_value::<PromptDecision>(value.clone()) {
+        Ok(decision) => Stdout::Verdict(Ok(decision)),
+        Err(e) if has_allow => Stdout::Verdict(Err(e.to_string())),
+        Err(e) => match parse_context_stdout(&value) {
+            Some(text) => Stdout::Context(text),
+            None if value
+                .as_object()
+                .is_some_and(|o| o.contains_key("additional_context")) =>
+            {
+                Stdout::Silent
+            }
+            None => Stdout::Unrecognized(e.to_string()),
+        },
+    }
 }
 
 /// Run matching entries in order with the normalized event on stdin.
@@ -464,19 +552,11 @@ pub fn run_local_hooks(
         // Matched `respond` answers directly — no process is spawned,
         // even when `command` is also set.
         if let Some(respond) = entry.respond.as_ref() {
-            // Canned reasons are capped like captured stderr.
-            let reason = respond
-                .reason
-                .as_deref()
-                .map(|r| cap_chars(r, MAX_REASON_LEN));
-            let mut decision = match respond.decision {
-                RespondKind::Allow => PromptDecision::allow(),
-                RespondKind::Deny => PromptDecision::deny(reason.clone()),
-                RespondKind::Ask => PromptDecision::ask(reason.clone()),
-            };
-            decision.answers = respond.answers.clone();
-            decision.additional_context = respond.additional_context.clone();
-            plan.push(Planned::Canned(decision));
+            plan.push(Planned::Canned(accept_decision(
+                event,
+                respond.clone(),
+                "`respond` entry",
+            )));
             continue;
         }
         if entry.command.trim().is_empty() {
@@ -485,9 +565,16 @@ pub fn run_local_hooks(
         // Each hook keeps its own timeout, capped by the shared budget. The
         // cap is what keeps the parallel total inside the harness window:
         // wall time is the slowest hook, and no hook may outlast the budget.
-        let timeout = match budget_secs {
-            Some(b) => entry.timeout.min(b),
-            None => entry.timeout,
+        // An omitted entry timeout inherits that window (minus a grace margin
+        // so our kill — a clean fail-open verdict — fires before the harness
+        // kill, which would discard the decision mid-write). With no declared
+        // window the 10s default applies. Either way the first timer to fire
+        // wins: entry timeout, inherited window, or harness kill.
+        let timeout = match (entry.timeout, budget_secs) {
+            (Some(t), Some(b)) => t.min(b),
+            (Some(t), None) => t,
+            (None, Some(b)) => b.saturating_sub(INHERITED_TIMEOUT_GRACE_SECS).max(1),
+            (None, None) => DEFAULT_TIMEOUT_SECS,
         };
         plan.push(Planned::Spawn {
             command: entry.command.clone(),
@@ -516,45 +603,63 @@ pub fn run_local_hooks(
     });
 
     let mut ask: Option<PromptDecision> = None;
-    let mut canned_allow: Option<PromptDecision> = None;
+    let mut allow: Option<PromptDecision> = None;
     let mut contexts: Vec<String> = Vec::new();
     for (planned, outcome) in plan.iter().zip(outcomes) {
-        match (planned, outcome) {
-            (Planned::Canned(decision), _) => {
-                if decision.is_deny() {
-                    return Some(decision.clone());
-                }
-                contexts.extend(decision.additional_context.clone());
-                if decision.ask {
-                    if ask.is_none() {
-                        ask = Some(decision.clone());
-                    }
-                } else if !decision.answers.is_empty() && canned_allow.is_none() {
-                    canned_allow = Some(decision.clone());
-                }
-            }
-            (_, Some(RunOutcome::Deny(reason))) => return Some(PromptDecision::deny(reason)),
-            // Escalation accumulates: a later entry may still veto, and the
-            // ask survives the daemon's default-allow via merge precedence.
-            (_, Some(RunOutcome::Ask(question))) => {
-                if ask.is_none() {
-                    ask = Some(PromptDecision::ask(question));
-                }
-            }
+        let decision = match (planned, outcome) {
+            (Planned::Canned(decision), _) => decision.clone(),
+            (_, Some(RunOutcome::Decision(decision))) => decision,
+            (_, Some(RunOutcome::Deny(reason))) => PromptDecision::deny(reason),
+            (_, Some(RunOutcome::Ask(question))) => PromptDecision::ask(question),
             (_, Some(RunOutcome::Ignored(warn))) => {
                 eprintln!("agent-hooks: local hook ignored: {warn}");
+                continue;
             }
-            (_, Some(RunOutcome::Context(text))) => contexts.push(text),
-            (_, Some(RunOutcome::Allow)) | (_, None) => {}
+            (_, Some(RunOutcome::Context(text))) => {
+                contexts.push(text);
+                continue;
+            }
+            (_, Some(RunOutcome::Allow)) | (_, None) => continue,
+        };
+        // Deny always wins, whichever entry or channel it came from.
+        if decision.is_deny() {
+            return Some(PromptDecision {
+                additional_context: None,
+                ..decision
+            });
         }
+        contexts.extend(decision.additional_context.clone());
+        if decision.ask {
+            // Escalation accumulates: a later entry may still veto, and the
+            // ask survives the daemon's default-allow via merge precedence.
+            if ask.is_none() {
+                ask = Some(decision);
+            }
+        } else if decision.allow {
+            // First explicit allow wins; one carrying answers beats one without.
+            let better = match &allow {
+                None => true,
+                Some(a) => a.answers.is_empty() && !decision.answers.is_empty(),
+            };
+            if better {
+                allow = Some(decision);
+            }
+        }
+        // A defer is no opinion: only its context (above) survives.
     }
-    // Deny returns early above; ask beats a canned allow-with-answers.
-    let verdict = ask.or(canned_allow);
+    // Deny returned early above; ask beats an explicit allow.
+    let verdict = ask.or(allow);
     let context = join_contexts(contexts);
     match (verdict, context) {
-        (Some(v), _) if v.ask => Some(v),
+        (Some(v), _) if v.ask => Some(PromptDecision {
+            additional_context: None,
+            ..v
+        }),
         (Some(v), Some(c)) => Some(v.with_additional_context(c)),
-        (Some(v), None) => Some(v),
+        (Some(v), None) => Some(PromptDecision {
+            additional_context: None,
+            ..v
+        }),
         // Context with no opinion on the verdict: defer, not allow, so a
         // tool gate's own permission checks still run.
         (None, Some(c)) => Some(PromptDecision::defer().with_additional_context(c)),
@@ -634,16 +739,21 @@ enum RunOutcome {
     Allow,
     /// Exit 0 with context to inject (see `parse_context_stdout`).
     Context(String),
+    /// Exit 0 with a canonical stdout verdict, already accepted through
+    /// `accept_decision` (invalid → a fail-closed deny).
+    Decision(PromptDecision),
     Deny(Option<String>),
     Ask(Option<String>),
     Ignored(String),
 }
 
-/// Fail-open audit (this file): every failure resolves to allow/skip —
-/// spawn failure, stdin-write failure, non-2/3 exits, timeouts, wait errors,
-/// `AGENT_HOOKS_NO_LOCAL=1`, empty commands, unreadable config tiers, and
-/// non-UTF8 stderr (lossy-decoded, never an error). Deny/ask arise ONLY from
-/// exit 2/3 or a canned `respond`. Deny > ask > allow merge precedence holds.
+/// Fail-open audit (this file): every infrastructure failure resolves to
+/// allow/skip — spawn failure, stdin-write failure, non-2/3 exits, timeouts,
+/// wait errors, `AGENT_HOOKS_NO_LOCAL=1`, empty commands, unreadable config
+/// tiers, and non-UTF8 stderr (lossy-decoded, never an error). Deny/ask arise
+/// ONLY from exit 2/3, a canned `respond`, or an explicit canonical stdout
+/// verdict (a malformed one fails closed). Deny > ask > allow merge
+/// precedence holds.
 fn run_one(command: &str, timeout_secs: u64, stdin_json: &str, event: &AgentEvent) -> RunOutcome {
     let mut cmd = std::process::Command::new(shell_program());
     cmd.arg(shell_flag())
@@ -671,17 +781,19 @@ fn run_one(command: &str, timeout_secs: u64, stdin_json: &str, event: &AgentEven
     // Drain stdout on its own thread: a script printing more than a pipe
     // buffer would otherwise block until the timeout kills it. Keeps the
     // first bytes (enough for a context JSON), discards the rest.
-    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<String>();
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<(String, bool)>();
     if let Some(mut out) = child.stdout.take() {
         std::thread::spawn(move || {
             use std::io::Read;
             let mut kept = Vec::new();
             let _ = out
                 .by_ref()
-                .take(MAX_CONTEXT_LEN as u64 * 4 + 1)
+                .take(MAX_STDOUT_BYTES as u64)
                 .read_to_end(&mut kept);
-            let _ = std::io::copy(&mut out, &mut std::io::sink());
-            let _ = stdout_tx.send(String::from_utf8_lossy(&kept).into_owned());
+            // Anything past the cap is drained so the script never blocks,
+            // but flagged: a truncated verdict is never parsed.
+            let overflow = std::io::copy(&mut out, &mut std::io::sink()).unwrap_or(0) > 0;
+            let _ = stdout_tx.send((String::from_utf8_lossy(&kept).into_owned(), overflow));
         });
     }
     // Feed stdin, then close it so the script sees EOF.
@@ -722,12 +834,43 @@ fn run_one(command: &str, timeout_secs: u64, stdin_json: &str, event: &AgentEven
                 if status.success() {
                     // A backgrounded grandchild can hold the pipe open past
                     // exit; a short wait keeps that from stalling the hook.
-                    let stdout = stdout_rx
+                    let (stdout, overflow) = stdout_rx
                         .recv_timeout(Duration::from_millis(200))
                         .unwrap_or_default();
-                    return match parse_context_stdout(&stdout) {
-                        Some(text) => RunOutcome::Context(text),
-                        None => RunOutcome::Allow,
+                    if overflow {
+                        // Never parsed, never truncated: an oversized stdout
+                        // may hold a decision (or answers) we cannot read
+                        // exactly, so it is an explicit denial, not a skip.
+                        let reason = format!(
+                            "local hook '{command}' wrote more than {MAX_STDOUT_BYTES} bytes to stdout; \
+                             a decision that large cannot be read exactly"
+                        );
+                        eprintln!("agent-hooks: {reason}");
+                        return RunOutcome::Decision(PromptDecision::deny(Some(cap_chars(
+                            &reason,
+                            MAX_REASON_LEN,
+                        ))));
+                    }
+                    return match parse_stdout(&stdout) {
+                        Stdout::Silent => RunOutcome::Allow,
+                        Stdout::Context(text) => RunOutcome::Context(text),
+                        Stdout::Unrecognized(e) => RunOutcome::Ignored(format!(
+                            "'{command}' stdout JSON is neither a PromptDecision nor context ({e})"
+                        )),
+                        Stdout::Verdict(Ok(decision)) => RunOutcome::Decision(accept_decision(
+                            event,
+                            decision,
+                            &format!("'{command}' stdout"),
+                        )),
+                        Stdout::Verdict(Err(e)) => {
+                            let reason =
+                                format!("invalid local hook verdict on stdout of '{command}': {e}");
+                            eprintln!("agent-hooks: {reason}");
+                            RunOutcome::Decision(PromptDecision::deny(Some(cap_chars(
+                                &reason,
+                                MAX_REASON_LEN,
+                            ))))
+                        }
                     };
                 }
                 return RunOutcome::Ignored(format!(
@@ -822,7 +965,8 @@ pub fn scaffold_json() -> String {
 mod tests {
     use super::*;
     use agent_hooks_protocol::{
-        AgentLifecycle, EventContext, PromptKind, PromptQuestion, PromptRequest,
+        AgentLifecycle, EventContext, PromptAnswer, PromptKind, PromptOption, PromptQuestion,
+        PromptRequest,
     };
 
     fn test_event(lifecycle: AgentLifecycle) -> AgentEvent {
@@ -979,25 +1123,25 @@ mod tests {
         });
         let allow = [UserHookEntry {
             command: "exit 0".to_string(),
-            timeout: 5,
+            timeout: Some(5),
             when: None,
             respond: None,
         }];
         let deny = [UserHookEntry {
             command: "echo no-rm >&2; exit 2".to_string(),
-            timeout: 5,
+            timeout: Some(5),
             when: None,
             respond: None,
         }];
         let other = [UserHookEntry {
             command: "exit 1".to_string(),
-            timeout: 5,
+            timeout: Some(5),
             when: None,
             respond: None,
         }];
         let missing = [UserHookEntry {
             command: "definitely-not-a-real-binary-xyz".to_string(),
-            timeout: 5,
+            timeout: Some(5),
             when: None,
             respond: None,
         }];
@@ -1019,7 +1163,7 @@ mod tests {
         });
         let ask = [UserHookEntry {
             command: "echo 'allow rm -rf?' >&2; exit 3".to_string(),
-            timeout: 5,
+            timeout: Some(5),
             when: None,
             respond: None,
         }];
@@ -1029,13 +1173,13 @@ mod tests {
         let chain = [
             UserHookEntry {
                 command: "exit 3".to_string(),
-                timeout: 5,
+                timeout: Some(5),
                 when: None,
                 respond: None,
             },
             UserHookEntry {
                 command: "exit 2".to_string(),
-                timeout: 5,
+                timeout: Some(5),
                 when: None,
                 respond: None,
             },
@@ -1045,7 +1189,7 @@ mod tests {
         // Bare exit 3 with no question still asks.
         let bare = [UserHookEntry {
             command: "exit 3".to_string(),
-            timeout: 5,
+            timeout: Some(5),
             when: None,
             respond: None,
         }];
@@ -1062,7 +1206,7 @@ mod tests {
         });
         let slow = [UserHookEntry {
             command: "sleep 30".to_string(),
-            timeout: 1,
+            timeout: Some(1),
             when: None,
             respond: None,
         }];
@@ -1072,11 +1216,51 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn omitted_timeout_inherits_the_harness_window() {
+        // No entry timeout + a 4s harness window: our kill must fire inside
+        // the window (4s minus the grace margin), not at the 10s default —
+        // the first timer to fire wins, and it must be ours, not the harness's.
+        let event = test_event(AgentLifecycle::Stop {
+            success: false,
+            summary: None,
+        });
+        let inherit = [UserHookEntry {
+            command: "sleep 30".to_string(),
+            timeout: None,
+            when: None,
+            respond: None,
+        }];
+        let start = Instant::now();
+        assert!(run_local_hooks(&event, &inherit, Some(Duration::from_secs(4))).is_none());
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "inherited kill must fire before the harness window ends, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn omitted_timeout_parses_and_round_trips_absent() {
+        // The config default must stay distinguishable from an explicit value:
+        // absent parses to None and serializes back without the key.
+        let entry: UserHookEntry =
+            serde_json::from_value(serde_json::json!({"command": "exit 0"})).expect("parse");
+        assert_eq!(entry.timeout, None);
+        let v = serde_json::to_value(&entry).expect("serialize");
+        assert!(
+            v.get("timeout").is_none(),
+            "absent timeout must not serialize"
+        );
+    }
+
+    #[cfg(unix)]
     fn sleepers(n: usize, secs: u64) -> Vec<UserHookEntry> {
         (0..n)
             .map(|_| UserHookEntry {
                 command: format!("sleep {secs}"),
-                timeout: 10,
+                timeout: Some(10),
                 when: None,
                 respond: None,
             })
@@ -1135,13 +1319,13 @@ mod tests {
         let entries = vec![
             UserHookEntry {
                 command: "sleep 1; echo first >&2; exit 2".to_string(),
-                timeout: 10,
+                timeout: Some(10),
                 when: None,
                 respond: None,
             },
             UserHookEntry {
                 command: "echo second >&2; exit 2".to_string(),
-                timeout: 10,
+                timeout: Some(10),
                 when: None,
                 respond: None,
             },
@@ -1171,7 +1355,7 @@ mod tests {
         let out = dir.join("got.json");
         let entries = [UserHookEntry {
             command: format!("cat > {}", out.display()),
-            timeout: 5,
+            timeout: Some(5),
             when: None,
             respond: None,
         }];
@@ -1184,19 +1368,84 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn color_question() -> PromptQuestion {
+        PromptQuestion {
+            id: "favorite_color".to_string(),
+            header: None,
+            question: "Favorite color?".to_string(),
+            options: ["Red", "Blue"]
+                .into_iter()
+                .map(|label| PromptOption {
+                    label: label.to_string(),
+                    description: None,
+                    preview: None,
+                })
+                .collect(),
+            multiple: false,
+            custom: false,
+            recommended: None,
+        }
+    }
+
+    fn blue_answer() -> PromptAnswer {
+        PromptAnswer {
+            question_id: "favorite_color".to_string(),
+            selected_options: vec!["Blue".to_string()],
+            custom_input: None,
+        }
+    }
+
+    fn blue_decision() -> PromptDecision {
+        let mut d = PromptDecision::allow();
+        d.answers = vec![blue_answer()];
+        d
+    }
+
+    fn question_event() -> AgentEvent {
+        test_event(AgentLifecycle::PermissionRequest {
+            prompt: PromptRequest {
+                prompt_id: "prompt-1".to_string(),
+                kind: PromptKind::Question,
+                tool_name: Some("Bash".to_string()),
+                command: None,
+                file_path: None,
+                description: Some("Pick a color".to_string()),
+                questions: vec![color_question()],
+                suggestions: Vec::new(),
+            },
+        })
+    }
+
+    fn bash_pre_tool_use(command: &str) -> AgentEvent {
+        test_event(AgentLifecycle::PreToolUse {
+            tool_name: "Bash".to_string(),
+            input: serde_json::json!({"command": command}),
+            prompt: None,
+        })
+    }
+
+    fn respond_entry(when: Option<HookMatch>, respond: PromptDecision) -> UserHookEntry {
+        UserHookEntry {
+            command: String::new(),
+            timeout: Some(5),
+            when,
+            respond: Some(respond),
+        }
+    }
+
     #[test]
     fn commandless_when_respond_entries_parse() {
-        // `command` is optional now; a pure match+answer entry deserializes.
-        // Mirrors the `when`/`respond` example in docs/socket-protocol.md.
+        // `command` is optional now; a pure match+answer entry deserializes,
+        // and `respond` is a canonical PromptDecision.
         let cfg: UserHooksConfig = serde_json::from_str(
-            r#"{"version":1,"hooks":{"PermissionRequest":[{"when":{"tool":"Bash"},"respond":{"decision":"allow","answers":[{"question_id":"favorite_color","selected_options":["Blue"]}]}}],"PreToolUse":[{"when":{"prompt_matches":"rm -rf"},"respond":{"decision":"deny","reason":"rm -rf is never auto-approved"}}]}}"#,
+            r#"{"version":1,"hooks":{"PermissionRequest":[{"when":{"tool":"Bash"},"respond":{"allow":true,"answers":[{"question_id":"favorite_color","selected_options":["Blue"]}]}}],"PreToolUse":[{"when":{"prompt_matches":"rm -rf"},"respond":{"allow":false,"custom_input":"rm -rf is never auto-approved"}}]}}"#,
         )
         .unwrap();
         let entry = &cfg.hooks["PermissionRequest"][0];
         assert!(entry.command.is_empty());
         assert_eq!(entry.when.as_ref().unwrap().tool.as_deref(), Some("Bash"));
         let respond = entry.respond.as_ref().unwrap();
-        assert_eq!(respond.decision, RespondKind::Allow);
+        assert!(respond.allow);
         assert_eq!(
             respond.answers[0].selected_options,
             vec!["Blue".to_string()]
@@ -1207,98 +1456,156 @@ mod tests {
             Some("rm -rf")
         );
         let respond = deny.respond.as_ref().unwrap();
-        assert_eq!(respond.decision, RespondKind::Deny);
+        assert!(respond.is_deny());
         assert_eq!(
-            respond.reason.as_deref(),
+            respond.custom_input.as_deref(),
             Some("rm -rf is never auto-approved")
         );
     }
 
     #[test]
+    fn legacy_respond_shape_and_typos_are_rejected_not_ignored() {
+        for bad in [
+            r#"{"decision":"deny","reason":"nope"}"#,
+            r#"{"allow":false,"reason":"nope"}"#,
+            r#"{"allow":true,"answer":[]}"#,
+            r#"{"custom_input":"missing allow"}"#,
+        ] {
+            let text = format!(r#"{{"version":1,"hooks":{{"PreToolUse":[{{"respond":{bad}}}]}}}}"#);
+            let err = serde_json::from_str::<UserHooksConfig>(&text)
+                .expect_err(bad)
+                .to_string();
+            assert!(err.contains("respond"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn respond_roundtrips_through_config_serialization() {
+        let mut decision = PromptDecision::allow_always();
+        decision.answers = vec![blue_answer()];
+        decision.additional_context = Some("ctx".to_string());
+        let entry = respond_entry(None, decision.clone());
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: UserHookEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.respond, Some(decision));
+    }
+
+    #[test]
     fn when_tool_match_returns_canned_blue_answers_without_spawning() {
-        let event = test_event(AgentLifecycle::PermissionRequest {
-            prompt: PromptRequest {
-                prompt_id: "prompt-1".to_string(),
-                kind: PromptKind::Question,
-                tool_name: Some("Bash".to_string()),
-                command: None,
-                file_path: None,
-                description: Some("Pick a color".to_string()),
-                questions: vec![PromptQuestion {
-                    id: "favorite_color".to_string(),
-                    header: None,
-                    question: "Favorite color?".to_string(),
-                    options: vec![],
-                    multiple: false,
-                    custom: false,
-                    recommended: None,
-                }],
-                suggestions: Vec::new(),
-            },
-        });
+        let event = question_event();
         // `command` would deny if spawned — the canned path must not spawn.
         let entries = [UserHookEntry {
             command: "exit 2".to_string(),
-            timeout: 5,
+            timeout: Some(5),
             when: Some(HookMatch {
                 tool: Some("bash".to_string()),
                 prompt_matches: None,
             }),
-            respond: Some(HookRespond {
-                decision: RespondKind::Allow,
-                reason: None,
-                answers: vec![PromptAnswer {
-                    question_id: "favorite_color".to_string(),
-                    selected_options: vec!["Blue".to_string()],
-                    custom_input: None,
-                }],
-                additional_context: None,
-            }),
+            respond: Some(blue_decision()),
         }];
         let d = run_local_hooks(&event, &entries, None).expect("canned allow+answers");
         assert!(d.allow && !d.ask);
-        assert_eq!(d.answers.len(), 1);
-        assert_eq!(d.answers[0].question_id, "favorite_color");
-        assert_eq!(d.answers[0].selected_options, vec!["Blue".to_string()]);
+        assert_eq!(d.answers, vec![blue_answer()]);
         // Non-matching tool: the entry is skipped entirely (no spawn, no deny).
         let miss = [UserHookEntry {
             command: "exit 2".to_string(),
-            timeout: 5,
+            timeout: Some(5),
             when: Some(HookMatch {
                 tool: Some("Edit".to_string()),
                 prompt_matches: None,
             }),
-            respond: Some(HookRespond {
-                decision: RespondKind::Deny,
-                reason: Some("nope".to_string()),
-                answers: vec![],
-                additional_context: None,
-            }),
+            respond: Some(PromptDecision::deny(Some("nope".to_string()))),
         }];
         assert!(run_local_hooks(&event, &miss, None).is_none());
     }
 
     #[test]
+    fn plain_canned_allow_is_kept() {
+        let event = bash_pre_tool_use("ls");
+        let entries = [respond_entry(None, PromptDecision::allow())];
+        let d = run_local_hooks(&event, &entries, None).expect("canned allow is a decision");
+        assert!(d.allow && !d.ask && !d.defer);
+        assert!(d.answers.is_empty());
+        // It survives the merge against a daemon that deferred.
+        let merged = merge_decisions(Some(d), Some(PromptDecision::defer()));
+        assert!(merged.allow);
+    }
+
+    #[test]
+    fn canned_allow_always_and_suggestion_survive() {
+        let event = bash_pre_tool_use("ls");
+        let entries = [respond_entry(
+            None,
+            PromptDecision::allow_with_suggestion(0),
+        )];
+        let d = run_local_hooks(&event, &entries, None).unwrap();
+        assert!(d.allow && d.allow_always && d.suggestion == Some(0));
+    }
+
+    #[test]
+    fn canned_defer_is_no_opinion_but_keeps_context() {
+        let event = bash_pre_tool_use("ls");
+        let ctx = [respond_entry(
+            None,
+            PromptDecision::defer().with_additional_context("note"),
+        )];
+        let d = run_local_hooks(&event, &ctx, None).unwrap();
+        assert!(d.defer && !d.allow);
+        assert_eq!(d.additional_context.as_deref(), Some("note"));
+        // A defer alone carries no verdict at all.
+        let none = [respond_entry(None, PromptDecision::defer())];
+        assert!(run_local_hooks(&event, &none, None).is_none());
+    }
+
+    #[test]
+    fn invalid_canned_answers_fail_closed_with_reason() {
+        let event = question_event();
+        let mut unknown_question = PromptDecision::allow();
+        unknown_question.answers = vec![PromptAnswer {
+            question_id: "nope".to_string(),
+            selected_options: vec!["Blue".to_string()],
+            custom_input: None,
+        }];
+        let mut bad_label = PromptDecision::allow();
+        bad_label.answers = vec![PromptAnswer {
+            question_id: "favorite_color".to_string(),
+            selected_options: vec!["Green".to_string()],
+            custom_input: None,
+        }];
+        let mut conflicting = blue_decision();
+        conflicting.ask = true;
+        for decision in [unknown_question, bad_label, conflicting] {
+            let d = run_local_hooks(&event, &[respond_entry(None, decision)], None)
+                .expect("invalid response must decide");
+            assert!(d.is_deny(), "{d:?}");
+            assert!(d.answers.is_empty());
+            assert!(
+                d.custom_input
+                    .as_deref()
+                    .is_some_and(|r| r.contains("invalid local hook response")),
+                "{d:?}"
+            );
+        }
+        // Answers on an event that asked nothing never route either.
+        let d = run_local_hooks(
+            &bash_pre_tool_use("ls"),
+            &[respond_entry(None, blue_decision())],
+            None,
+        )
+        .unwrap();
+        assert!(d.is_deny());
+    }
+
+    #[test]
     fn prompt_matches_substring_denies() {
-        let event = test_event(AgentLifecycle::PreToolUse {
-            tool_name: "Bash".to_string(),
-            input: serde_json::json!({"command": "rm -rf /tmp/x"}),
-            prompt: None,
-        });
-        let entries = [UserHookEntry {
-            command: String::new(),
-            timeout: 5,
-            when: Some(HookMatch {
+        let event = bash_pre_tool_use("rm -rf /tmp/x");
+        let entries = [respond_entry(
+            Some(HookMatch {
                 tool: None,
                 prompt_matches: Some("RM -RF".to_string()),
             }),
-            respond: Some(HookRespond {
-                decision: RespondKind::Deny,
-                reason: Some("rm -rf is never auto-approved".to_string()),
-                answers: vec![],
-                additional_context: None,
-            }),
-        }];
+            PromptDecision::deny(Some("rm -rf is never auto-approved".to_string())),
+        )];
         let d = run_local_hooks(&event, &entries, None).expect("prompt match must deny");
         assert!(!d.allow && !d.ask);
         assert_eq!(
@@ -1306,70 +1613,48 @@ mod tests {
             Some("rm -rf is never auto-approved")
         );
         // Non-matching substring: skipped, fail-open allow.
-        let miss = [UserHookEntry {
-            command: String::new(),
-            timeout: 5,
-            when: Some(HookMatch {
+        let miss = [respond_entry(
+            Some(HookMatch {
                 tool: None,
                 prompt_matches: Some("definitely not in the input".to_string()),
             }),
-            respond: Some(HookRespond {
-                decision: RespondKind::Deny,
-                reason: Some("nope".to_string()),
-                answers: vec![],
-                additional_context: None,
-            }),
-        }];
+            PromptDecision::deny(Some("nope".to_string())),
+        )];
         assert!(run_local_hooks(&event, &miss, None).is_none());
     }
 
     #[test]
     fn canned_ask_escalates_with_reason() {
-        let event = test_event(AgentLifecycle::PreToolUse {
-            tool_name: "Bash".to_string(),
-            input: serde_json::json!({"command": "ls"}),
-            prompt: None,
-        });
-        let entries = [UserHookEntry {
-            command: String::new(),
-            timeout: 5,
-            when: None,
-            respond: Some(HookRespond {
-                decision: RespondKind::Ask,
-                reason: Some("are you sure?".to_string()),
-                answers: vec![],
-                additional_context: None,
-            }),
-        }];
+        let event = bash_pre_tool_use("ls");
+        let entries = [respond_entry(
+            None,
+            PromptDecision::ask(Some("are you sure?".to_string())),
+        )];
         let a = run_local_hooks(&event, &entries, None).expect("canned ask must escalate");
         assert!(a.ask && !a.allow);
         assert_eq!(a.custom_input.as_deref(), Some("are you sure?"));
-        // A later spawned deny still vetoes the canned ask (unix spawn).
+    }
+
+    #[test]
+    fn canned_ask_beats_canned_allow() {
+        let event = bash_pre_tool_use("ls");
+        let entries = [
+            respond_entry(None, PromptDecision::allow()),
+            respond_entry(None, PromptDecision::ask(Some("q?".to_string()))),
+        ];
+        let d = run_local_hooks(&event, &entries, None).unwrap();
+        assert!(d.ask && !d.allow);
     }
 
     #[cfg(unix)]
     #[test]
     fn spawned_deny_vetoes_canned_ask() {
-        let event = test_event(AgentLifecycle::PreToolUse {
-            tool_name: "Bash".to_string(),
-            input: serde_json::json!({"command": "ls"}),
-            prompt: None,
-        });
+        let event = bash_pre_tool_use("ls");
         let chain = [
-            UserHookEntry {
-                command: String::new(),
-                timeout: 5,
-                when: None,
-                respond: Some(HookRespond {
-                    decision: RespondKind::Ask,
-                    reason: Some("are you sure?".to_string()),
-                    answers: vec![],
-                    additional_context: None,
-                }),
-            },
+            respond_entry(None, PromptDecision::ask(Some("are you sure?".to_string()))),
             UserHookEntry {
                 command: "exit 2".to_string(),
-                timeout: 5,
+                timeout: Some(5),
                 when: None,
                 respond: None,
             },
@@ -1382,7 +1667,7 @@ mod tests {
     fn context_entry(command: &str) -> UserHookEntry {
         UserHookEntry {
             command: command.to_string(),
-            timeout: 5,
+            timeout: Some(5),
             when: None,
             respond: None,
         }
@@ -1425,6 +1710,9 @@ mod tests {
             "echo just logging",
             "printf '{not json'",
             r#"printf '{"additional_context":"  "}'"#,
+            // No `allow`, so not a verdict attempt: warned about and ignored.
+            r#"printf '{"decision":"deny","reason":"stale shape"}'"#,
+            r#"printf '{"custom_input":"no allow field"}'"#,
         ] {
             assert!(
                 run_local_hooks(&event, &[context_entry(cmd)], None).is_none(),
@@ -1489,19 +1777,122 @@ mod tests {
         let event = test_event(AgentLifecycle::SessionStart {
             resume_command: None,
         });
-        let entries = [UserHookEntry {
-            command: String::new(),
-            timeout: 5,
-            when: None,
-            respond: Some(HookRespond {
-                decision: RespondKind::Allow,
-                reason: None,
-                answers: Vec::new(),
-                additional_context: Some("be brief".to_string()),
-            }),
-        }];
+        let entries = [respond_entry(
+            None,
+            PromptDecision::allow().with_additional_context("be brief"),
+        )];
         let d = run_local_hooks(&event, &entries, None).unwrap();
+        // An explicit allow stays an allow; the context rides along.
+        assert!(d.allow && !d.defer);
         assert_eq!(d.additional_context.as_deref(), Some("be brief"));
+    }
+
+    #[cfg(unix)]
+    fn json_stdout_entry(json: &str) -> UserHookEntry {
+        context_entry(&format!("printf '%s' '{json}'"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdout_canonical_decision_roundtrips() {
+        let event = question_event();
+        let mut decision = blue_decision();
+        decision.additional_context = Some("because".to_string());
+        let json = serde_json::to_string(&decision).unwrap();
+        let d = run_local_hooks(&event, &[json_stdout_entry(&json)], None).unwrap();
+        assert_eq!(d, decision);
+
+        for original in [
+            PromptDecision::allow(),
+            PromptDecision::allow_with_suggestion(1),
+            PromptDecision::deny(Some("stdout says no".to_string())),
+            PromptDecision::ask(Some("really?".to_string())),
+            PromptDecision::defer().with_additional_context("ctx"),
+        ] {
+            let json = serde_json::to_string(&original).unwrap();
+            let d = run_local_hooks(&bash_pre_tool_use("ls"), &[json_stdout_entry(&json)], None)
+                .unwrap_or_else(|| panic!("{json} must decide"));
+            assert_eq!(d, original, "{json}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdout_plain_allow_and_explicit_allow_with_context() {
+        let event = bash_pre_tool_use("ls");
+        let d = run_local_hooks(&event, &[json_stdout_entry(r#"{"allow":true}"#)], None).unwrap();
+        assert!(d.allow && !d.defer);
+        let d = run_local_hooks(
+            &event,
+            &[json_stdout_entry(
+                r#"{"allow":true,"additional_context":"hi"}"#,
+            )],
+            None,
+        )
+        .unwrap();
+        assert!(d.allow);
+        assert_eq!(d.additional_context.as_deref(), Some("hi"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonzero_exit_beats_stdout_verdict() {
+        let event = bash_pre_tool_use("ls");
+        let deny = context_entry(r#"printf '{"allow":true}'; echo blocked >&2; exit 2"#);
+        let d = run_local_hooks(&event, &[deny], None).unwrap();
+        assert!(d.is_deny() && d.custom_input.as_deref() == Some("blocked"));
+        let ask = context_entry(r#"printf '{"allow":true}'; echo sure? >&2; exit 3"#);
+        let d = run_local_hooks(&event, &[ask], None).unwrap();
+        assert!(d.ask && d.custom_input.as_deref() == Some("sure?"));
+        // An ask on stdout of exit 0 still loses to a later exit-2 veto.
+        let chain = [
+            json_stdout_entry(r#"{"allow":false,"ask":true,"custom_input":"q"}"#),
+            context_entry("exit 2"),
+        ];
+        assert!(run_local_hooks(&event, &chain, None).unwrap().is_deny());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_stdout_verdict_fails_closed() {
+        let event = question_event();
+        for json in [
+            // Stale local shape alongside a canonical key.
+            r#"{"allow":true,"reason":"nope"}"#,
+            r#"{"allow":"yes"}"#,
+            r#"{"allow":true,"custom_input":1}"#,
+            // Answer for a question that does not exist.
+            r#"{"allow":true,"answers":[{"question_id":"zzz","selected_options":["Blue"]}]}"#,
+            // Conflicting verdict flags.
+            r#"{"allow":true,"ask":true}"#,
+        ] {
+            let d = run_local_hooks(&event, &[json_stdout_entry(json)], None)
+                .unwrap_or_else(|| panic!("{json} must not be silently dropped"));
+            assert!(d.is_deny(), "{json}: {d:?}");
+            assert!(d.answers.is_empty());
+            assert!(
+                d.custom_input
+                    .as_deref()
+                    .is_some_and(|r| r.contains("invalid local hook")),
+                "{json}: {d:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_stdout_is_denied_with_a_size_error_never_dropped() {
+        let event = bash_pre_tool_use("ls");
+        let big = context_entry(
+            r#"printf '{"allow":true,"custom_input":"'; head -c 1100000 /dev/zero | tr '\0' x; printf '"}'"#,
+        );
+        let d = run_local_hooks(&event, &[big], None).expect("oversized stdout must decide");
+        assert!(d.is_deny() && d.answers.is_empty(), "{d:?}");
+        let reason = d.custom_input.as_deref().unwrap_or_default();
+        assert!(
+            reason.contains("1048576") && reason.contains("bytes"),
+            "{reason}"
+        );
     }
 }
 
@@ -1528,6 +1919,9 @@ pub fn cmd_init(args: InitArgs) -> anyhow::Result<()> {
     println!("     (keys: {})", KNOWN_LIFECYCLES.join(", "));
     println!("  2. scripts get the normalized event JSON on stdin +");
     println!("     AGENT_HOOKS_EVENT / AGENT_HOOKS_SESSION / AGENT_HOOKS_HARNESS env");
-    println!("  3. exit 0 = allow, exit 2 = deny (stderr = reason); no daemon needed");
+    println!(
+        "  3. exit 0 = allow, exit 2 = deny (stderr = reason), exit 3 = ask; no daemon needed"
+    );
+    println!("     (exit-0 stdout may also be a PromptDecision JSON, e.g. {{\"allow\":true}})");
     Ok(())
 }

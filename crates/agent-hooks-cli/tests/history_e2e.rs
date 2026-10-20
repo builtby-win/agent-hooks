@@ -281,6 +281,44 @@ fn opencode_before_and_after_pair_on_call_id() {
 }
 
 #[test]
+fn opencode_chat_parts_and_assistant_summary_are_persisted() {
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join("history");
+    history_cli(home.path(), &dir, &["init"]);
+
+    let prompt = shim(
+        home.path(),
+        &dir,
+        "opencode",
+        "chat.message",
+        json!({
+            "sessionID": "ses_oc_history",
+            "parts": [
+                {"type": "text", "text": "Keep "},
+                {"type": "tool_use", "text": "not a prompt"},
+                {"type": "text", "text": "the user words"}
+            ]
+        }),
+    );
+    assert!(prompt.status.success());
+    let stop = shim(
+        home.path(),
+        &dir,
+        "opencode",
+        "session.idle",
+        json!({"sessionID": "ses_oc_history", "summary": "The real assistant answer"}),
+    );
+    assert!(stop.status.success());
+
+    let items = messages(home.path(), &dir, "ses_oc_history");
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[0]["kind"], "user");
+    assert_eq!(items[0]["text"], "Keep\nthe user words");
+    assert_eq!(items[1]["kind"], "assistant");
+    assert_eq!(items[1]["text"], "The real assistant answer");
+}
+
+#[test]
 fn large_unicode_tool_bodies_roundtrip_whole_and_separate() {
     let home = tempfile::TempDir::new().unwrap();
     let dir = home.path().join("history");

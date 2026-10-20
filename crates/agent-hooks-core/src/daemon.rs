@@ -401,17 +401,13 @@ async fn open_hold(
         .unwrap_or(PROMPT_TIMEOUT)
         .min(PROMPT_TIMEOUT);
     let prompt_id = hold_prompt_id(event);
-    let rx = match mediator.register(prompt_id.clone(), hold_for).await {
-        Ok(rx) => rx,
-        Err(e) => {
-            warn!(prompt_id = %prompt_id, error = %e, "could not register hold; passing through");
-            return None;
-        }
-    };
     let (session_id, key, question, prompt) = prompt_info_from_event(event);
-    mediator
-        .note_info(
-            &prompt_id,
+    // Pending entry and metadata appear together: `prompt.respond` validates
+    // against the stored questions, so a hold listed without them would
+    // reject a valid answer.
+    let rx = mediator
+        .register_with_info(
+            prompt_id.clone(),
             crate::prompt_mediator::PromptMeta {
                 session_id,
                 key,
@@ -438,6 +434,7 @@ async fn open_hold(
             .collect(),
         interactive: event.is_interactive(),
     });
+    event.answerable = true;
     Some((rx, hold_for))
 }
 
@@ -610,8 +607,8 @@ async fn deny_orphaned_holds(mediator: &Arc<PromptMediator>) {
 }
 
 /// Additive-only wire rule: a `schema_version` mismatch only warns — it never
-/// drops the event or the connection. (Unknown fields are already ignored by
-/// serde default on every inbound shape.)
+/// drops the event or the connection. (Unknown fields are ignored by serde
+/// default on every inbound shape except `PromptDecision`, which is strict.)
 fn warn_if_schema_mismatch(value: &Value) {
     if let Some(v) = value.get("schema_version").and_then(|v| v.as_u64()) {
         if v != u64::from(AgentEvent::SCHEMA_VERSION) {
@@ -1161,18 +1158,17 @@ async fn handle_hook_line(
         let interactive = event.is_interactive();
         info!(prompt_id = %prompt_id, "awaiting decider verdict");
         let decision = await_verdict(mediator, prompt_id, rx, hold_for, interactive).await;
-        serde_json::json!({
-            "decision": if decision.defer { "defer" } else if decision.ask { "ask" } else if decision.allow { "allow" } else { "deny" },
-            "allow": decision.allow,
-            "ask": decision.ask,
-            // Hosts render "allow always" differently from a one-off allow
-            // (Claude/Codex updatedPermissions, opencode "always"); the shim
-            // can only do that if the verdict line carries it.
-            "allow_always": decision.allow_always,
-            "suggestion": decision.suggestion,
-            "custom_input": decision.custom_input,
-            "answers": decision.answers,
-        })
+        let mut response = serde_json::to_value(&decision).expect("PromptDecision serializes");
+        response["decision"] = serde_json::json!(if decision.defer {
+            "defer"
+        } else if decision.ask {
+            "ask"
+        } else if decision.allow {
+            "allow"
+        } else {
+            "deny"
+        });
+        response
     } else {
         // Nobody held this event: defer, so the harness proceeds as if no hook
         // were installed (native dialog on gates). An allow here would approve
@@ -1195,7 +1191,8 @@ async fn dispatch_rpc_line(
     history_enabled: bool,
 ) -> Option<String> {
     // Additive-only wire rule: unknown fields are ignored by serde default on
-    // every inbound shape; a schema_version mismatch only warns, never drops.
+    // every inbound shape except `PromptDecision`; a schema_version mismatch
+    // only warns, never drops.
     if let Ok(value) = serde_json::from_str::<Value>(line) {
         warn_if_schema_mismatch(&value);
     }
@@ -1261,31 +1258,16 @@ async fn dispatch_rpc_line(
             Some(serde_json::to_string(&resp).unwrap_or_default())
         }
         "prompt.respond" | "respond_prompt" | "prompt_respond" => {
-            let params_val = req.params.clone().unwrap_or(Value::Null);
-            let parsed: Result<agent_hooks_protocol::PromptRespondParams, _> =
-                serde_json::from_value(params_val.clone());
-            // Also support flat {prompt_id, decision} or {prompt_id, allow}
-            let outcome = if let Ok(p) = parsed {
-                mediator.respond(&p.prompt_id, p.decision).await
-            } else if let Ok(v) = serde_json::from_value::<Value>(params_val.clone()) {
-                // Try alternative shapes: {prompt_id, allow, ...}
-                if let (Some(pid), Some(allow)) = (
-                    v.get("prompt_id").and_then(|x| x.as_str()),
-                    v.get("decision"),
-                ) {
-                    let decision: Result<PromptDecision, _> = serde_json::from_value(allow.clone());
-                    if let Ok(d) = decision {
-                        mediator.respond(pid, d).await
-                    } else {
-                        Err(CoreError::ConfigParse("invalid decision".to_string()))
-                    }
-                } else {
-                    Err(CoreError::ConfigParse(
-                        "invalid prompt.respond params".to_string(),
-                    ))
-                }
-            } else {
-                Err(CoreError::ConfigParse("invalid params".to_string()))
+            // The decision is parsed strictly (`PromptDecision` denies unknown
+            // fields); the serde error names the offending key and is returned
+            // to the caller as-is.
+            let outcome = match serde_json::from_value::<agent_hooks_protocol::PromptRespondParams>(
+                req.params.clone().unwrap_or(Value::Null),
+            ) {
+                Ok(p) => mediator.respond(&p.prompt_id, p.decision).await,
+                Err(e) => Err(CoreError::ConfigParse(format!(
+                    "invalid prompt.respond params: {e}"
+                ))),
             };
 
             match outcome {

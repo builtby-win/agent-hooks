@@ -6,7 +6,7 @@
 //! `prompt.respond` with `answers[]`; deny sends `custom_input` reason.
 
 use std::collections::HashSet;
-use std::io::{stdout, Stdout, Write};
+use std::io::{Stdout, Write, stdout};
 use std::time::{Duration, Instant};
 
 use agent_hooks_client::AgentHooksClient;
@@ -46,6 +46,32 @@ struct QState {
     custom: bool,
     picked: HashSet<usize>,
     free: String,
+}
+
+impl QState {
+    fn type_char(&mut self, c: char) {
+        if self.custom {
+            if !self.multiple {
+                self.picked.clear();
+            }
+            self.free.push(c);
+        }
+    }
+
+    fn pick_option(&mut self, index: usize) {
+        if index >= self.options.len() {
+            return;
+        }
+        if self.multiple {
+            if !self.picked.insert(index) {
+                self.picked.remove(&index);
+            }
+        } else {
+            self.free.clear();
+            self.picked.clear();
+            self.picked.insert(index);
+        }
+    }
 }
 
 struct OptState {
@@ -128,16 +154,21 @@ fn submit_answers(d: &Detail) -> Vec<PromptAnswer> {
                     .filter_map(|i| q.options.get(i).map(|o| o.label.clone()))
                     .collect()
             },
-            custom_input: (!q.free.trim().is_empty()).then(|| q.free.trim().to_string()),
+            custom_input: (q.custom && !q.free.is_empty()).then(|| q.free.clone()),
         })
         .collect()
 }
 
-/// Every option-bearing question needs a pick or free text before allow.
+/// Every question needs a valid selection, including free-text-only questions.
 fn ready_to_allow(d: &Detail) -> bool {
-    d.questions
-        .iter()
-        .all(|q| q.options.is_empty() || !q.picked.is_empty() || !q.free.trim().is_empty())
+    d.questions.iter().all(|q| {
+        let custom = !q.free.is_empty();
+        let count = q.picked.len() + usize::from(custom);
+        (!custom || q.custom)
+            && count > 0
+            && (q.multiple || count == 1)
+            && q.picked.iter().all(|&i| i < q.options.len())
+    })
 }
 
 fn age_line(fetched_age_ms: u64, fetched_at: Instant) -> String {
@@ -259,19 +290,17 @@ fn draw_detail(
             ))
         )?;
         if q.options.is_empty() {
-            queue!(
-                out,
-                crossterm::style::Print("    (free-text only)\n".dark_grey())
-            )?;
+            let message = if q.custom {
+                "    (free-text only)\n"
+            } else {
+                "    (no available answers — deny this prompt)\n"
+            };
+            queue!(out, crossterm::style::Print(message.dark_grey()))?;
         }
         for (oi, o) in q.options.iter().enumerate() {
             let picked = q.picked.contains(&oi);
             let boxmark = if q.multiple {
-                if picked {
-                    "[x]"
-                } else {
-                    "[ ]"
-                }
+                if picked { "[x]" } else { "[ ]" }
             } else if picked {
                 "(•)"
             } else {
@@ -323,7 +352,9 @@ fn draw_detail(
         }
     }
     let keys = match d.focus {
-        Focus::Options => "↑↓ move · space toggle/pick · tab next question · e note · enter submit-allow · d deny · esc list",
+        Focus::Options => {
+            "↑↓ move · space toggle/pick · tab next question · e note · enter submit-allow · d deny · esc list"
+        }
         Focus::Free => "typing note · esc done · enter submit-allow",
         Focus::Deny => "typing deny reason · esc cancel · enter send deny",
     };
@@ -450,7 +481,7 @@ async fn run_loop(client: &AgentHooksClient, out: &mut Stdout) -> anyhow::Result
                             last_refresh = Instant::now();
                         }
                     }
-                    KeyCode::Char(c) => d.questions[d.q_cursor].free.push(c),
+                    KeyCode::Char(c) => d.questions[d.q_cursor].type_char(c),
                     _ => {}
                 },
                 Focus::Deny => match key.code {
@@ -506,16 +537,7 @@ async fn run_loop(client: &AgentHooksClient, out: &mut Stdout) -> anyhow::Result
                     }
                     KeyCode::Char(' ') => {
                         if let Some(q) = d.questions.get_mut(d.q_cursor) {
-                            if d.opt_cursor < q.options.len() {
-                                if q.multiple {
-                                    if !q.picked.insert(d.opt_cursor) {
-                                        q.picked.remove(&d.opt_cursor);
-                                    }
-                                } else {
-                                    q.picked.clear();
-                                    q.picked.insert(d.opt_cursor);
-                                }
-                            }
+                            q.pick_option(d.opt_cursor);
                         }
                     }
                     KeyCode::Char('e') => {
@@ -525,15 +547,11 @@ async fn run_loop(client: &AgentHooksClient, out: &mut Stdout) -> anyhow::Result
                             .unwrap_or(false)
                         {
                             d.focus = Focus::Free;
-                        } else if let Some(q) = d.questions.get(d.q_cursor) {
-                            if q.options.is_empty() {
-                                d.focus = Focus::Free;
-                            } else {
-                                hint(
-                                    d,
-                                    "this question takes no free text — pick an option or deny",
-                                );
-                            }
+                        } else {
+                            hint(
+                                d,
+                                "this question takes no free text — pick an option or deny",
+                            );
                         }
                     }
                     KeyCode::Char('a') => {
@@ -582,4 +600,128 @@ async fn run_loop(client: &AgentHooksClient, out: &mut Stdout) -> anyhow::Result
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_hooks_protocol::PromptQuestion;
+
+    fn detail(multiple: bool, custom: bool, labels: &[&str]) -> Detail {
+        Detail {
+            prompt_id: "p".into(),
+            session_id: "s".into(),
+            key: "PermissionRequest".into(),
+            title: "Question".into(),
+            questions: vec![QState {
+                id: "q".into(),
+                header: None,
+                text: "Which?".into(),
+                options: labels
+                    .iter()
+                    .map(|label| OptState {
+                        label: (*label).into(),
+                        description: None,
+                        recommended: true,
+                    })
+                    .collect(),
+                multiple,
+                custom,
+                picked: if labels.is_empty() {
+                    HashSet::new()
+                } else {
+                    HashSet::from([0])
+                },
+                free: String::new(),
+            }],
+            q_cursor: 0,
+            opt_cursor: 0,
+            focus: Focus::Options,
+            deny_reason: String::new(),
+            hint: None,
+            externally_resolved: false,
+        }
+    }
+
+    fn decision(d: &Detail) -> PromptDecision {
+        let questions: Vec<PromptQuestion> = d
+            .questions
+            .iter()
+            .map(|q| PromptQuestion {
+                id: q.id.clone(),
+                header: q.header.clone(),
+                question: q.text.clone(),
+                options: q
+                    .options
+                    .iter()
+                    .map(|o| agent_hooks_protocol::PromptOption {
+                        label: o.label.clone(),
+                        description: None,
+                        preview: None,
+                    })
+                    .collect(),
+                multiple: q.multiple,
+                custom: q.custom,
+                recommended: None,
+            })
+            .collect();
+        PromptDecision {
+            answers: submit_answers(d),
+            ..PromptDecision::allow()
+        }
+        .resolve_questions(&questions)
+        .expect("TUI answer must satisfy daemon validation")
+    }
+
+    #[test]
+    fn single_select_switches_between_recommended_option_and_exact_custom_text() {
+        let mut d = detail(false, true, &["A", "B"]);
+        for c in "  alternative  ".chars() {
+            d.questions[0].type_char(c);
+        }
+        assert!(ready_to_allow(&d));
+        let answer = decision(&d).answers.remove(0);
+        assert!(answer.selected_options.is_empty());
+        assert_eq!(answer.custom_input.as_deref(), Some("  alternative  "));
+        d.questions[0].pick_option(1);
+        let answer = decision(&d).answers.remove(0);
+        assert_eq!(answer.selected_options, ["B"]);
+        assert_eq!(answer.custom_input, None);
+    }
+
+    #[test]
+    fn free_text_only_requires_input_and_backspace_restores_incomplete_state() {
+        let mut d = detail(false, true, &[]);
+        assert!(!ready_to_allow(&d));
+        d.questions[0].type_char('x');
+        assert!(ready_to_allow(&d));
+        assert_eq!(decision(&d).answers[0].custom_input.as_deref(), Some("x"));
+        d.questions[0].free.pop();
+        assert!(!ready_to_allow(&d));
+    }
+
+    #[test]
+    fn forbidden_custom_input_cannot_replace_an_option_or_answer_an_empty_question() {
+        let mut d = detail(false, false, &["A"]);
+        d.questions[0].type_char('x');
+        assert!(ready_to_allow(&d));
+        assert_eq!(decision(&d).answers[0].selected_options, ["A"]);
+        assert_eq!(decision(&d).answers[0].custom_input, None);
+        let mut empty = detail(false, false, &[]);
+        empty.questions[0].type_char('x');
+        assert!(!ready_to_allow(&empty));
+    }
+
+    #[test]
+    fn multi_select_preserves_options_and_custom_text_together() {
+        let mut d = detail(true, true, &["A", "B"]);
+        d.questions[0].pick_option(1);
+        d.questions[0].type_char(' ');
+        assert!(ready_to_allow(&d));
+        let answer = decision(&d).answers.remove(0);
+        assert_eq!(answer.selected_options, ["A", "B"]);
+        assert_eq!(answer.custom_input.as_deref(), Some(" "));
+        d.questions[0].pick_option(0);
+        assert_eq!(decision(&d).answers[0].selected_options, ["B"]);
+    }
 }

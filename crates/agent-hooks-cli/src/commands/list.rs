@@ -38,6 +38,7 @@ pub fn run(args: ListAdaptersArgs) -> anyhow::Result<()> {
             .iter()
             .map(|m| {
                 let vs = m.versions.get(&m.default_version);
+                let support = vs.map(|v| v.answer_support());
                 serde_json::json!({
                     "id": m.id,
                     "display_name": m.display_name,
@@ -46,6 +47,12 @@ pub fn run(args: ListAdaptersArgs) -> anyhow::Result<()> {
                     "unverified": m.unverified,
                     "verified_against": vs.and_then(|v| v.verified_against.clone()),
                     "agent_cli": vs.and_then(|v| v.agent_cli.clone()),
+                    "answer": support.map(|s| serde_json::json!({
+                        "permissions": s.permissions,
+                        "questions": s.questions,
+                        "questions_native": s.questions_native,
+                        "escalate": s.escalate,
+                    })).unwrap_or(serde_json::Value::Null),
                     "resume_status": if vs
                         .and_then(|v| v.agent_cli.as_ref())
                         .and_then(|agent_cli| agent_cli.resume.as_ref())
@@ -66,26 +73,37 @@ pub fn run(args: ListAdaptersArgs) -> anyhow::Result<()> {
     }
 
     println!("Supported harnesses (adapters):\n");
+    println!(
+        "Answer flows: permissions = allow/deny a held gate, questions = structured answers reach the agent, escalate = bounce back to the human.\n"
+    );
     // Header
     println!(
-        "{:<16} {:<32} {:<40} Description",
-        "ID", "Aliases", "Config"
+        "{:<16} {:<28} {:<34} {:<28} Description",
+        "ID", "Aliases", "Config", "Answer"
     );
     println!("{}", "-".repeat(120));
     for m in &manifests {
         let aliases = m.aliases.join(", ");
         let paths = install_paths(m);
         let first = paths.first().cloned().unwrap_or_default();
+        let answer = m
+            .versions
+            .get(&m.default_version)
+            .map(|v| v.answer_support().label())
+            .unwrap_or_else(|| "—".to_string());
         // Primary row
         let name = if m.unverified {
             format!("{} [unverified]", m.display_name)
         } else {
             m.display_name.clone()
         };
-        println!("{:<16} {:<32} {:<40} {}", m.id, aliases, first, name);
+        println!(
+            "{:<16} {:<28} {:<34} {:<28} {}",
+            m.id, aliases, first, answer, name
+        );
         // Additional config paths indented
         for extra in paths.iter().skip(1) {
-            println!("{:<16} {:<32} {:<40}", "", "", extra);
+            println!("{:<16} {:<28} {:<34}", "", "", extra);
         }
     }
 

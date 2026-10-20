@@ -17,7 +17,8 @@
         "start": {"argv": ["agy", "--prompt-interactive", "{prompt}"]},
         "exec": {"argv": ["agy", "--print", "{prompt}"]},
         "models": {"argv": ["agy", "models"]},
-        "model_args": ["--model", "{model}"]
+        "model_args": ["--model", "{model}"],
+        "yolo_args": ["--dangerously-skip-permissions"]
       },
       "verified_against": "1.4.2",
       "install": [

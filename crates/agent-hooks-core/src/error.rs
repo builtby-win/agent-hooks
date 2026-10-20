@@ -32,6 +32,9 @@ pub enum CoreError {
     #[error("Prompt already pending: {0}")]
     PromptAlreadyPending(String),
 
+    #[error("Invalid decision for prompt {prompt_id}: {reason}")]
+    InvalidDecision { prompt_id: String, reason: String },
+
     #[error("Channel closed for prompt: {0}")]
     ChannelClosed(String),
 

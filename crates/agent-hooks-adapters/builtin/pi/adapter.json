@@ -350,7 +350,7 @@
         },
         "response_overrides": {
           "PreToolUse": {
-            "allow": {"decision": "allow", "reply": "{reply}", "answers": "{answer_groups}"},
+            "allow": {"decision": "allow", "reply": "{reply}", "answers": "{answers_structured}"},
             "deny": {"decision": "deny", "reason": "{reason}"}
           },
           "PermissionRequest": {

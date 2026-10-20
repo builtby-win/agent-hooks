@@ -217,6 +217,16 @@ pub struct AgentEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<crate::rpc::PromptHold>,
 
+    /// Explicit consumer signal mirroring `hold`: `true` = this event is
+    /// being held for a verdict, answer it via `prompt.respond` with a
+    /// [`crate::prompt::PromptDecision`] (include `answers[]` when
+    /// `prompt.kind` is `question`; `custom_input` carries the deny reason;
+    /// `ask` needs an `ask` entry in `hold.verdicts`). `false` = observation,
+    /// do not answer. Stamped by the daemon alongside `hold`; never set on
+    /// the shim->daemon leg. Wire tolerance: missing fills `false`.
+    #[serde(default)]
+    pub answerable: bool,
+
     /// Opaque passthrough env snapshot from shim time. Always forwarded
     /// even when no `EventEnricher` is registered, so out-of-process
     /// subscribers (e.g. Back2Vibing via `subscribe`) can do client-side
@@ -279,6 +289,7 @@ impl AgentEvent {
             lifecycle,
             raw_event: None,
             hold: None,
+            answerable: false,
             passthrough_env: Default::default(),
             extensions: Default::default(),
             history_identity: None,
@@ -313,6 +324,30 @@ pub fn cap_chars(s: &str, n: usize) -> String {
         s.chars().take(n).collect::<String>() + "...[truncated]"
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod answerable_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_events_are_not_answerable_and_old_json_stays_valid() {
+        let e = AgentEvent::new(
+            "muse",
+            "s1",
+            AgentLifecycle::ToolUseStart,
+            EventContext::default(),
+        );
+        assert!(!e.answerable);
+        assert!(e.hold.is_none());
+        // Missing field fills false: older senders still parse.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"schema_version":1,"event_id":"e","timestamp_ms":0,"harness":"muse","session_id":"s","lifecycle":{"type":"ToolUseStart"},"status":"running"}"#,
+        )
+        .unwrap();
+        let back: AgentEvent = serde_json::from_value(v).unwrap();
+        assert!(!back.answerable);
     }
 }
 

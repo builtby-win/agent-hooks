@@ -129,9 +129,11 @@ Fill in the manifest to make them pass:
   defaults.
 - `response`: templates per capability + `response_overrides` per
   lifecycle; placeholders `{reason}` / `{event}` / `{answers}` / `{reply}`
-  / `{answer_groups}` (`{reply}` = allow/allow_always/deny/ask verb for
-  hosts with persistent grants, `{answer_groups}` = structured string[][]
-  picks for question replies — see the opencode `PermissionRequest` override).
+  / `{answer_groups}` / `{answers_structured}` (`{reply}` is the
+  allow/allow_always/deny/ask verb; `{answer_groups}` is request-ordered
+  `string[][]` for OpenCode; `{answers_structured}` carries canonical
+  `PromptAnswer[]` losslessly for Pi/OMP). The shared protocol resolver
+  validates IDs and selections before rendering; adapters do not rematch answers.
   Match the vendor's decision table exactly (Claude PreToolUse takes
   `hookSpecificOutput.permissionDecision`, UserPromptSubmit takes
   top-level `decision: block` — wrong shape fails open). Observation
@@ -176,7 +178,7 @@ agent-hooks adapter test ~/.config/agent-hooks/adapters/<id>.json
 `extends` chain acyclic, install paths expand, `root` contains `{event}`,
 ops dry-render to parseable JSON/TOML, placeholders only
 `{reason}`/`{reason?}`/`{event}`/`{answers}`/`{reply}`/`{answer_groups}`/
-`{updated_input}`/`{updated_permissions}`, no
+`{answers_structured}`/`{updated_input}`/`{updated_permissions}`, no
 ask-template/verdict contradictions.
 `test` replays every fixture through `parse_event` + `format_response`.
 

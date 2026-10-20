@@ -1,46 +1,38 @@
-//! Manual test decider: subscribe with `decide:true`, print every held gate
-//! event, read a verdict from stdin, send `prompt.respond`.
+//! Answer utility: validate an offline decision, answer a pending daemon prompt,
+//! or subscribe as an interactive test decider.
 //!
-//! Usage: `agent-hooks answer --socket /tmp/agent-hooks.sock`
-//! Non-interactive: `agent-hooks answer --auto allow|deny[:reason]|ask[:question]|answer:<option-or-text>`.
+//! Simple flags and canonical `--decision` JSON share question validation.
+//! With no one-shot flags, the existing TUI, --line and --auto modes apply.
 
 use agent_hooks_client::AgentHooksClient;
 use agent_hooks_protocol::{
     AgentEvent, AgentLifecycle, PromptAnswer, PromptDecision, PromptQuestion,
 };
 use futures::StreamExt;
-use tokio::io::{self, AsyncBufReadExt};
-
-/// Gate-capability lifecycles the daemon holds open for a decider verdict.
-/// Mirrors the manifests (`capability: gate`): everything else is observe and
-/// needs no answer.
-fn is_gate(lifecycle: &AgentLifecycle) -> bool {
-    matches!(
-        lifecycle,
-        AgentLifecycle::PreToolUse { .. }
-            | AgentLifecycle::PermissionRequest { .. }
-            | AgentLifecycle::UserPromptSubmit { .. }
-    )
-}
-
-/// Rendezvous id deciders answer with: broadcast `event_id`, except
-/// `PermissionRequest` which keeps `prompt.prompt_id`. Must match
-/// `daemon::hold_prompt_id` or the answer lands on `PromptNotFound`.
-fn hold_prompt_id(event: &AgentEvent) -> String {
-    match &event.lifecycle {
-        AgentLifecycle::PermissionRequest { prompt } => prompt.prompt_id.clone(),
-        _ => event.event_id.clone(),
-    }
-}
+use tokio::io::{self, AsyncBufReadExt, AsyncReadExt};
 
 fn summarize(event: &AgentEvent) -> String {
     match &event.lifecycle {
         AgentLifecycle::PreToolUse {
-            tool_name, input, ..
+            tool_name,
+            input,
+            prompt,
         } => {
             let raw = serde_json::to_string(input).unwrap_or_default();
             let short: String = raw.chars().take(300).collect();
-            format!("tool={tool_name} input={short}")
+            let mut out = format!("tool={tool_name} input={short}");
+            if let Some(p) = prompt {
+                for q in &p.questions {
+                    let opts: Vec<_> = q.options.iter().map(|o| o.label.as_str()).collect();
+                    out.push_str(&format!(
+                        " q[{}]: {} ({})",
+                        q.id,
+                        q.question,
+                        opts.join("|")
+                    ));
+                }
+            }
+            out
         }
         AgentLifecycle::PermissionRequest { prompt } => {
             let mut parts = vec![format!("kind={:?}", prompt.kind)];
@@ -81,6 +73,25 @@ fn parse_auto(spec: &str) -> Option<PromptDecision> {
         _ => None,
     }
 }
+/// Live-event `--auto answer:<text>`: questions ride on both the
+/// PermissionRequest prompt and a PreToolUse question-tool prompt (e.g.
+/// Muse/Claude `request_user_input` / `AskUserQuestion`); anything else keeps
+/// the fallback decision untouched.
+fn auto_live_decision(
+    text: &str,
+    lifecycle: &AgentLifecycle,
+    fallback: &PromptDecision,
+) -> PromptDecision {
+    match lifecycle {
+        AgentLifecycle::PermissionRequest { prompt } => answer_decision(text, &prompt.questions),
+        AgentLifecycle::PreToolUse {
+            prompt: Some(prompt),
+            ..
+        } => answer_decision(text, &prompt.questions),
+        _ => fallback.clone(),
+    }
+}
+
 /// `--auto answer:<text>`: allow, answering every question in the prompt with
 /// `text`. An option whose label equals `text` (ASCII case-insensitive) is
 /// selected; otherwise `text` goes in as free text.
@@ -168,8 +179,150 @@ async fn read_verdict(
     Some((target, decision))
 }
 
-pub async fn run(socket: String, auto: Option<String>, line: bool) -> anyhow::Result<()> {
+fn event_questions(event: &AgentEvent) -> &[PromptQuestion] {
+    match &event.lifecycle {
+        AgentLifecycle::PermissionRequest { prompt } => &prompt.questions,
+        AgentLifecycle::PreToolUse {
+            prompt: Some(prompt),
+            ..
+        } => &prompt.questions,
+        _ => &[],
+    }
+}
+
+pub async fn run(socket: String, args: crate::cli::AnswerArgs) -> anyhow::Result<()> {
     use std::io::IsTerminal;
+    let targeted = args.session_id.is_some() || args.prompt_id.is_some();
+    let has_answers = args.allow || !args.select.is_empty() || !args.custom_input.is_empty();
+    let decision = if let Some(json) = args.decision.as_deref() {
+        Some(
+            serde_json::from_str::<PromptDecision>(json)
+                .map_err(|e| anyhow::anyhow!("invalid canonical PromptDecision JSON: {e}"))?,
+        )
+    } else if let Some(reason) = args.deny {
+        Some(PromptDecision::deny(Some(reason)))
+    } else if has_answers {
+        let mut decision = PromptDecision::allow();
+        let mut selections = args.select.into_iter();
+        while let (Some(question_id), Some(label)) = (selections.next(), selections.next()) {
+            if let Some(answer) = decision
+                .answers
+                .iter_mut()
+                .find(|a| a.question_id == question_id)
+            {
+                answer.selected_options.push(label);
+            } else {
+                decision.answers.push(PromptAnswer {
+                    question_id,
+                    selected_options: vec![label],
+                    custom_input: None,
+                });
+            }
+        }
+        let mut custom_inputs = args.custom_input.into_iter();
+        while let (Some(question_id), Some(text)) = (custom_inputs.next(), custom_inputs.next()) {
+            if let Some(answer) = decision
+                .answers
+                .iter_mut()
+                .find(|a| a.question_id == question_id)
+            {
+                anyhow::ensure!(
+                    answer.custom_input.is_none(),
+                    "--custom-input supplied more than once for question_id {question_id:?}"
+                );
+                answer.custom_input = Some(text);
+            } else {
+                decision.answers.push(PromptAnswer {
+                    question_id,
+                    selected_options: Vec::new(),
+                    custom_input: Some(text),
+                });
+            }
+        }
+        Some(decision)
+    } else {
+        None
+    };
+    if args.return_event || targeted {
+        let decision = decision.ok_or_else(|| anyhow::anyhow!(
+            "supply --decision JSON, --allow, --deny REASON, --select QUESTION_ID OPTION_LABEL, or --custom-input QUESTION_ID TEXT"
+        ))?;
+        anyhow::ensure!(
+            args.auto.is_none() && !args.line,
+            "--return and prompt targeting conflict with --auto and --line"
+        );
+        if args.return_event {
+            anyhow::ensure!(
+                !targeted,
+                "--return cannot be combined with a session id or --prompt-id"
+            );
+            anyhow::ensure!(
+                !std::io::stdin().is_terminal(),
+                "--return requires a normalized AgentEvent on stdin; stdin is a terminal"
+            );
+            let mut input = String::new();
+            tokio::io::stdin().read_to_string(&mut input).await?;
+            let event: AgentEvent = serde_json::from_str(&input)
+                .map_err(|e| anyhow::anyhow!("invalid normalized AgentEvent on stdin: {e}"))?;
+            let resolved = decision
+                .resolve_questions(event_questions(&event))
+                .map_err(|e| anyhow::anyhow!("invalid decision: {e}"))?;
+            println!("{}", serde_json::to_string(&resolved)?);
+            return Ok(());
+        }
+        let client = AgentHooksClient::connect_to(socket).await?;
+        let prompts = client.list_pending_prompts().await?;
+        let matches: Vec<_> = prompts
+            .iter()
+            .filter(|p| {
+                args.prompt_id.as_deref().is_none_or(|id| p.prompt_id == id)
+                    && args
+                        .session_id
+                        .as_deref()
+                        .is_none_or(|session| p.session_id == session)
+            })
+            .collect();
+        if matches.is_empty() {
+            anyhow::bail!(
+                "no pending prompt matches session {:?} and prompt id {:?}; \
+                 the prompt may have resolved or expired, or no decider was subscribed when it arrived",
+                args.session_id,
+                args.prompt_id,
+            );
+        }
+        if matches.len() > 1 {
+            let ids = matches
+                .iter()
+                .map(|p| p.prompt_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "{} pending prompts match session {:?}; use --prompt-id to choose one of: {ids}",
+                matches.len(),
+                args.session_id,
+            );
+        }
+        let prompt = matches[0];
+        let resolved = decision
+            .resolve_questions(
+                prompt
+                    .prompt
+                    .as_ref()
+                    .map_or(&[][..], |request| request.questions.as_slice()),
+            )
+            .map_err(|e| anyhow::anyhow!("invalid decision: {e}"))?;
+        client
+            .respond_prompt(&prompt.prompt_id, resolved.clone())
+            .await?;
+        println!("{}", serde_json::to_string(&resolved)?);
+        return Ok(());
+    }
+    anyhow::ensure!(
+        decision.is_none(),
+        "answer flags require --return, a session id, or --prompt-id"
+    );
+    let auto = args.auto;
+    let line = args.line;
     // Fullscreen TUI when interactive; --auto and --line keep the plain pipe.
     if auto.is_none() && !line && std::io::stdout().is_terminal() {
         return super::answer_tui::run_tui(socket).await;
@@ -216,7 +369,7 @@ pub async fn run(socket: String, auto: Option<String>, line: bool) -> anyhow::Re
 
     while let Some(event) = stream.next().await {
         let name = event.lifecycle.name();
-        if !is_gate(&event.lifecycle) {
+        let Some(hold) = event.hold.as_ref().filter(|_| event.answerable) else {
             println!(
                 "({} {} {}) {}",
                 event.harness,
@@ -225,8 +378,8 @@ pub async fn run(socket: String, auto: Option<String>, line: bool) -> anyhow::Re
                 summarize(&event)
             );
             continue;
-        }
-        let prompt_id = hold_prompt_id(&event);
+        };
+        let prompt_id = hold.prompt_id.clone();
         println!(
             "[{} {} {} id={}] {}",
             event.harness,
@@ -237,11 +390,9 @@ pub async fn run(socket: String, auto: Option<String>, line: bool) -> anyhow::Re
         );
         let (target, decision) = match &auto_decision {
             Some(d) => {
-                let d = match (&auto_answer, &event.lifecycle) {
-                    (Some(text), AgentLifecycle::PermissionRequest { prompt }) => {
-                        answer_decision(text, &prompt.questions)
-                    }
-                    _ => d.clone(),
+                let d = match &auto_answer {
+                    Some(text) => auto_live_decision(text, &event.lifecycle, d),
+                    None => d.clone(),
                 };
                 println!("auto → {}", verdict_word(&d));
                 if !d.answers.is_empty() {
@@ -310,6 +461,50 @@ mod tests {
         assert_eq!(d.answers.len(), 1);
         assert_eq!(d.answers[0].selected_options, vec!["Blue".to_string()]);
         assert_eq!(d.answers[0].custom_input, None);
+    }
+
+    fn pre_tool_use_prompt(questions: Vec<PromptQuestion>) -> AgentLifecycle {
+        AgentLifecycle::PreToolUse {
+            tool_name: "request_user_input".into(),
+            input: serde_json::json!({}),
+            prompt: Some(agent_hooks_protocol::PromptRequest {
+                prompt_id: "p1".into(),
+                kind: agent_hooks_protocol::PromptKind::Question,
+                tool_name: Some("request_user_input".into()),
+                command: None,
+                file_path: None,
+                description: None,
+                questions,
+                suggestions: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn live_answer_attaches_to_pre_tool_use_questions() {
+        let fallback = PromptDecision::allow();
+        let d = auto_live_decision(
+            "blue",
+            &pre_tool_use_prompt(vec![question("q1", &["Red", "Blue"])]),
+            &fallback,
+        );
+        assert!(d.allow);
+        assert_eq!(d.answers.len(), 1);
+        assert_eq!(d.answers[0].question_id, "q1");
+        assert_eq!(d.answers[0].selected_options, vec!["Blue".to_string()]);
+    }
+
+    #[test]
+    fn live_answer_leaves_promptless_pre_tool_use_alone() {
+        let fallback = PromptDecision::deny(Some("no".into()));
+        let lifecycle = AgentLifecycle::PreToolUse {
+            tool_name: "Bash".into(),
+            input: serde_json::json!({}),
+            prompt: None,
+        };
+        let d = auto_live_decision("blue", &lifecycle, &fallback);
+        assert!(!d.allow);
+        assert!(d.answers.is_empty());
     }
 
     #[test]

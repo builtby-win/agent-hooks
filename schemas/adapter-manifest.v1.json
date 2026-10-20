@@ -75,7 +75,10 @@
         "exec": { "$ref": "#/$defs/PromptCommandSpec" },
         "models": { "$ref": "#/$defs/ModelsCommandSpec" },
         "model_aliases": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "model_args": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+        "model_args": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "yolo_args": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "start_yolo_args": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "exec_yolo_args": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
       }
     },
     "ModelsCommandSpec": {
@@ -241,8 +244,8 @@
       "additionalProperties": false,
       "required": ["allow", "deny"],
       "properties": {
-        "allow": {},
-        "deny": {},
+        "allow": {"description": "Allow template. Placeholders: {reason}, {reason?}, {event}, {reply}, {answers} (lossy comma-joined prose), {answer_groups} (native string[][] in request order, custom text last), {answers_structured} (canonical PromptAnswer[] in request order, custom input kept separate), {updated_input}, {updated_permissions}."},
+        "deny": {"description": "Deny template. Answers never ride a deny; same placeholders as allow."},
         "ask": {"description": "Escalation template; absent means deny fallback."}
       }
     },

@@ -6,8 +6,11 @@
 //! ## Wire-compatibility rule
 //!
 //! Schema evolution is additive-only: senders may add fields, readers ignore
-//! unknown ones (serde default — never `deny_unknown_fields` on inbound
-//! shapes). A `schema_version` mismatch only warns at the consumer; it never
+//! unknown ones (serde default — no `deny_unknown_fields` on inbound event and
+//! request shapes). The one deliberate exception is [`PromptDecision`]: a
+//! verdict is consumer-authored, so it is parsed strictly and a typo or stale
+//! shape errors rather than being silently dropped. A `schema_version`
+//! mismatch only warns at the consumer; it never
 //! drops the event or the connection. Missing optional fields fill defaults
 //! instead of erroring, while required identity fields (`event_id`, `harness`,
 //! `session_id`, `prompt_id`, `lifecycle`, …) keep erroring loudly.

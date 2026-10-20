@@ -377,32 +377,135 @@ for (const harness of ["pi", "omp"] as const) {
       reset();
     });
 
-    test("ask verdict answer groups map onto questions", async () => {
+    test("ask verdict PromptAnswer[] maps onto questions without label guessing", async () => {
       const mod = await load(harness);
       const questions = [
-        { id: "q1", question: "Pick", options: [{ label: "A" }, { label: "B" }] },
-        { id: "q2", question: "Many", multi: true, options: [{ label: "X" }, { label: "Y" }] },
+        { id: "q1", question: "Pick", custom: true, options: [{ label: "A" }, { label: "B" }] },
+        { id: "q2", question: "Many", multi: true, custom: true, options: [{ label: "X" }, { label: "Y" }] },
       ];
-      expect(mod.verdictAnswers({ answers: [["A"], ["X", "Y"]] }, questions)).toEqual([
-        { id: "q1", selectedOptions: ["A"] },
-        { id: "q2", selectedOptions: ["X", "Y"] },
-      ]);
-      expect(mod.verdictAnswers({ answers: [["free text"], ["X"]] }, questions)).toEqual([
-        { id: "q1", selectedOptions: [], customInput: "free text" },
-        { id: "q2", selectedOptions: ["X"] },
-      ]);
-      // Single-select with two picks is rejected -> native fallback.
-      expect(mod.verdictAnswers({ answers: [["A", "B"], ["X"]] }, questions)).toBeUndefined();
-      // Protocol PromptAnswer objects still parse.
+      const allow = (answers: unknown) => ({ decision: "allow", reply: "allow", answers });
       expect(
         mod.verdictAnswers(
-          { answers: [{ question_id: "q1", selected_options: ["B"] }, { question_id: "q2", selected_options: ["Y"] }] },
+          allow([{ question_id: "q1", selected_options: ["B"] }, { question_id: "q2", selected_options: ["X", "Y"] }]),
           questions,
         ),
       ).toEqual([
         { id: "q1", selectedOptions: ["B"] },
-        { id: "q2", selectedOptions: ["Y"] },
+        { id: "q2", selectedOptions: ["X", "Y"] },
       ]);
+      // Custom text that collides with an option label stays custom: it is
+      // carried in custom_input, never re-derived from the label set.
+      expect(
+        mod.verdictAnswers(
+          allow([
+            { question_id: "q1", selected_options: [], custom_input: "A" },
+            { question_id: "q2", selected_options: ["X"], custom_input: "Y" },
+          ]),
+          questions,
+        ),
+      ).toEqual([
+        { id: "q1", selectedOptions: [], customInput: "A" },
+        { id: "q2", selectedOptions: ["X"], customInput: "Y" },
+      ]);
+      // Long free text is preserved verbatim, edge whitespace included.
+      const long = ` ${"x".repeat(20_000)}\nend `;
+      expect(
+        mod.verdictAnswers(
+          allow([{ question_id: "q1", selected_options: [], custom_input: long }, { question_id: "q2", selected_options: ["X"] }]),
+          questions,
+        )?.[0]?.customInput,
+      ).toBe(long);
+      // Legacy string[][] groups are no longer a contract -> native fallback.
+      expect(mod.verdictAnswers(allow([["A"], ["X", "Y"]]), questions)).toBeUndefined();
+      // camelCase is not a contract either: canonical snake_case only.
+      expect(
+        mod.verdictAnswers(
+          allow([{ id: "q1", selectedOptions: ["A"] }, { id: "q2", selectedOptions: ["X"] }]),
+          questions,
+        ),
+      ).toBeUndefined();
+      // Out-of-order answers (id mismatch) are rejected, not re-indexed.
+      expect(
+        mod.verdictAnswers(
+          allow([{ question_id: "q2", selected_options: ["X"] }, { question_id: "q1", selected_options: ["A"] }]),
+          questions,
+        ),
+      ).toBeUndefined();
+      // Single-select with two picks is rejected -> native fallback.
+      expect(
+        mod.verdictAnswers(
+          allow([{ question_id: "q1", selected_options: ["A", "B"] }, { question_id: "q2", selected_options: ["X"] }]),
+          questions,
+        ),
+      ).toBeUndefined();
+      expect(
+        mod.verdictAnswers(
+          allow([
+            { question_id: "q1", selected_options: ["A"], custom_input: "" },
+            { question_id: "q2", selected_options: [], custom_input: " \t " },
+          ]),
+          questions,
+        ),
+      ).toEqual([
+        { id: "q1", selectedOptions: ["A"] },
+        { id: "q2", selectedOptions: [], customInput: " \t " },
+      ]);
+      const whitespaceQuestions = [
+        { id: "q1", question: "Pick", options: [{ label: "  " }] },
+        { id: "q2", question: "Pick custom", custom: true, options: [] },
+      ];
+      expect(
+        mod.verdictAnswers(
+          allow([
+            { question_id: "q1", selected_options: ["  "] },
+            { question_id: "q2", selected_options: [], custom_input: " \n " },
+          ]),
+          whitespaceQuestions,
+        ),
+      ).toEqual([
+        { id: "q1", selectedOptions: ["  "] },
+        { id: "q2", selectedOptions: [], customInput: " \n " },
+      ]);
+      expect(
+        mod.verdictAnswers(
+          allow([
+            { question_id: "q1", selected_options: ["A"], custom_input: "extra" },
+            { question_id: "q2", selected_options: ["X"] },
+          ]),
+          questions,
+        ),
+      ).toBeUndefined();
+      expect(
+        mod.verdictAnswers(
+          allow([
+            { question_id: "q1", selected_options: [], custom_input: "extra" },
+            { question_id: "q2", selected_options: ["X"] },
+          ]),
+          [{ ...questions[0], custom: false }, questions[1]],
+        ),
+      ).toBeUndefined();
+      expect(
+        mod.verdictAnswers(
+          allow([
+            { question_id: "q1", selected_options: [], custom_input: "legacy custom answer" },
+            { question_id: "q2", selected_options: ["X"] },
+          ]),
+          [
+            { id: "q1", question: "Legacy ask", options: [] },
+            questions[1],
+          ],
+        ),
+      ).toEqual([
+        { id: "q1", selectedOptions: [], customInput: "legacy custom answer" },
+        { id: "q2", selectedOptions: ["X"] },
+      ]);
+      // A deny that still carries answers never counts as an answer.
+      expect(
+        mod.verdictAnswers(
+          { decision: "deny", reason: "no", answers: [{ question_id: "q1", selected_options: ["A"] }, { question_id: "q2", selected_options: ["X"] }] },
+          questions,
+        ),
+      ).toBeUndefined();
     });
 
     test("Stop carries only the assistant's text blocks as last_assistant_message", async () => {
@@ -640,8 +743,49 @@ describe("opencode asset", () => {
     expect(events(c)).toEqual(["session.busy", "session.idle"]);
     expect(c.every((x) => x.input.session_id === "v2s" || x.input.sessionID === "v2s")).toBe(true);
   });
-});
 
+  test("V2 prompt hooks and completed context become history events", async () => {
+    reset();
+    const mod = await load("opencode");
+    let promptHandler:
+      | ((event: { sessionID?: string; prompt?: { text?: string } }) => void)
+      | undefined;
+    async function* stream() {
+      yield { type: "session.created", data: { sessionID: "v2-history" } };
+      yield { type: "session.execution.succeeded", data: { sessionID: "v2-history" } };
+    }
+    const stop = await mod.default.setup({
+      location: { directory: "/workspace/history" },
+      session: {
+        hook: async (_name: string, handler: (event: { sessionID?: string; prompt?: { text?: string } }) => void) => {
+          promptHandler = handler;
+          return { dispose: async () => {} };
+        },
+        context: async () => [
+          { type: "user", content: [{ type: "text", text: "Explain this change" }] },
+          {
+            type: "assistant",
+            content: [
+              { type: "text", text: "It fixes history capture." },
+              { type: "tool", text: "do not store tool output" },
+            ],
+          },
+        ],
+      },
+      event: { subscribe: () => stream() },
+    });
+    promptHandler?.({ sessionID: "v2-history", prompt: { text: "Explain this change" } });
+    const c = await settle(3);
+    stop();
+    expect(events(c)).toContain("chat.message");
+    expect(c.find((call) => events([call])[0] === "chat.message")?.input.message).toBe(
+      "Explain this change",
+    );
+    const idle = c.find((call) => events([call])[0] === "session.idle");
+    expect(idle?.input.summary).toBe("It fixes history capture.");
+  });
+
+});
 describe("amp asset", () => {
   test("placeholders, payload shape and gate", async () => {
     const mod = await load("amp", { bin: fakeBin, socket: "/tmp/ah.sock" });
@@ -659,15 +803,103 @@ describe("amp asset", () => {
     expect(mod.toolCallAction({ decision: "deny", reason: "no" })).toEqual({ action: "reject-and-continue", message: "no" });
   });
 
-  test("events forward with native names; deny rejects the tool", async () => {
+  test("canonical answer parsing follows Rust custom-input and option-label semantics", async () => {
+    const mod = await load("amp");
+    const questions = [
+      { id: "q1", question: "Choose", options: [{ label: "  " }, { label: "A" }], custom: true },
+      { id: "q2", question: "Custom", options: [], custom: true },
+    ];
+    expect(
+      mod.canonicalAnswers(
+        {
+          decision: "allow",
+          answers: [
+            { question_id: "q1", selected_options: ["  "], custom_input: "" },
+            { question_id: "q2", selected_options: [], custom_input: " \t " },
+          ],
+        },
+        questions,
+      ),
+    ).toEqual([
+      { question_id: "q1", selected_options: ["  "] },
+      { question_id: "q2", selected_options: [], custom_input: " \t " },
+    ]);
+    expect(
+      mod.canonicalAnswers(
+        { decision: "allow", answers: [{ question_id: "q1", selected_options: ["A"], custom_input: null }] },
+        [questions[0]],
+      ),
+    ).toEqual([{ question_id: "q1", selected_options: ["A"] }]);
+    expect(() =>
+      mod.canonicalAnswers(
+        { decision: "allow", answers: [{ question_id: "q1", selected_options: ["A"], custom_input: "extra" }] },
+        [{ ...questions[0], custom: false }],
+      ),
+    ).toThrow();
+  });
+
+  test("question tool forwards structured answers and rejects denial or cancellation", async () => {
     const mod = await load("amp");
     const on = new Map<string, Handler>();
-    mod.default({ on: (n: string, h: Handler) => on.set(n, h) });
-    expect([...on.keys()].sort()).toEqual(["agent.end", "agent.start", "session.start", "tool.call", "tool.result"]);
+    let askTool: { execute: (input: unknown, ctx: unknown) => Promise<string> } | undefined;
+    mod.default({
+      on: (name: string, handler: Handler) => on.set(name, handler),
+      registerTool: (tool: unknown) => { askTool = tool as typeof askTool; },
+    });
+    expect(askTool).toBeDefined();
+    const questions = [{
+      id: "q1",
+      question: "Choose",
+      options: [{ label: "A", description: "First" }, { label: "B" }],
+      multiple: true,
+      custom: true,
+    }];
+    const ctx = {
+      thread: { id: "T-ask" },
+      ui: {
+        confirm: async () => true,
+        select: async () => undefined,
+        input: async () => undefined,
+      },
+    };
+    reset({ decision: "allow", answers: [{ question_id: "q1", selected_options: ["A", "B"] }] });
+    expect(JSON.parse(await askTool?.execute({ questions }, ctx) ?? "[]")).toEqual([
+      { question_id: "q1", selected_options: ["A", "B"] },
+    ]);
+    const questionCalls = await settle(1);
+    expect(events(questionCalls)).toEqual(["question"]);
+    expect(questionCalls[0]?.input).toMatchObject({
+      questions,
+      tool_name: "agent_hooks_ask",
+      session_id: "T-ask",
+    });
+
     reset({ decision: "deny", reason: "blocked" });
-    expect(await on.get("tool.call")?.({ thread: { id: "T-2" }, tool: "Bash" }, {})).toEqual({
+    await expect(askTool?.execute({ questions }, ctx)).rejects.toThrow("blocked");
+    reset();
+    await expect(askTool?.execute({ questions }, ctx)).rejects.toThrow("cancelled");
+  });
+
+  test("tool gate denies and confirms permission asks", async () => {
+    const mod = await load("amp");
+    const on = new Map<string, Handler>();
+    mod.default({
+      on: (name: string, handler: Handler) => on.set(name, handler),
+      registerTool: () => {},
+    });
+    reset({ decision: "deny", reason: "blocked" });
+    expect(await on.get("tool.call")?.({ thread: { id: "T-2" }, tool: "Bash" }, { ui: { confirm: async () => true } })).toEqual({
       action: "reject-and-continue",
       message: "blocked",
+    });
+    reset({ decision: "ask", reason: "Needs approval" });
+    expect(await on.get("tool.call")?.({ thread: { id: "T-2" }, tool: "Bash" }, { ui: { confirm: async () => true } })).toEqual({
+      action: "allow",
+    });
+    reset({ decision: "ask", reason: "Needs approval" });
+    expect(await on.get("tool.call")?.({ thread: { id: "T-2" }, tool: "Bash" }, { ui: { confirm: async () => false } })).toEqual({
+      action: "reject-and-continue",
+      message: "Needs approval",
     });
     reset();
     on.get("agent.end")?.({ thread: { id: "T-2" } }, {});
@@ -675,6 +907,6 @@ describe("amp asset", () => {
     expect(events(c)).toEqual(["agent.end"]);
     expect(c[0]?.input.session_id).toBe("T-2");
     // No verdict (infra failure) allows.
-    expect(await on.get("tool.call")?.({ thread: { id: "T-2" } }, {})).toEqual({ action: "allow" });
+    expect(await on.get("tool.call")?.({ thread: { id: "T-2" } }, { ui: { confirm: async () => true } })).toEqual({ action: "allow" });
   });
 });

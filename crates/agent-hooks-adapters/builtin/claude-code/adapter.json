@@ -30,7 +30,8 @@
         "start": {"argv": ["claude", "{prompt}"]},
         "exec": {"argv": ["claude", "-p", "{prompt}"]},
         "model_aliases": ["sonnet", "opus", "haiku", "fable", "best", "sonnet[1m]", "opus[1m]", "fable[1m]", "opusplan", "default"],
-        "model_args": ["--model", "{model}"]
+        "model_args": ["--model", "{model}"],
+        "yolo_args": ["--dangerously-skip-permissions"]
       },
       "verified_against": "2.1.296",
       "install": [
@@ -195,7 +196,7 @@
         },
       "response_overrides": {
           "PreToolUse": {
-            "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "allow", "additionalContext": "{answers}"}},
+            "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "allow"}},
             "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "deny", "permissionDecisionReason": "{reason?}"}},
             "ask": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "ask", "permissionDecisionReason": "{reason?}"}}
           },

@@ -40,11 +40,12 @@ Subscribes the active connection to receive real-time event broadcasts (`AgentEv
   "params": {
     "harnesses": ["claude-code", "codex"],
     "session_ids": [],
-    "event_types": ["PreToolUse", "PermissionRequest", "Stop"]
+    "event_types": ["PreToolUse", "PermissionRequest", "Stop"],
+    "decide": true
   }
 }
 ```
-*Note:* Pass empty arrays or `null` params to receive all events from all harnesses.
+*Note:* Pass empty arrays or `null` params to receive all events from all harnesses. Include `decide: true` when this connection is acting as a decider and should hold eligible gate events; omitting it is observe-only/fast-allow behavior.
 
 **Response:**
 ```json
@@ -109,6 +110,48 @@ Fetches full details for a single session ID.
 
 ---
 
+### `prompt.list` / `list_prompts`
+Returns the daemon's current pending-prompt backlog, oldest first. The answer CLI uses this to select a pending prompt; `session_id` is a selector, not an offline rendezvous.
+
+**Request:**
+```json
+{"jsonrpc": "2.0", "id": 3, "method": "prompt.list", "params": null}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "prompts": [{
+      "prompt_id": "prompt_98765",
+      "session_id": "ses_claude_12345",
+      "key": "Bash",
+      "question": "Run this command?",
+      "waiters": 1,
+      "parked": 0,
+      "age_ms": 1200,
+      "prompt": {
+        "prompt_id": "prompt_98765",
+        "kind": "question",
+        "description": "Run this command?",
+        "questions": [{
+          "id": "confirm",
+          "question": "Continue?",
+          "options": [{"label": "Yes"}, {"label": "No"}],
+          "multiple": false,
+          "custom": false
+        }]
+      }
+    }]
+  }
+}
+```
+The `prompt` payload may be absent for holds without question metadata; `question` is optional. Validate question answers against `prompt.questions` from the selected pending entry.
+
+---
+
 ### `prompt.respond` / `respond_prompt`
 Resolves a pending human-in-the-loop permission request (e.g. tool execution approval, bash command confirmation).
 
@@ -127,15 +170,17 @@ Resolves a pending human-in-the-loop permission request (e.g. tool execution app
 }
 ```
 
-**Decision wire shape** (`PromptDecision`): `{"allow": bool, "custom_input"?: string, "answers"?: Answer[], "ask"?: bool}` where each answer is `{"question_id": string, "selected_options": string[], "custom_input"?: string}`.
+**Decision wire shape** (`PromptDecision`, unknown fields rejected): `{"allow": bool, "custom_input"?: string, "answers"?: Answer[], "ask"?: bool, "defer"?: bool, "allow_always"?: bool, "suggestion"?: number, "additional_context"?: string}` where each answer is `{"question_id": string, "selected_options": string[], "custom_input"?: string}`. This is also the exact schema for local config `respond` and exit-0 command stdout.
 - **Allow:** `{"allow": true}`
 - **Deny with reason:** `{"allow": false, "custom_input": "Command not permitted"}`
 - **Ask (escalate to a human):** `{"allow": false, "ask": true, "custom_input": "Allow rm -rf?"}`
 - **Answer questions:** `{"allow": true, "answers": [{"question_id": "favorite_color", "selected_options": ["Blue"]}]}` — e.g. yes/no: `{"allow": true, "answers": [{"question_id": "confirm", "selected_options": ["yes"]}]}`
 
-**prompt_id rule:** answer with the broadcast event's `event_id`, except `PermissionRequest` which keeps `prompt.prompt_id`.
+**prompt_id rule:** use the authoritative `event.hold.prompt_id` from an answerable event, or the `prompt_id` returned by `prompt.list`. Never reconstruct it from `event_id` or lifecycle prompt fields.
 
-**Deciders must subscribe with `"decide": true`** (e.g. `"params": {"decide": true}`) — without it the daemon fast-allows gate events instead of holding them for your verdict. **Unanswered holds deny after 300s** (fail-safe timeout), so answer promptly or don't subscribe with `decide: true`.
+Nonempty answers must cover every question exactly once, matched by exact `question_id` and reordered into request order. Unknown/duplicate IDs, invalid labels, disallowed custom input and multiple picks on single-select questions are rejected. Answers require `allow: true`; allow/ask/defer are mutually exclusive, `allow_always` requires allow, and `suggestion` requires allow_always. Empty answers preserve permission approval/native question handling. Answer text is never trimmed or truncated. Invalid RPC decisions return an error without consuming the pending prompt, allowing a corrected retry.
+
+**Deciders must subscribe with `"decide": true`** to hold interactive events the harness already blocked on. To intercept mid-flight tools, use an explicit scope, for example `"decide": {"event_types": ["PreToolUse"], "tools": ["Bash"]}`; explicit scopes introduce a wait for matching events unless `interactive_only: true`. Without a matching decider, native harness behavior continues without a new wait. A streamed event is actionable only when `event.answerable` is `true`; use its `event.hold.prompt_id`. **Unanswered holds deny after 300s** (fail-safe timeout).
 
 ### Local hooks: exit codes and `when`/`respond` config
 
@@ -152,9 +197,9 @@ Entries can also match and answer without spawning, via `when` + `respond`:
   "hooks": {
     "PermissionRequest": [
       {
-        "when": { "tool": "Bash" },
+        "when": { "tool": "ask" },
         "respond": {
-          "decision": "allow",
+          "allow": true,
           "answers": [{ "question_id": "favorite_color", "selected_options": ["Blue"] }]
         }
       }
@@ -162,13 +207,21 @@ Entries can also match and answer without spawning, via `when` + `respond`:
     "PreToolUse": [
       {
         "when": { "prompt_matches": "rm -rf" },
-        "respond": { "decision": "deny", "reason": "rm -rf is never auto-approved" }
+        "respond": { "allow": false, "custom_input": "rm -rf is never auto-approved" }
       }
     ]
   }
 }
 ```
-`when.tool` is an exact case-insensitive tool-name match (`PreToolUse.tool_name` or `PermissionRequest.prompt.tool_name`); `when.prompt_matches` is a case-insensitive substring over the prompt description plus all question texts (the `PreToolUse` tool-input JSON as fallback). A matched `respond` answers directly (`allow` / `deny` / `ask`, plus optional `reason` and `answers`) without spawning `command`.
+`when.tool` is an exact case-insensitive tool-name match (`PreToolUse.tool_name` or `PermissionRequest.prompt.tool_name`); `when.prompt_matches` is a case-insensitive substring over the prompt description plus all question texts (the `PreToolUse` tool-input JSON as fallback). A matched `respond` answers directly with a canonical `PromptDecision`, without spawning `command` or requiring a daemon. A plain allow is an explicit approval, not a defer.
+
+For structured app responses, `agent-hooks answer --return --decision JSON` can run as the local hook command: it reads the normalized `AgentEvent` from stdin, validates the canonical `PromptDecision` against the event's questions, and on success writes only canonical decision JSON to stdout and exits `0`. Validation/input errors produce an actionable stderr diagnostic, no stdout, and exit `2` (deny); this must not be treated as a generic nonzero infrastructure error, which is fail-open. The command is fully offline and does not connect to or start the daemon. Session IDs alone cannot rendezvous with offline hook invocations; there is no asynchronous offline queue.
+
+As an additive convenience, the same utility accepts `--allow`, `--deny REASON`, `--select QUESTION_ID OPTION_LABEL`, or `--custom-input QUESTION_ID TEXT` instead of `--decision JSON`. Answer flags imply allow; repeat `--select` to answer multiple questions or select multiple options, and use `--custom-input` at most once per question that permits it. Multi-select questions may combine selections and custom text. Question IDs and option labels are exact, and text is preserved without trimming. All forms use the same canonical validation and produce the same decision JSON; conflicting verdicts and mixing simple flags with `--decision` are rejected. These flags add no new IDs or wire-protocol requirements.
+
+To answer an already-held daemon prompt, `agent-hooks answer SESSION_ID --select color Blue` selects exactly one pending prompt for that session, while `agent-hooks answer --prompt-id ID --deny "Protected branch"` targets that exact prompt. The existing `--decision JSON` interface remains available with either selector, and a supplied session ID may additionally constrain a prompt ID. The CLI queries `prompt.list`, validates against the pending entry's `prompt.questions`, and sends `prompt.respond` with its authoritative `prompt_id`. A missing or ambiguous match, invalid decision, or RPC failure produces a stderr diagnostic and a nonzero exit status; success prints only the accepted canonical decision JSON. This one-shot command does not create a persistent decider subscription or make future gates wait. An app/decider must already be subscribed when events occur. Simple flags and `--decision` require `--return` or a target and conflict with `--auto`/`--line`. Existing interactive and automatic test modes are unchanged.
+
+For single-select questions in the answer TUI, entering custom text replaces the selected option, and selecting an option clears custom input. Multi-select questions can combine options and custom text. A custom-only question cannot submit empty text, `custom: false` disables its editor, and entered text is preserved exactly without trimming.
 
 ---
 
@@ -220,6 +273,13 @@ When a client is subscribed, the daemon sends real-time JSON-RPC notifications (
         "command": "cargo test"
       },
       "tool_use_id": "toolu_01Abc"
+    },
+    "answerable": true,
+    "hold": {
+      "prompt_id": "prompt_98765",
+      "deadline_ms": 1724750700123,
+      "verdicts": ["allow", "deny"],
+      "interactive": false
     },
     "context": {
       "cwd": "/Users/example/project",
@@ -313,7 +373,7 @@ const client = net.createConnection(socketPath, () => {
     jsonrpc: '2.0',
     id: 1,
     method: 'subscribe',
-    params: {}
+    params: { decide: true }
   };
   client.write(JSON.stringify(subReq) + '\n');
 });
@@ -329,18 +389,15 @@ rl.on('line', (line) => {
     const event = msg.params;
     console.log(`[${event.harness}] ${event.lifecycle.type} (Session: ${event.session_id})`);
 
-    // Handle interactive permission request
-    if (event.lifecycle.type === 'PermissionRequest') {
-      const prompt = event.lifecycle.prompt;
-      console.log(`Permission requested: ${prompt.message || prompt.kind}`);
-
-      // Respond allow (prompt_id: broadcast event_id, except PermissionRequest keeps prompt.prompt_id)
+    // Answer only held, answerable events using the authoritative hold ID.
+    if (event.answerable === true) {
+      const promptId = event.hold.prompt_id;
       const response = {
         jsonrpc: '2.0',
         id: Date.now(),
         method: 'prompt.respond',
         params: {
-          prompt_id: prompt.prompt_id,
+          prompt_id: promptId,
           decision: { allow: true }
         }
       };
@@ -384,7 +441,7 @@ async def main():
         "jsonrpc": "2.0",
         "id": 1,
         "method": "subscribe",
-        "params": {}
+        "params": {"decide": True}
     }
     writer.write((json.dumps(sub_request) + "\n").encode())
     await writer.drain()
@@ -400,16 +457,16 @@ async def main():
             lifecycle = event["lifecycle"]
             print(f"[{event['harness']}] {lifecycle['type']} (Session: {event['session_id']})")
 
-            if lifecycle["type"] == "PermissionRequest":
-                prompt_id = lifecycle["prompt"]["id"]
-                # Respond allow
+            if event.get("answerable") is True:
+                prompt_id = event["hold"]["prompt_id"]
+                # Respond only to this held event, with its authoritative ID.
                 resp = {
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "prompt.respond",
                     "params": {
                         "prompt_id": prompt_id,
-                        "decision": {"behavior": "allow"}
+                        "decision": {"allow": True}
                     }
                 }
                 writer.write((json.dumps(resp) + "\n").encode())

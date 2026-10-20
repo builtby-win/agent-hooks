@@ -215,30 +215,36 @@ impl PromptMediator {
             .unwrap_or(0)
     }
 
-    /// Register a new pending prompt. Same `prompt_id` from a second waiter
-    /// joins (shared answer) instead of erroring — dedupe, not duplicate.
-    pub async fn register(
+    /// Register a pending prompt together with its backlog metadata in one
+    /// critical section (pending, then info — the same order
+    /// `pending_prompts` and `respond` take). The hold is never visible
+    /// without its question payload, so a `prompt.list` consumer answering
+    /// the instant it appears is validated against the real questions, not an
+    /// empty set.
+    ///
+    /// Same `prompt_id` from a second waiter joins (shared answer) instead of
+    /// erroring — dedupe, not duplicate — and the first registrant's
+    /// metadata is kept.
+    pub async fn register_with_info(
         &self,
         prompt_id: String,
-        timeout: Duration,
-    ) -> Result<oneshot::Receiver<PromptDecision>, CoreError> {
+        meta: PromptMeta,
+    ) -> oneshot::Receiver<PromptDecision> {
         let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .await
-            .entry(prompt_id.clone())
-            .or_default()
-            .push(tx);
-        let _ = timeout;
+        let mut pending = self.pending.lock().await;
+        let mut info = self.info.lock().await;
+        info.entry(prompt_id.clone()).or_insert(meta);
+        pending.entry(prompt_id.clone()).or_default().push(tx);
         debug!(prompt_id = %prompt_id, "registered pending prompt");
-        Ok(rx)
+        rx
     }
 
-    /// Await a receiver from an earlier [`register`](Self::register), with a
-    /// timeout. Use this when the hold had to exist before the caller could
-    /// continue — the daemon registers first so the event it broadcasts is
-    /// already answerable — and the wait happens afterwards. The pending
-    /// entry is always removed, exactly once.
+    /// Await a receiver from an earlier
+    /// [`register_with_info`](Self::register_with_info), with a timeout. Use
+    /// this when the hold had to exist before the caller could continue — the
+    /// daemon registers first so the event it broadcasts is already
+    /// answerable — and the wait happens afterwards. The pending entry is
+    /// always removed, exactly once.
     pub async fn await_registered(
         self: &Arc<Self>,
         prompt_id: String,
@@ -252,11 +258,6 @@ impl PromptMediator {
             Ok(Err(_closed)) => Err(CoreError::ChannelClosed(prompt_id)),
             Err(_elapsed) => Err(CoreError::PromptTimeout(prompt_id)),
         }
-    }
-
-    /// Record backlog metadata for a pending prompt. Idempotent overwrite.
-    pub async fn note_info(&self, prompt_id: &str, meta: PromptMeta) {
-        self.info.lock().await.insert(prompt_id.to_string(), meta);
     }
 
     /// Backlog snapshot for `prompt.list`: every held prompt with its
@@ -300,14 +301,39 @@ impl PromptMediator {
     /// Dispatch a human decision to every waiter on `prompt_id` (one answer
     /// fans out to all joiners). Cleans key/claim indexes exactly once; a
     /// late or duplicate answer finds no entry (`PromptNotFound`).
+    ///
+    /// The decision is validated against the questions stored with the hold
+    /// ([`PromptDecision::resolve_questions`]) BEFORE the pending entry is
+    /// consumed: a rejected decision returns
+    /// [`CoreError::InvalidDecision`] and leaves the prompt pending so the
+    /// decider can retry. Holds without question metadata (permission gates,
+    /// plain tool gates) accept only answer-less decisions. Waiters receive
+    /// the canonical, question-ordered decision.
     pub async fn respond(
         &self,
         prompt_id: &str,
         decision: PromptDecision,
     ) -> Result<(), CoreError> {
-        let waiters = {
+        let (waiters, decision) = {
             let mut guard = self.pending.lock().await;
-            guard.remove(prompt_id)
+            let decision = match guard.get(prompt_id) {
+                Some(txs) if !txs.is_empty() => {
+                    let info = self.info.lock().await;
+                    let questions = info
+                        .get(prompt_id)
+                        .and_then(|meta| meta.prompt.as_ref())
+                        .map_or(&[][..], |prompt| prompt.questions.as_slice());
+                    decision.resolve_questions(questions).map_err(|reason| {
+                        warn!(prompt_id = %prompt_id, %reason, "rejected invalid prompt decision; prompt stays pending");
+                        CoreError::InvalidDecision {
+                            prompt_id: prompt_id.to_string(),
+                            reason,
+                        }
+                    })?
+                }
+                _ => decision,
+            };
+            (guard.remove(prompt_id), decision)
         };
         match waiters {
             Some(txs) if !txs.is_empty() => {
@@ -453,9 +479,8 @@ mod tests {
     async fn register_and_respond() {
         let mediator = Arc::new(PromptMediator::new());
         let rx = mediator
-            .register("p1".to_string(), Duration::from_secs(5))
-            .await
-            .unwrap();
+            .register_with_info("p1".to_string(), meta(None))
+            .await;
         mediator
             .respond("p1", PromptDecision::allow())
             .await
@@ -468,14 +493,12 @@ mod tests {
     async fn duplicate_register_joins_and_broadcasts() {
         let mediator = PromptMediator::new();
         let rx1 = mediator
-            .register("dup".to_string(), Duration::from_secs(5))
-            .await
-            .unwrap();
+            .register_with_info("dup".to_string(), meta(None))
+            .await;
         // Second waiter on the same prompt joins instead of erroring.
         let rx2 = mediator
-            .register("dup".to_string(), Duration::from_secs(5))
-            .await
-            .unwrap();
+            .register_with_info("dup".to_string(), meta(None))
+            .await;
         mediator
             .respond("dup", PromptDecision::allow())
             .await
@@ -651,16 +674,23 @@ mod tests {
         assert!(mediator.next_parked("ev4").await.is_none());
     }
 
+    /// Hold metadata with the given prompt payload.
+    fn meta(prompt: Option<agent_hooks_protocol::PromptRequest>) -> PromptMeta {
+        PromptMeta {
+            session_id: "ses".to_string(),
+            key: "tool:Ask".to_string(),
+            question: None,
+            prompt,
+            created_at: Instant::now(),
+        }
+    }
+
     #[tokio::test]
     async fn pending_prompts_lists_backlog() {
         let mediator = PromptMediator::new();
         let _rx = mediator
-            .register("bp".to_string(), Duration::from_secs(5))
-            .await
-            .unwrap();
-        mediator
-            .note_info(
-                "bp",
+            .register_with_info(
+                "bp".to_string(),
                 PromptMeta {
                     session_id: "ses1".to_string(),
                     key: "tool:Bash".to_string(),
@@ -676,6 +706,175 @@ mod tests {
         assert_eq!(list[0].question.as_deref(), Some("Bash rm -rf?"));
         assert_eq!(list[0].waiters, 1);
     }
+
+    /// Register a hold carrying one single-select question `color`
+    /// (`Red`/`Blue`, free text allowed) and return its receiver.
+    async fn hold_question(
+        mediator: &PromptMediator,
+        prompt_id: &str,
+    ) -> oneshot::Receiver<PromptDecision> {
+        let option = |label: &str| agent_hooks_protocol::PromptOption {
+            label: label.to_string(),
+            description: None,
+            preview: None,
+        };
+        mediator
+            .register_with_info(
+                prompt_id.to_string(),
+                meta(Some(agent_hooks_protocol::PromptRequest {
+                    prompt_id: prompt_id.to_string(),
+                    kind: agent_hooks_protocol::PromptKind::Question,
+                    tool_name: None,
+                    command: None,
+                    file_path: None,
+                    description: None,
+                    questions: vec![agent_hooks_protocol::PromptQuestion {
+                        id: "color".to_string(),
+                        header: None,
+                        question: "Color?".to_string(),
+                        options: vec![option("Red"), option("Blue")],
+                        multiple: false,
+                        custom: true,
+                        recommended: None,
+                    }],
+                    suggestions: Vec::new(),
+                })),
+            )
+            .await
+    }
+
+    fn answer(question_id: &str, option: &str) -> PromptDecision {
+        PromptDecision {
+            answers: vec![agent_hooks_protocol::PromptAnswer {
+                question_id: question_id.to_string(),
+                selected_options: vec![option.to_string()],
+                custom_input: None,
+            }],
+            ..PromptDecision::allow()
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_answer_is_rejected_and_prompt_stays_pending() {
+        let mediator = PromptMediator::new();
+        let mut rx = hold_question(&mediator, "q1").await;
+
+        for bad in [answer("color", "Green"), answer("ghost", "Red")] {
+            let err = mediator.respond("q1", bad).await.unwrap_err();
+            assert!(matches!(err, CoreError::InvalidDecision { .. }), "{err}");
+            assert!(err.to_string().contains("q1"), "{err}");
+            // Nothing was consumed: still listed, still unresolved.
+            assert_eq!(mediator.pending_ids().await, vec!["q1".to_string()]);
+            assert_eq!(mediator.pending_prompts().await[0].waiters, 1);
+            assert!(rx.try_recv().is_err());
+        }
+
+        // The decider can retry with a valid answer.
+        mediator
+            .respond("q1", answer("color", "Blue"))
+            .await
+            .unwrap();
+        let got = rx.await.unwrap();
+        assert_eq!(got.answers[0].selected_options, ["Blue"]);
+        assert!(mediator.pending_ids().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejected_response_keeps_every_joined_waiter() {
+        let mediator = PromptMediator::new();
+        let mut rx1 = hold_question(&mediator, "q2").await;
+        let mut rx2 = mediator
+            .register_with_info("q2".to_string(), meta(None))
+            .await;
+
+        assert!(mediator
+            .respond("q2", answer("color", "Nope"))
+            .await
+            .is_err());
+        assert!(rx1.try_recv().is_err() && rx2.try_recv().is_err());
+        assert_eq!(mediator.pending_prompts().await[0].waiters, 2);
+
+        mediator
+            .respond("q2", answer("color", "Red"))
+            .await
+            .unwrap();
+        assert!(rx1.await.unwrap().allow);
+        assert!(rx2.await.unwrap().allow);
+    }
+
+    #[tokio::test]
+    async fn conflicting_flags_are_rejected_without_consuming_the_hold() {
+        let mediator = PromptMediator::new();
+        let mut rx = hold_question(&mediator, "q3").await;
+        let conflict = PromptDecision {
+            ask: true,
+            ..PromptDecision::allow()
+        };
+        let err = mediator.respond("q3", conflict).await.unwrap_err();
+        assert!(matches!(err, CoreError::InvalidDecision { .. }), "{err}");
+        assert!(rx.try_recv().is_err());
+        mediator
+            .respond("q3", PromptDecision::allow())
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().allow);
+    }
+
+    #[tokio::test]
+    async fn permission_only_hold_rejects_answers_but_accepts_plain_verdicts() {
+        let mediator = PromptMediator::new();
+        // A permission gate: its prompt carries no questions.
+        let mut plain = mediator
+            .register_with_info(
+                "perm".to_string(),
+                meta(Some(agent_hooks_protocol::PromptRequest {
+                    prompt_id: "perm".to_string(),
+                    kind: agent_hooks_protocol::PromptKind::Permission,
+                    tool_name: Some("Bash".to_string()),
+                    command: Some("ls".to_string()),
+                    file_path: None,
+                    description: None,
+                    questions: Vec::new(),
+                    suggestions: Vec::new(),
+                })),
+            )
+            .await;
+        let err = mediator
+            .respond("perm", answer("color", "Red"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidDecision { .. }), "{err}");
+        assert!(plain.try_recv().is_err());
+        assert_eq!(mediator.pending_ids().await, vec!["perm".to_string()]);
+
+        mediator
+            .respond("perm", PromptDecision::allow_always())
+            .await
+            .unwrap();
+        assert!(plain.await.unwrap().allow_always);
+    }
+
+    #[tokio::test]
+    async fn answer_less_allow_is_valid_on_a_question_hold() {
+        let mediator = PromptMediator::new();
+        let rx = hold_question(&mediator, "q4").await;
+        mediator
+            .respond("q4", PromptDecision::allow())
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().answers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn respond_to_unknown_prompt_is_still_not_found() {
+        let mediator = PromptMediator::new();
+        let err = mediator
+            .respond("missing", answer("color", "Red"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoreError::PromptNotFound(_)), "{err}");
+    }
+
     #[test]
     fn decider_presence_tracks_connections() {
         let mediator = PromptMediator::new();

@@ -486,7 +486,7 @@ fn validate_manifest(manifest: &AdapterManifest) -> Vec<(String, Result<(), Stri
         }
     }
 
-    // response templates contain only {reason}/{event}/{answers} placeholders
+    // response templates may use only the placeholders `check_placeholders` lists
     let mut templates: Vec<(&str, &serde_json::Value)> = Vec::new();
     if let Some(gate) = &vs.response.gate {
         templates.push(("gate.allow", &gate.allow));
@@ -501,26 +501,22 @@ fn validate_manifest(manifest: &AdapterManifest) -> Vec<(String, Result<(), Stri
     }
     for (name, template) in templates {
         checks.push((
-            format!("response.{name} placeholders are only {{reason}}/{{event}}/{{answers}}"),
+            format!("response.{name} uses only supported placeholders"),
             check_placeholders(template),
         ));
     }
     for (lifecycle, ov) in &vs.response.response_overrides {
         checks.push((
-            format!(
-                "response.overrides[{lifecycle}].allow placeholders are only {{reason}}/{{event}}/{{answers}}"
-            ),
+            format!("response.overrides[{lifecycle}].allow uses only supported placeholders"),
             check_placeholders(&ov.allow),
         ));
         checks.push((
-            format!(
-                "response.overrides[{lifecycle}].deny placeholders are only {{reason}}/{{event}}/{{answers}}"
-            ),
+            format!("response.overrides[{lifecycle}].deny uses only supported placeholders"),
             check_placeholders(&ov.deny),
         ));
         if let Some(ask) = &ov.ask {
             checks.push((
-                format!("response.overrides[{lifecycle}].ask placeholders are only {{reason}}/{{event}}/{{answers}}"),
+                format!("response.overrides[{lifecycle}].ask uses only supported placeholders"),
                 check_placeholders(ask),
             ));
         }
@@ -756,6 +752,7 @@ fn check_placeholders(template: &serde_json::Value) -> Result<(), String> {
                                 | "answers"
                                 | "reply"
                                 | "answer_groups"
+                                | "answers_structured"
                                 | "updated_input"
                                 | "updated_permissions"
                         ) {
@@ -952,21 +949,12 @@ fn run_fixture(adapter: &DeclarativeAdapter, id: &str, path: &Path) -> anyhow::R
 
     // expect_response: rendered with the fixture's decision (default: allow).
     if let Some(expect_response) = fixture.get("expect_response") {
-        let decision = fixture
-            .get("decision")
-            .map(|d| {
-                let allow = d.get("allow").and_then(|v| v.as_bool()).unwrap_or(true);
-                let reason = d
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if allow {
-                    PromptDecision::allow()
-                } else {
-                    PromptDecision::deny(reason)
-                }
-            })
-            .unwrap_or_else(PromptDecision::allow);
+        // The fixture's `decision` is a canonical PromptDecision.
+        let decision = match fixture.get("decision") {
+            Some(d) => serde_json::from_value::<PromptDecision>(d.clone())
+                .map_err(|e| anyhow::anyhow!("fixture `decision`: {e}"))?,
+            None => PromptDecision::allow(),
+        };
         let got = adapter.format_response(&decision);
         if &got != expect_response {
             anyhow::bail!("response mismatch: {}", json_diff(expect_response, &got));

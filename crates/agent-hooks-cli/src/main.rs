@@ -26,14 +26,22 @@ fn main() -> anyhow::Result<()> {
             rt.block_on(commands::dev::run(args))
         }
         Commands::Answer(args) => {
+            let return_event = args.return_event;
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             let socket = args
                 .socket
+                .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(agent_hooks_client::default_socket_path);
-            rt.block_on(commands::answer::run(socket, args.auto, args.line))
+            match rt.block_on(commands::answer::run(socket, args)) {
+                Err(error) if return_event => {
+                    eprintln!("agent-hooks answer --return: {error:#}");
+                    std::process::exit(2);
+                }
+                result => result,
+            }
         }
         Commands::Start(args) => commands::agent::launch(commands::agent::Mode::Start, args),
         Commands::Exec(args) => commands::agent::launch(commands::agent::Mode::Exec, args),

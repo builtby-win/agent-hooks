@@ -39,7 +39,8 @@
         "executables": ["copilot"],
         "documentation": ["https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference"],
         "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
-        "resume": {"argv": ["copilot", "--resume={session_ref}"], "session_ref": "id"}
+        "resume": {"argv": ["copilot", "--resume={session_ref}"], "session_ref": "id"},
+        "yolo_args": ["--allow-all"]
       },
       "install": [
         {

@@ -195,6 +195,9 @@ pub struct HistorySessionsArgs {
     /// Only this native session id (exact match)
     #[arg(long)]
     pub session: Option<String>,
+    /// Literal substring of the session title, native id, or workspace (ASCII case-insensitive)
+    #[arg(long)]
+    pub search: Option<String>,
     /// Only this harness
     #[arg(long)]
     pub harness: Option<String>,

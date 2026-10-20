@@ -20,6 +20,12 @@ pub struct SessionsQuery {
     pub session: Option<String>,
     pub harness: Option<String>,
     pub origin: Option<String>,
+    /// Literal, ASCII case-insensitive substring matched against the session
+    /// id, title and workspace (any one may match); ANDed with the other
+    /// filters. Surrounding whitespace is trimmed and a blank value means no
+    /// search. `%`, `_` and other punctuation match themselves. Non-ASCII
+    /// letters match exactly: SQLite's `lower()` only folds ASCII.
+    pub search: Option<String>,
     pub after: Option<String>,
     pub limit: Option<u32>,
 }
@@ -51,6 +57,10 @@ struct Filters {
     session: Option<String>,
     harness: Option<String>,
     origin: Option<String>,
+    /// Trimmed search text, `None` when absent or blank. Cursors from before
+    /// this field existed decode as "no search".
+    #[serde(default)]
+    search: Option<String>,
     /// Entry kinds, sorted; empty means all. Cursors from before this field
     /// existed decode as "all".
     #[serde(default)]
@@ -234,6 +244,7 @@ impl HistoryReader {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let search = q.search.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let tx = self.conn.unchecked_transaction()?;
         Self::check_version(&tx)?;
         let index_id = Self::index_id(&tx)?;
@@ -242,6 +253,7 @@ impl HistoryReader {
             session: session.map(str::to_owned),
             harness: q.harness.clone(),
             origin: q.origin.clone(),
+            search: search.map(str::to_owned),
             kinds: Vec::new(),
         };
         let (high_water, last) = match &q.after {
@@ -260,6 +272,10 @@ impl HistoryReader {
                AND (:session IS NULL OR session_id = :session)
                AND (:harness IS NULL OR harness = :harness)
                AND (:origin IS NULL OR origin = :origin)
+               AND (:search IS NULL
+                    OR instr(lower(session_id), lower(:search)) > 0
+                    OR instr(lower(title), lower(:search)) > 0
+                    OR instr(lower(workspace), lower(:search)) > 0)
              ORDER BY first_seq ASC
              LIMIT :limit",
         )?;
@@ -271,6 +287,7 @@ impl HistoryReader {
                     ":session": session,
                     ":harness": q.harness,
                     ":origin": q.origin,
+                    ":search": search,
                     ":limit": (limit + 1) as i64,
                 },
                 session_from_row,
@@ -323,6 +340,7 @@ impl HistoryReader {
             session: Some(q.session.clone()),
             harness: q.harness.clone(),
             origin: q.origin.clone(),
+            search: None,
             kinds: {
                 let mut kinds: Vec<String> =
                     q.kinds.iter().map(|k| k.as_str().to_string()).collect();

@@ -40,6 +40,7 @@ pub fn run(args: HistoryArgs) -> anyhow::Result<()> {
             a.history_dir.as_deref(),
             SessionsQuery {
                 session: a.session,
+                search: a.search,
                 harness: a.harness,
                 origin: a.origin,
                 after: a.after,

@@ -171,29 +171,41 @@ fn extract_first_prompt(transcript_path: &str) -> Option<String> {
     }
     None
 }
-fn extract_latest_prompt(transcript_path: &str) -> Option<String> {
+
+/// Bounded JSONL tail buffer and the offset of its first complete line.
+/// Unreadable files yield `None` so extraction falls through to the next source.
+fn read_transcript_tail(transcript_path: &str) -> Option<(Vec<u8>, usize)> {
     use std::io::{Read, Seek, SeekFrom};
     const MAX_TAIL: u64 = 1024 * 1024;
 
     let path = crate::traits::expand_tilde_path(transcript_path);
     let mut file = std::fs::File::open(&path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(MAX_TAIL);
+    let start = file.metadata().ok()?.len().saturating_sub(MAX_TAIL);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    let mut lines = text.lines();
-    if start > 0 {
-        lines.next();
-    }
-    for line in lines.rev() {
+    file.take(MAX_TAIL).read_to_end(&mut buf).ok()?;
+    // A window starting mid-file may begin with a cut-off line; drop it.
+    let first_line = if start == 0 {
+        0
+    } else {
+        buf.iter().position(|&b| b == b'\n')? + 1
+    };
+    Some((buf, first_line))
+}
+
+fn is_user_transcript_row(row: &serde_json::Value) -> bool {
+    row.get("source").and_then(serde_json::Value::as_str) == Some("USER_EXPLICIT")
+        || row.get("type").and_then(serde_json::Value::as_str) == Some("USER_INPUT")
+}
+
+fn extract_latest_prompt(transcript_path: &str) -> Option<String> {
+    let (buf, first_line) = read_transcript_tail(transcript_path)?;
+    let tail = String::from_utf8_lossy(&buf[first_line..]);
+    for line in tail.lines().rev() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
-        let is_user = value.get("source").and_then(|s| s.as_str()) == Some("USER_EXPLICIT")
-            || value.get("type").and_then(|s| s.as_str()) == Some("USER_INPUT");
-        if !is_user {
+        if !is_user_transcript_row(&value) {
             continue;
         }
         let Some(content) = value.get("content").and_then(|c| c.as_str()) else {
@@ -216,42 +228,29 @@ fn extract_latest_prompt(transcript_path: &str) -> Option<String> {
     None
 }
 
+/// Final reply of the turn in progress: the newest completed, non-empty model
+/// response *after* the newest user row. Reaching that user row first means
+/// this turn has no completed reply yet (failed, cancelled, not flushed), and
+/// the previous turn's reply must not be attributed to it.
 fn extract_latest_assistant(transcript_path: &str) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    const MAX_TAIL: u64 = 1024 * 1024;
-
-    let path = crate::traits::expand_tilde_path(transcript_path);
-    let mut file = std::fs::File::open(&path).ok()?;
-    let start = file.metadata().ok()?.len().saturating_sub(MAX_TAIL);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::new();
-    file.take(MAX_TAIL).read_to_end(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    let mut lines = text.lines();
-    if start > 0 {
-        lines.next();
-    }
-    for line in lines.rev() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+    let (buf, first_line) = read_transcript_tail(transcript_path)?;
+    let tail = String::from_utf8_lossy(&buf[first_line..]);
+    for line in tail.lines().rev() {
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
-        // Never reuse the preceding turn's reply when this turn failed or
-        // stopped before producing a completed response.
-        if value.get("source").and_then(|v| v.as_str()) == Some("USER_EXPLICIT")
-            || value.get("type").and_then(|v| v.as_str()) == Some("USER_INPUT")
-        {
+        if is_user_transcript_row(&row) {
             return None;
         }
-        if value.get("source").and_then(|v| v.as_str()) != Some("MODEL")
-            || value.get("type").and_then(|v| v.as_str()) != Some("PLANNER_RESPONSE")
-            || value.get("status").and_then(|v| v.as_str()) != Some("DONE")
-        {
+        let field = |name: &str| row.get(name).and_then(serde_json::Value::as_str);
+        let is_completed_reply = field("source") == Some("MODEL")
+            && field("type") == Some("PLANNER_RESPONSE")
+            && field("status") == Some("DONE");
+        if !is_completed_reply {
             continue;
         }
-        if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
-            if !content.trim().is_empty() {
-                return Some(content.to_owned());
-            }
+        if let Some(content) = field("content").filter(|c| !c.trim().is_empty()) {
+            return Some(content.to_owned());
         }
     }
     None

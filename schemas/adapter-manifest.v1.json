@@ -170,6 +170,9 @@
         "success": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
         "cwd": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
         "summary": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "session_title": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" }, "description": "Harness-pushed session title. Missing or blank titles leave the stored title unchanged." },
+        "message_id": { "type": "array", "items": { "type": "string" }, "description": "Ordered payload paths for the native message id; transcript and session-link sources are not used." },
+        "tool_call_id": { "type": "array", "items": { "type": "string" }, "description": "Ordered payload paths for the native tool call id, used to pair tool phases." },
         "flavor_text": { "type": "array", "items": { "type": "string" }, "description": "Ordered raw payload paths for optional display text, bounded to 300 Unicode characters. Also supported in extraction_overrides per hook." }
       }
     },
@@ -183,12 +186,29 @@
           "properties": {
             "transcript": { "$ref": "#/$defs/TranscriptExtract" }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["session_link"],
+          "properties": {
+            "session_link": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["root", "child_from", "link_key"],
+              "properties": {
+                "root": { "type": "string" },
+                "child_from": { "type": "string" },
+                "link_key": { "type": "string" }
+              }
+            }
+          }
         }
       ]
     },
     "TranscriptExtract": {
       "type": "string",
-      "enum": ["first_prompt", "first_timestamp"]
+      "enum": ["first_prompt", "latest_prompt", "latest_assistant", "first_timestamp"]
     },
     "ResponseSpec": {
       "type": "object",

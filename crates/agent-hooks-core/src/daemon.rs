@@ -576,14 +576,15 @@ async fn await_verdict(
     }
 }
 
-/// Subscriber-bound copy of an event: identical except `raw_event` is
-/// stripped. The full raw payload may contain secrets — it stays populated on
-/// the internal `AgentEvent` (tracker `last_event`, local-hook stdin,
-/// tracing) but is NEVER serialized to subscribers: not on live broadcast,
-/// not on replay/backlog, not on any snapshot.
+/// Subscriber-bound copy with the raw payload and internal delivery receipt
+/// stripped. Raw payloads can contain secrets; delivery ids are transport
+/// metadata used only for history deduplication.
 fn subscriber_event(event: &AgentEvent) -> AgentEvent {
     let mut stripped = event.clone();
     stripped.raw_event = None;
+    if let Some(identity) = &mut stripped.history_identity {
+        identity.delivery_id = None;
+    }
     stripped
 }
 
@@ -1504,4 +1505,45 @@ fn parse_with_adapters(input: &RawHookInput) -> Result<ParsedEvent, CoreError> {
         context,
     );
     Ok((ev, None, None, None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_hooks_protocol::{AgentLifecycle, EventContext, HistoryIdentity};
+
+    #[test]
+    fn subscribers_receive_native_identity_but_not_internal_delivery_receipts() {
+        let mut event = AgentEvent::new(
+            "omp",
+            "native-session",
+            AgentLifecycle::SessionStart {
+                resume_command: None,
+            },
+            EventContext::default(),
+        );
+        event.raw_event = Some(r#"{"private":"payload"}"#.into());
+        event.history_identity = Some(HistoryIdentity {
+            native_session: true,
+            native_turn_id: Some("native-turn".into()),
+            delivery_id: Some("internal-receipt".into()),
+            ..Default::default()
+        });
+
+        let notification = serde_json::to_value(subscriber_notification(&event)).unwrap();
+        let params = &notification["params"];
+        assert!(params.get("raw_event").is_none_or(Value::is_null));
+        assert!(params["history_identity"].get("delivery_id").is_none());
+        assert_eq!(params["history_identity"]["native_turn_id"], "native-turn");
+        assert_eq!(
+            event
+                .history_identity
+                .as_ref()
+                .unwrap()
+                .delivery_id
+                .as_deref(),
+            Some("internal-receipt"),
+            "internal state must retain the receipt for deduplication"
+        );
+    }
 }

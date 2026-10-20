@@ -676,3 +676,47 @@ fn sessions_session_flag_filters_exactly_and_unknown_id_is_empty() {
     assert_eq!(page["api_version"], 2);
     assert!(page.get("error").is_none());
 }
+
+#[test]
+fn sessions_search_uses_pushed_titles_and_preserves_them_when_absent() {
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join("history");
+    assert!(history_cli(home.path(), &dir, &["init"]).0);
+
+    for payload in [
+        json!({"session_id": "named", "session_title": "Fix login", "prompt": "start"}),
+        json!({"session_id": "named", "prompt": "continue"}),
+        json!({"session_id": "other", "session_title": "Refactor storage", "prompt": "start"}),
+    ] {
+        assert!(shim(home.path(), &dir, "omp", "UserPromptSubmit", payload)
+            .status
+            .success());
+    }
+
+    let (ok, page) = history_cli(home.path(), &dir, &["sessions", "--search", "LOGIN"]);
+    assert!(ok, "{page}");
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{page}");
+    assert_eq!(items[0]["session_id"], "named");
+    assert_eq!(items[0]["title"], "Fix login");
+
+    assert!(shim(
+        home.path(),
+        &dir,
+        "omp",
+        "UserPromptSubmit",
+        json!({"session_id": "named", "session_title": "Ship authentication", "prompt": "rename"}),
+    )
+    .status
+    .success());
+    let (ok, old) = history_cli(home.path(), &dir, &["sessions", "--search", "login"]);
+    assert!(ok, "{old}");
+    assert!(old["items"].as_array().unwrap().is_empty());
+    let (ok, renamed) = history_cli(
+        home.path(),
+        &dir,
+        &["sessions", "--search", "authentication", "--harness", "omp"],
+    );
+    assert!(ok, "{renamed}");
+    assert_eq!(renamed["items"][0]["title"], "Ship authentication");
+}

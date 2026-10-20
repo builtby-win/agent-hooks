@@ -241,7 +241,7 @@ Notes that bite:
 ```
 agent-hooks history init [--history-dir DIR]
 agent-hooks daemon --history [--history-dir DIR]   # also record events forwarded from remote machines
-agent-hooks history sessions [--session ID] [--harness H] [--origin O] [--after CURSOR] [--limit N]
+agent-hooks history sessions [--session ID] [--search TEXT] [--harness H] [--origin O] [--after CURSOR] [--limit N]
 agent-hooks history messages --session ID [--harness H] [--origin O] [--after CURSOR] [--before SEQ] [--limit N] [--kind user,assistant]
 agent-hooks history status
 ```
@@ -255,9 +255,38 @@ Default directory: `$AGENT_HOOKS_HISTORY_DIR`, else `~/.agent-hooks/history` (`h
 - **Secrets, compression, no retention limit.** Prompts, summaries and tool inputs/outputs can contain secrets. Access is restricted to the owning user (directory 0700, files 0600), but the data is **not encrypted**: values over 1 KiB are transparently compressed with lossless zstd, only when smaller, purely to save space, and compression is not encryption. Query output is byte-identical to what was captured. There is no retention limit. Remove the history by deleting the directory.
 - **Schema upgrades.** `history init` (or the next recording hook) upgrades a v1 store to v2 in one atomic transaction, preserving every entry, session, receipt, cursor position and byte of text; until then read-only queries report `schema_upgrade_required`. A migrated store may keep reusable free pages: the compact metadata and compression reduce the space the data occupies, but the file's historical high-water mark does not shrink on its own, and nothing runs `VACUUM` automatically. Run an explicit SQLite `VACUUM` (with the agents and daemon stopped) to return that space to the filesystem. A store that cannot be decoded (corrupt or truncated compressed data) makes queries fail with `store_unavailable` rather than return garbled text.
 - **Prospective only.** There is no transcript import; sessions are keyed by `(origin, harness, native session id)` and events without a harness-native session id are skipped. Use `--harness`/`--origin` when the same id exists more than once (`ambiguous_session`).
+- **Session titles.** Harness-pushed `AgentEvent.session_title` is stored as `HistorySession.title`, including later renames. Missing or blank titles do not erase a known title; older observations cannot overwrite a newer title. Pi/OMP push `getSessionName()`, OpenCode forwards session title updates, Amp forwards `thread.title`, and other harnesses can supply `session_title` or `sessionTitle`. No title is invented when a harness provides none.
+- **Find sessions.** `history sessions --search "login"` matches a literal substring of the current title, native session id, or workspace. Matching ignores ASCII case; non-ASCII letters match exactly. `%` and `_` are literal, not wildcards. Surrounding whitespace is ignored and blank search means no filter. Search combines with the exact `--session`, `--harness`, and `--origin` filters and is applied before pagination. Reuse the same search text with `--after`; changing it requires starting a new listing. Titles remain live between pages, so a concurrent rename can change whether an existing session matches.
 - **Failure-safe.** A write waits at most 200 ms on the SQLite writer lock (parallel agents share one store), never changes a verdict or exit code, and a failure prints a stderr warning without content. Two separate prompts with identical text are two entries.
 - **Queries are read-only**, need no daemon, and print versioned JSON (`api_version: 2`; v2 adds `tool_input`/`tool_output` on tool entries and no longer concatenates tool phases into `text`) — the JSON, not the SQLite schema, is the contract. There is deliberately no history RPC on the (world-writable) hook socket. `history messages --kind` (repeatable or comma-separated; default all) filters entry kinds in SQL before payloads decode and pages are cut, so a chat view passes `--kind user,assistant` to skip large tool bodies; a cursor only works with the kind set it was issued for.
 - **Scroll-up paging.** `history messages --before SEQ` returns the newest page below that entry sequence, oldest first, in one indexed query with no `next_cursor`; pass the first returned item's `seq` as the next `--before` to keep loading older rows. It cannot combine with `--after`, and a page shorter than `--limit` means the start of the history. Forward `--after` paging is unchanged.
+
+Rust consumers use the same query contract directly, without knowing the SQLite schema:
+
+```rust
+use agent_hooks_history::{resolve_history_dir, HistoryReader, SessionsQuery};
+
+let reader = HistoryReader::open(&resolve_history_dir(None))?;
+let mut query = SessionsQuery {
+    search: Some("login".into()),
+    limit: Some(50),
+    ..Default::default()
+};
+loop {
+    let page = reader.sessions(&query)?;
+    for session in page.items {
+        println!(
+            "{}: {}",
+            session.key.session_id,
+            session.title.as_deref().unwrap_or("Untitled")
+        );
+    }
+    query.after = page.next_cursor;
+    if query.after.is_none() {
+        break;
+    }
+}
+```
 
 ---
 

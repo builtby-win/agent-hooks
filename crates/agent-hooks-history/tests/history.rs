@@ -1032,6 +1032,7 @@ fn sessions_session_filter_matches_exactly_and_composes_with_harness_origin() {
         harness: harness.map(Into::into),
         origin: origin.map(Into::into),
         after: None,
+        search: None,
         limit: None,
     };
 
@@ -1068,6 +1069,155 @@ fn sessions_session_filter_matches_exactly_and_composes_with_harness_origin() {
     }
     let page = r.sessions(&sq(Some("  dup  "), None, None)).unwrap();
     assert_eq!(page.items.len(), 3);
+}
+
+#[test]
+fn sessions_search_is_literal_case_insensitive_and_composes_with_filters() {
+    let (_t, dir) = store();
+    let mut w = HistoryWriter::open(&dir).unwrap();
+    let mut a = base("alpha-001", "d1", 1, None);
+    a.workspace = Some("/Users/me/Proj_X".into());
+    let mut b = base("beta-002", "d2", 2, None);
+    b.title = Some("Fix 100% login".into());
+    b.workspace = Some("/tmp/other".into());
+    let mut c = base("gamma-003", "d3", 3, None);
+    c.harness = "codex".into();
+    c.title = Some("Login Refactor".into());
+    c.workspace = Some("/home/dev/app".into());
+    let mut d = base("delta-004", "d4", 4, None);
+    d.origin = "ssh:box".into();
+    d.title = Some("a_b".into());
+    for cap in [&a, &b, &c, &d] {
+        assert_eq!(w.record(cap).unwrap(), RecordOutcome::Stored);
+    }
+    let r = HistoryReader::open(&dir).unwrap();
+    let search = |text: &str| SessionsQuery {
+        search: Some(text.into()),
+        ..Default::default()
+    };
+    let ids = |q: &SessionsQuery| -> Vec<String> {
+        let page = r.sessions(q).unwrap();
+        assert!(page.next_cursor.is_none());
+        page.items.into_iter().map(|s| s.key.session_id).collect()
+    };
+
+    // Session id, title and workspace each match, ignoring ASCII case.
+    assert_eq!(ids(&search("ALPHA")), ["alpha-001"]);
+    assert_eq!(ids(&search("proj_x")), ["alpha-001"]);
+    assert_eq!(ids(&search("login")), ["beta-002", "gamma-003"]);
+    assert_eq!(ids(&search("zzz-no-match")), Vec::<String>::new());
+
+    // `%` and `_` are literal characters, not wildcards.
+    assert_eq!(ids(&search("%")), ["beta-002"]);
+    assert_eq!(ids(&search("_")), ["alpha-001", "delta-004"]);
+    assert_eq!(ids(&search("a_b")), ["delta-004"]);
+    assert_eq!(ids(&search("a%b")), Vec::<String>::new());
+    assert_eq!(ids(&search("100%")), ["beta-002"]);
+
+    // Blank search is no filter; surrounding whitespace is trimmed.
+    for blank in ["", "   "] {
+        assert_eq!(ids(&search(blank)).len(), 4);
+    }
+    assert_eq!(ids(&search("  login  ")), ["beta-002", "gamma-003"]);
+
+    // AND with every other filter.
+    let mut q = search("login");
+    q.harness = Some("codex".into());
+    assert_eq!(ids(&q), ["gamma-003"]);
+    q.origin = Some("ssh:box".into());
+    assert_eq!(ids(&q), Vec::<String>::new());
+    let mut q = search("login");
+    q.session = Some("beta-002".into());
+    assert_eq!(ids(&q), ["beta-002"]);
+    q.session = Some("alpha-001".into());
+    assert_eq!(ids(&q), Vec::<String>::new());
+
+    // Search follows the current title: a later observation that sets or
+    // renames the title makes the session findable by it (and not by the old).
+    assert_eq!(ids(&search("zebra")), Vec::<String>::new());
+    let mut a2 = base("alpha-001", "d5", 5, None);
+    a2.title = Some("Renamed Zebra".into());
+    w.record(&a2).unwrap();
+    assert_eq!(ids(&search("zebra")), ["alpha-001"]);
+    let mut b2 = base("beta-002", "d6", 6, None);
+    b2.title = Some("Now about billing".into());
+    w.record(&b2).unwrap();
+    assert_eq!(ids(&search("login")), ["gamma-003"]);
+    assert_eq!(ids(&search("BILLING")), ["beta-002"]);
+    // Workspace from the first observation is still searchable.
+    assert_eq!(ids(&search("proj_x")), ["alpha-001"]);
+}
+
+#[test]
+fn sessions_search_pages_and_cursor_is_tied_to_search() {
+    let (_t, dir) = store();
+    let mut w = HistoryWriter::open(&dir).unwrap();
+    for (i, (id, title)) in [
+        ("s1", "login one"),
+        ("s2", "other"),
+        ("s3", "LOGIN two"),
+        ("s4", "login three"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut cap = base(id, &format!("d{i}"), i as u64 + 1, None);
+        cap.title = Some(title.into());
+        w.record(&cap).unwrap();
+    }
+    let r = HistoryReader::open(&dir).unwrap();
+    let q = |search: Option<&str>, after: Option<String>| SessionsQuery {
+        search: search.map(Into::into),
+        after,
+        limit: Some(2),
+        ..Default::default()
+    };
+    let ids = |page: &agent_hooks_protocol::HistorySessionsPage| -> Vec<String> {
+        page.items
+            .iter()
+            .map(|s| s.key.session_id.clone())
+            .collect()
+    };
+
+    // Non-matching rows never consume page slots; the cursor resumes after the
+    // last returned match. Trimmed search text is the filter identity.
+    let p1 = r.sessions(&q(Some("login"), None)).unwrap();
+    assert_eq!(ids(&p1), ["s1", "s3"]);
+    let cur = p1.next_cursor.clone().unwrap();
+    let p2 = r.sessions(&q(Some("  login "), Some(cur.clone()))).unwrap();
+    assert_eq!(ids(&p2), ["s4"]);
+    assert!(p2.next_cursor.is_none());
+
+    // A cursor is rejected under any different (or missing) search text.
+    for other in [Some("LOGIN"), Some("other"), None] {
+        assert!(
+            matches!(
+                r.sessions(&q(other, Some(cur.clone()))),
+                Err(HistoryError::InvalidArgument(_))
+            ),
+            "cursor must not cross search filters: {other:?}"
+        );
+    }
+    // ...and a cursor from an unsearched listing cannot be used with a search.
+    let plain = r.sessions(&q(None, None)).unwrap();
+    let plain_cur = plain.next_cursor.unwrap();
+    for blank in [Some("login"), Some("")] {
+        let res = r.sessions(&q(blank, Some(plain_cur.clone())));
+        // A blank search is the same filter as no search.
+        assert_eq!(res.is_ok(), blank == Some(""), "search {blank:?}");
+    }
+
+    // Cursors minted before `search` existed carry no such key: they decode
+    // as "no search".
+    let mut state: serde_json::Value = serde_json::from_slice(&hex_decode(&plain_cur)).unwrap();
+    state["filters"].as_object_mut().unwrap().remove("search");
+    let legacy = hex_encode(&serde_json::to_vec(&state).unwrap());
+    let page = r.sessions(&q(None, Some(legacy.clone()))).unwrap();
+    assert_eq!(ids(&page), ["s3", "s4"]);
+    assert!(matches!(
+        r.sessions(&q(Some("login"), Some(legacy))),
+        Err(HistoryError::InvalidArgument(_))
+    ));
 }
 
 #[test]

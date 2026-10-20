@@ -358,34 +358,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dev_socket_path_isolated_stable_and_overridable() {
-        let orig = std::env::var(ENV_AGENT_HOOKS_SOCKET).ok();
-        std::env::remove_var(ENV_AGENT_HOOKS_SOCKET);
-
-        let first = dev_socket_path();
-        let second = dev_socket_path();
-        assert_eq!(first, second, "dev socket must be stable per directory");
-        assert_ne!(
-            first,
-            default_socket_path(),
-            "dev socket must not collide with global"
-        );
-        if !cfg!(windows) {
-            assert!(first.starts_with(DEV_UNIX_SOCKET_PREFIX));
-        }
-
-        std::env::set_var(ENV_AGENT_HOOKS_SOCKET, "/custom/dev.sock");
-        assert_eq!(dev_socket_path(), "/custom/dev.sock");
-
-        if let Some(val) = orig {
-            std::env::set_var(ENV_AGENT_HOOKS_SOCKET, val);
-        } else {
-            std::env::remove_var(ENV_AGENT_HOOKS_SOCKET);
-        }
-    }
-
-    #[test]
-    fn test_default_socket_path_and_env_override() {
+    fn test_socket_paths_and_env_override() {
         // Save existing env
         let orig = std::env::var(ENV_AGENT_HOOKS_SOCKET).ok();
 
@@ -397,9 +370,20 @@ mod tests {
             assert_eq!(default_path, DEFAULT_UNIX_SOCKET_PATH);
         }
 
+        let dev_path = dev_socket_path();
+        assert_eq!(dev_path, dev_socket_path(), "stable within a checkout");
+        assert_ne!(
+            dev_path, default_path,
+            "dev is isolated from the global socket"
+        );
+        if !cfg!(windows) {
+            assert!(dev_path.starts_with(DEV_UNIX_SOCKET_PREFIX));
+        }
+
         // Test override
         std::env::set_var(ENV_AGENT_HOOKS_SOCKET, "/custom/path.sock");
         assert_eq!(default_socket_path(), "/custom/path.sock");
+        assert_eq!(dev_socket_path(), "/custom/path.sock");
 
         // Restore env
         if let Some(val) = orig {

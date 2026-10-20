@@ -72,6 +72,10 @@ impl Capture {
             AgentLifecycle::Stop {
                 summary: Some(text),
                 ..
+            }
+            | AgentLifecycle::TurnEnd {
+                assistant_message: Some(text),
+                ..
             } if !text.trim().is_empty() => Some(CaptureEntry {
                 kind: HistoryEntryKind::Assistant,
                 text: Some(text.clone()),

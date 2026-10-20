@@ -94,9 +94,14 @@ pub enum AgentLifecycle {
     },
     /// A single agent turn ended. Busy signal: stays Running (the run may
     /// continue with more turns). Only Stop/SessionEnd terminate.
+    /// `assistant_message` carries the turn's printed assistant reply when
+    /// the harness forwards it (e.g. pi/omp `turn_end` with
+    /// `last_assistant_message`); `None` preserves the old status-only shape.
     TurnEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_index: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_message: Option<String>,
     },
 
     /// Agent finished its execution turn and is now awaiting new user input.

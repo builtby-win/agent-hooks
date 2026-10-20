@@ -23,9 +23,12 @@
     "v1": {
       "agent_cli": {
         "executables": ["droid"],
-        "documentation": ["https://docs.factory.com/harness/hooks.md"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
-        "resume": {"argv": ["droid", "--resume", "{session_ref}"], "session_ref": "id"}
+        "documentation": ["https://docs.factory.com/droid-cli/cli-reference", "https://docs.factory.com/autonomy-and-safety/auto-run"],
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start and exec: https://docs.factory.com/droid-cli/cli-reference",
+        "resume": {"argv": ["droid", "--resume", "{session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["droid", "{prompt}"]},
+        "exec": {"argv": ["droid", "exec", "{prompt}"]},
+        "exec_yolo_args": ["--skip-permissions-unsafe"]
       },
       "install": [
         {

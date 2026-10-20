@@ -419,9 +419,15 @@ Per-event overrides for fields whose meaning shifts by event:
 
 Keyed by capability, because that is the axis along which harness dialects actually
 differ. Values are JSON templates; `{reason}` interpolates the deny/continue reason,
-`{event}` the host event name, `{answers}` the flattened comma-joined picks,
+`{event}` the host event name, `{answers}` the prose projection including free text,
 `{reply}` the normalized reply verb (`allow`/`allow_always`/`deny`/`ask`),
-`{answer_groups}` the structured per-question picks (`string[][]`).
+`{answer_groups}` the native per-question groups (`string[][]`), and
+`{answers_structured}` the lossless canonical `PromptAnswer[]` used by Pi/OMP.
+All answer projections use the shared protocol resolver: IDs are validated and
+answers are ordered against the original request before rendering. Adapters need
+only declare the appropriate placeholder; positional fallback is not supported.
+Use structured answers when the host allows it. Prose and native text-keyed maps
+are host-specific projections, not lossless equivalents of the canonical schema.
 
 ```json
 {

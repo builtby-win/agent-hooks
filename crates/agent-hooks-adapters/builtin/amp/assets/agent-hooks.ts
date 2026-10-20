@@ -15,6 +15,7 @@
 //   agent.end     -> Stop (the visible turn finished; no later idle follows)
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -62,8 +63,8 @@ const CONTEXT_CMD = installSetting(INSTALL_CONTEXT_CMD);
 // forwarded so a consumer with several remotes knows which one sent the event.
 const ORIGIN = installSetting(INSTALL_ORIGIN);
 
-// Safety bound for the tool.call gate; the fast path resolves in ms.
-const GATE_TIMEOUT_MS = 25_000;
+// Bound held gates to the daemon's 300 second human-response window.
+const GATE_TIMEOUT_MS = 290_000;
 
 export function hookArgs(event: string): string[] {
   const args = ["hook", "amp", "--event", event];
@@ -122,41 +123,45 @@ function emit(event: string, payload: Fields): void {
 
 // Awaited forward for the gate. Any failure resolves {} (no verdict = allow).
 function query(event: string, payload: Fields): Promise<Fields> {
-  return new Promise((resolve) => {
-    if (hooksDisabled()) return resolve({});
-    let child;
+  const { promise, resolve } = Promise.withResolvers<Fields>();
+  if (hooksDisabled()) {
+    resolve({});
+    return promise;
+  }
+  let child;
+  try {
+    child = spawn(BINARY, hookArgs(event), { stdio: ["pipe", "pipe", "ignore"] });
+  } catch {
+    resolve({});
+    return promise;
+  }
+  let out = "";
+  const timer = setTimeout(() => {
     try {
-      child = spawn(BINARY, hookArgs(event), { stdio: ["pipe", "pipe", "ignore"] });
+      child.kill();
     } catch {
-      return resolve({});
+      // ignore
     }
-    let out = "";
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        // ignore
-      }
-      resolve({});
-    }, GATE_TIMEOUT_MS);
-    child.on("error", () => {
-      clearTimeout(timer);
-      resolve({});
-    });
-    child.stdout?.on("data", (d: unknown) => {
-      out += String(d);
-    });
-    child.on("close", () => {
-      clearTimeout(timer);
-      try {
-        resolve(fields(JSON.parse(out.trim() || "{}")));
-      } catch {
-        resolve({});
-      }
-    });
-    child.stdin?.on("error", () => {});
-    child.stdin?.end(JSON.stringify(payload));
+    resolve({});
+  }, GATE_TIMEOUT_MS);
+  child.on("error", () => {
+    clearTimeout(timer);
+    resolve({});
   });
+  child.stdout?.on("data", (d: unknown) => {
+    out += String(d);
+  });
+  child.on("close", () => {
+    clearTimeout(timer);
+    try {
+      resolve(fields(JSON.parse(out.trim() || "{}")));
+    } catch {
+      resolve({});
+    }
+  });
+  child.stdin?.on("error", () => {});
+  child.stdin?.end(JSON.stringify(payload));
+  return promise;
 }
 
 // Verdict -> Amp tool.call action. Only an explicit deny rejects.
@@ -165,21 +170,232 @@ export function toolCallAction(decision: Fields): { action: "allow" } | { action
   const reason = typeof decision.reason === "string" && decision.reason.trim() ? decision.reason.trim() : "denied by agent-hooks";
   return { action: "reject-and-continue", message: reason };
 }
+type AskQuestion = {
+  id: string;
+  question: string;
+  header?: string;
+  options: AskOption[];
+  multiple?: boolean;
+  custom?: boolean;
+  recommended?: number;
+};
+type AskAnswer = { question_id: string; selected_options: string[]; custom_input?: string };
+type Ui = {
+  confirm(options: { title: string; message: string; confirmButtonText: string }): Promise<boolean>;
+  select(options: { title: string; message: string; options: string[]; allowOther: boolean }): Promise<string | undefined>;
+  input(options: { title: string; helpText: string; submitButtonText: string }): Promise<string | undefined>;
+};
+type PluginContext = { ui: Ui; thread?: { id?: string } };
+type ToolDefinition = {
+  name: string;
+  title: string;
+  description: string;
+  inputSchema: Fields;
+  execute(input: unknown, ctx: PluginContext): Promise<string>;
+};
+type AmpPlugin = {
+  on(event: string, handler: (event: unknown, ctx: PluginContext) => unknown): void;
+  registerTool(tool: ToolDefinition): void;
+};
 
-export default function agentHooks(amp: any) {
-  amp.on("session.start", (event: unknown, ctx: unknown) => {
+function normalizeQuestions(value: unknown): AskQuestion[] | undefined {
+  const input = fields(value);
+  if (!Array.isArray(input.questions) || input.questions.length === 0) return undefined;
+  const questions: AskQuestion[] = [];
+  for (const value of input.questions) {
+    const q = fields(value);
+    if (typeof q.id !== "string" || typeof q.question !== "string" || !Array.isArray(q.options)) return undefined;
+    const options: AskOption[] = [];
+    for (const value of q.options) {
+      const o = fields(value);
+      if (typeof o.label !== "string") return undefined;
+      options.push({
+        label: o.label,
+        ...(typeof o.description === "string" ? { description: o.description } : {}),
+        ...(typeof o.preview === "string" ? { preview: o.preview } : {}),
+      });
+    }
+    questions.push({
+      id: q.id,
+      question: q.question,
+      options,
+      ...(typeof q.header === "string" ? { header: q.header } : {}),
+      multiple: q.multiple === true,
+      custom: q.custom === true,
+      ...(typeof q.recommended === "number" ? { recommended: q.recommended } : {}),
+    });
+  }
+  return questions;
+}
+
+export function canonicalAnswers(value: unknown, questions: AskQuestion[]): AskAnswer[] | undefined {
+  const decision = fields(value);
+  if (!Array.isArray(decision.answers) || decision.answers.length === 0) return undefined;
+  if (decision.decision !== "allow") throw new Error("Agent-hooks returned answers without an allow verdict");
+  if (decision.answers.length !== questions.length) throw new Error("Agent-hooks returned incomplete question answers");
+  const answers: AskAnswer[] = [];
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    const a = fields(decision.answers[i]);
+    const custom = a.custom_input === null || a.custom_input === "" ? undefined : a.custom_input;
+    if (!q || a.question_id !== q.id || !Array.isArray(a.selected_options) ||
+      a.selected_options.some((o) => typeof o !== "string" || !q.options.some((option) => option.label === o)) ||
+      new Set(a.selected_options).size !== a.selected_options.length ||
+      (custom !== undefined && (typeof custom !== "string" || q.custom !== true)) ||
+      a.selected_options.length + (typeof custom === "string" ? 1 : 0) === 0 ||
+      (q.multiple !== true && a.selected_options.length + (typeof custom === "string" ? 1 : 0) > 1)) {
+      throw new Error("Agent-hooks returned invalid question answers");
+    }
+    answers.push({
+      question_id: q.id,
+      selected_options: a.selected_options as string[],
+      ...(typeof custom === "string" ? { custom_input: custom } : {}),
+    });
+  }
+  return answers;
+}
+
+async function nativeAnswers(questions: AskQuestion[], ui: Ui): Promise<AskAnswer[]> {
+  const answers: AskAnswer[] = [];
+  for (const q of questions) {
+    const selected: string[] = [];
+    let customInput: string | undefined;
+    if (q.multiple && q.options.length) {
+      let remaining = q.options.map((o) => o.label);
+      let doneLabel = "Done (finish selections)";
+      while (remaining.includes(doneLabel)) doneLabel += " ";
+      while (remaining.length) {
+        const choice = await ui.select({
+          title: q.header ?? "Answer question",
+          message: `${q.question}\nSelected: ${selected.join(", ") || "(none)"}\nChoose an option or finish.`,
+          options: [...remaining, ...(selected.length ? [doneLabel] : [])],
+          allowOther: q.custom === true,
+        });
+        if (choice === undefined) throw new Error("Question cancelled");
+        if (choice === doneLabel) break;
+        if (remaining.includes(choice)) {
+          selected.push(choice);
+          remaining = remaining.filter((label) => label !== choice);
+        } else if (q.custom) {
+          customInput = choice;
+          break;
+        }
+      }
+    } else if (q.options.length) {
+      const choice = await ui.select({
+        title: q.header ?? "Answer question",
+        message: q.question,
+        options: q.options.map((o) => o.label),
+        allowOther: q.custom === true,
+      });
+      if (choice === undefined) throw new Error("Question cancelled");
+      if (q.options.some((o) => o.label === choice)) selected.push(choice);
+      else if (q.custom) customInput = choice;
+      else throw new Error("Question returned an invalid option");
+    } else if (q.custom) {
+      const input = await ui.input({
+        title: q.header ?? "Answer question",
+        helpText: q.question,
+        submitButtonText: "Submit",
+      });
+      if (input === undefined) throw new Error("Question cancelled");
+      if (input.trim()) customInput = input;
+    }
+    if (!selected.length && !customInput) throw new Error("Question cancelled");
+    answers.push({ question_id: q.id, selected_options: selected, ...(customInput ? { custom_input: customInput } : {}) });
+  }
+  return answers;
+}
+
+function registerAskTool(amp: AmpPlugin): void {
+  amp.registerTool({
+    name: "agent_hooks_ask",
+    title: "Ask",
+    description: "Ask the user one or more structured questions and wait for their answers.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              question: { type: "string" },
+              header: { type: "string" },
+              options: { type: "array", items: { type: "object", properties: {
+                label: { type: "string" }, description: { type: "string" }, preview: { type: "string" },
+              }, required: ["label"] } },
+              multiple: { type: "boolean" },
+              custom: { type: "boolean" },
+              recommended: { type: "integer", minimum: 0 },
+            },
+            required: ["id", "question", "options"],
+          },
+        },
+      },
+      required: ["questions"],
+    },
+    async execute(input: unknown, ctx: PluginContext): Promise<string> {
+      const questions = normalizeQuestions(input);
+      if (!questions) throw new Error("Invalid agent_hooks_ask questions");
+      const p = buildPayload(input, ctx);
+      let decision: Fields = {};
+      try {
+        decision = await query("question", {
+          ...p,
+          questions,
+          tool_name: "agent_hooks_ask",
+          session_id: str(p.session_id, ctx.thread?.id),
+          request_id: str(p.request_id) ?? randomUUID(),
+        });
+      } catch {
+        decision = {};
+      }
+      if (decision.decision === "deny") throw new Error(str(decision.reason) ?? "Question denied");
+      if (Array.isArray(decision.answers) && decision.answers.length > 0) {
+        const answers = canonicalAnswers(decision, questions);
+        if (!answers) throw new Error("Agent-hooks returned no usable question answers");
+        return JSON.stringify(answers);
+      }
+      return JSON.stringify(await nativeAnswers(questions, ctx.ui));
+    },
+  });
+}
+
+export default function agentHooks(amp: AmpPlugin) {
+  registerAskTool(amp);
+  amp.on("session.start", (event: unknown, ctx: PluginContext) => {
     emit("session.start", buildPayload(event, ctx));
   });
-  amp.on("agent.start", (event: unknown, ctx: unknown) => {
+  amp.on("agent.start", (event: unknown, ctx: PluginContext) => {
     emit("agent.start", buildPayload(event, ctx));
   });
-  amp.on("tool.call", async (event: unknown, ctx: unknown) => {
-    return toolCallAction(await query("tool.call", buildPayload(event, ctx)));
+  amp.on("tool.call", async (event: unknown, ctx: PluginContext) => {
+    const payload = buildPayload(event, ctx);
+    if (payload.tool_name === "agent_hooks_ask") return { action: "allow" };
+    const decision = await query("tool.call", payload);
+    if (decision.decision === "ask") {
+      try {
+        const confirmed = await ctx.ui.confirm({
+          title: `Allow ${str(payload.tool_name) ?? "tool"}?`,
+          message: str(decision.reason) ?? "Agent-hooks requests permission to continue.",
+          confirmButtonText: "Allow",
+        });
+        return confirmed
+          ? { action: "allow" }
+          : { action: "reject-and-continue", message: str(decision.reason) ?? "Permission denied" };
+      } catch {
+        return { action: "reject-and-continue", message: str(decision.reason) ?? "Permission confirmation failed" };
+      }
+    }
+    return toolCallAction(decision);
   });
-  amp.on("tool.result", (event: unknown, ctx: unknown) => {
+  amp.on("tool.result", (event: unknown, ctx: PluginContext) => {
     emit("tool.result", buildPayload(event, ctx));
   });
-  amp.on("agent.end", (event: unknown, ctx: unknown) => {
+  amp.on("agent.end", (event: unknown, ctx: PluginContext) => {
     emit("agent.end", buildPayload(event, ctx));
   });
 }

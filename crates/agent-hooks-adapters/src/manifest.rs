@@ -788,6 +788,18 @@ pub struct AgentCliSpec {
     /// after the executable of `start`/`exec`. `{model}` is one argv value.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_args: Vec<String>,
+    /// Args that opt this CLI into its YOLO/auto-approve posture for one run.
+    /// They are spliced into `start`/`exec` only when the caller requests `--yolo`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub yolo_args: Vec<String>,
+    /// YOLO args limited to the interactive `start` recipe. When absent,
+    /// `yolo_args` applies to both start and exec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub start_yolo_args: Vec<String>,
+    /// YOLO args limited to the non-interactive `exec` recipe. When absent,
+    /// `yolo_args` applies to both start and exec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_yolo_args: Vec<String>,
 }
 
 /// A model-listing argv; runs as-is, no placeholders. Stdout is read to
@@ -940,7 +952,100 @@ impl IgnoreRule {
     }
 }
 
+/// Answer flows a harness exposes to deciders, derived from its manifest so
+/// `agent-hooks list` (and consumers) report what the adapter actually
+/// renders — never a hardcoded per-harness table.
+///
+/// - `permissions`: a decider can allow/deny a held gate (any gate event).
+/// - `questions`: structured `answers[]` reach the agent in-band — the
+///   allow template carries an answers placeholder (`{updated_input}`,
+///   `{answers_structured}`, `{answer_groups}`, `{answers}`) or the strategy
+///   is `deny_block_reason` (answers ride the deny reason).
+/// - `questions_native`: delivery goes through the host's own structured
+///   answer channel (`{updated_input}`, `{answers_structured}`,
+///   `{answer_groups}`) rather than prose. That is not a fidelity claim:
+///   only `{answers_structured}` carries the canonical answers losslessly.
+///   `{answer_groups}` drops which entry is free text, and Claude's
+///   `{updated_input}` comma-joins multi-picks and custom text into one
+///   string keyed by question text, so commas inside an answer are
+///   ambiguous. When `questions` is set without this flag, answers reach the
+///   agent only as prose context (`{answers}`) or a deny block reason.
+///   Manifest-wide: it does not say which events carry which.
+/// - `escalate`: a decider can bounce the prompt back to the human (`ask`
+///   verdict honored on some gate event; absent verdicts mean all honored).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerSupport {
+    pub permissions: bool,
+    pub questions: bool,
+    #[serde(default)]
+    pub questions_native: bool,
+    pub escalate: bool,
+}
+
+impl AnswerSupport {
+    /// Compact `list` rendering: `permissions+questions+escalate`, or `—`.
+    /// Context-only question delivery reads `questions(context)`.
+    pub fn label(&self) -> String {
+        let mut parts = Vec::new();
+        if self.permissions {
+            parts.push("permissions");
+        }
+        if self.questions {
+            parts.push(if self.questions_native {
+                "questions"
+            } else {
+                "questions(context)"
+            });
+        }
+        if self.escalate {
+            parts.push("escalate");
+        }
+        if parts.is_empty() {
+            return "—".to_string();
+        }
+        parts.join("+")
+    }
+}
+
 impl VersionSpec {
+    pub fn answer_support(&self) -> AnswerSupport {
+        let gates: Vec<&EventSpec> = self
+            .events
+            .values()
+            .filter(|e| e.capability == Capability::Gate)
+            .collect();
+        let permissions = !gates.is_empty();
+        let escalate = gates.iter().any(|e| match &e.verdicts {
+            None => true,
+            Some(v) => v.contains(&Verdict::Ask),
+        });
+        let mut allows = Vec::new();
+        if let Some(g) = &self.response.gate {
+            allows.push(&g.allow);
+        }
+        for g in self.response.response_overrides.values() {
+            allows.push(&g.allow);
+        }
+        let rendered: String = allows
+            .iter()
+            .map(|v| serde_json::to_string(v).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let native_questions = ["{updated_input}", "{answers_structured}", "{answer_groups}"]
+            .iter()
+            .any(|p| rendered.contains(p));
+        let questions = native_questions
+            || self.response.question_answer_strategy
+                == Some(QuestionAnswerStrategy::DenyBlockReason)
+            || rendered.contains("{answers}");
+        AnswerSupport {
+            permissions,
+            questions,
+            questions_native: native_questions,
+            escalate,
+        }
+    }
+
     pub fn ask_allowed(&self, lifecycle_key: &str) -> bool {
         self.events
             .get(lifecycle_key)
@@ -1048,6 +1153,9 @@ impl AdapterManifest {
             || cli.recipe_source.is_empty()
             || cli.documentation.iter().any(String::is_empty)
             || cli.model_aliases.iter().any(String::is_empty)
+            || cli.yolo_args.iter().any(String::is_empty)
+            || cli.start_yolo_args.iter().any(String::is_empty)
+            || cli.exec_yolo_args.iter().any(String::is_empty)
         {
             return err("has incomplete agent_cli metadata".into());
         }
@@ -1529,4 +1637,149 @@ fn valid_model_args(args: &[String]) -> bool {
         .map(|a| a.matches("{model}").count())
         .sum::<usize>()
         == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn support_fixture(events: serde_json::Value, response: serde_json::Value) -> AnswerSupport {
+        let text = serde_json::json!({
+            "id": "fixture",
+            "display_name": "Fixture",
+            "default_version": "v1",
+            "detect": {"harness_hint": ["fixture"]},
+            "versions": {"v1": {
+                "install": [],
+                "events": events,
+                "extraction": {
+                    "session_id": ["session_id"],
+                    "prompt": ["prompt"],
+                    "tool_name": ["tool_name"],
+                    "tool_input": ["tool_input"],
+                    "tool_output": ["tool_output"],
+                    "error": ["error"],
+                    "success": ["success"]
+                },
+                "response": response
+            }}
+        })
+        .to_string();
+        AdapterManifest::parse(&text)
+            .expect("fixture parses")
+            .get_version("v1")
+            .expect("v1")
+            .answer_support()
+    }
+
+    fn gate(verdicts: Option<serde_json::Value>) -> serde_json::Value {
+        let mut event = serde_json::json!({"lifecycle": "PreToolUse", "capability": "gate"});
+        if let Some(v) = verdicts {
+            event["verdicts"] = v;
+        }
+        event
+    }
+
+    #[test]
+    fn updated_input_allow_marks_questions() {
+        let s = support_fixture(
+            serde_json::json!({"PreToolUse": gate(Some(serde_json::json!(["allow", "deny"])))}),
+            serde_json::json!({"mode": "json", "gate": {
+                "allow": {"permissionDecision": "allow", "updatedInput": "{updated_input}"},
+                "deny": {"permissionDecision": "deny"}
+            }, "observe": {}}),
+        );
+        assert!(s.permissions);
+        assert!(s.questions);
+        assert!(s.questions_native);
+        assert!(!s.escalate);
+    }
+
+    #[test]
+    fn deny_block_reason_marks_questions_without_template() {
+        let s = support_fixture(
+            serde_json::json!({"PreToolUse": gate(Some(serde_json::json!(["allow", "deny"])))}),
+            serde_json::json!({"mode": "json", "gate": {
+                "allow": {"decision": "allow"},
+                "deny": {"decision": "block", "reason": "{reason}"}
+            }, "observe": {}, "question_answer_strategy": "deny_block_reason"}),
+        );
+        assert!(s.permissions);
+        assert!(s.questions);
+        assert!(
+            !s.questions_native,
+            "answers in a block reason are prose, not a native answer"
+        );
+        assert_eq!(s.label(), "permissions+questions(context)");
+    }
+
+    #[test]
+    fn prose_answers_placeholder_is_context_not_native() {
+        let s = support_fixture(
+            serde_json::json!({"PreToolUse": gate(Some(serde_json::json!(["allow", "deny"])))}),
+            serde_json::json!({"mode": "json", "gate": {
+                "allow": {"additionalContext": "{answers}"},
+                "deny": {"decision": "deny"}
+            }, "observe": {}}),
+        );
+        assert!(s.questions);
+        assert!(!s.questions_native);
+    }
+
+    #[test]
+    fn structured_placeholders_are_native() {
+        for placeholder in ["{answers_structured}", "{answer_groups}", "{updated_input}"] {
+            let s = support_fixture(
+                serde_json::json!({"PreToolUse": gate(Some(serde_json::json!(["allow", "deny"])))}),
+                serde_json::json!({"mode": "json", "gate": {
+                    "allow": {"answers": placeholder},
+                    "deny": {"decision": "deny"}
+                }, "observe": {}}),
+            );
+            assert!(s.questions && s.questions_native, "{placeholder}");
+        }
+    }
+
+    #[test]
+    fn plain_allow_has_permissions_but_no_questions() {
+        let s = support_fixture(
+            serde_json::json!({"PreToolUse": gate(Some(serde_json::json!(["allow", "deny"])))}),
+            serde_json::json!({"mode": "json", "gate": {
+                "allow": {"decision": "allow"},
+                "deny": {"decision": "deny"}
+            }, "observe": {}}),
+        );
+        assert!(s.permissions);
+        assert!(!s.questions);
+        assert!(!s.questions_native);
+        assert!(!s.escalate);
+    }
+
+    #[test]
+    fn absent_verdicts_mean_escalate_supported() {
+        let s = support_fixture(
+            serde_json::json!({"PreToolUse": gate(None)}),
+            serde_json::json!({"mode": "json", "observe": {}}),
+        );
+        assert!(s.permissions);
+        assert!(s.escalate);
+    }
+
+    #[test]
+    fn observe_only_adapter_answers_nothing() {
+        let s = support_fixture(
+            serde_json::json!({"SessionStart": {"lifecycle": "SessionStart", "capability": "observe"}}),
+            serde_json::json!({"mode": "json", "observe": {}}),
+        );
+        assert_eq!(
+            s,
+            AnswerSupport {
+                permissions: false,
+                questions: false,
+                questions_native: false,
+                escalate: false,
+            }
+        );
+        assert_eq!(s.label(), "—");
+    }
 }

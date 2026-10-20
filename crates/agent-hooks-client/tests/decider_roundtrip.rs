@@ -379,7 +379,10 @@ async fn decider_roundtrip_all_harnesses() {
         );
 
         // Harness-dialect rendering of the same verdict.
-        let decision: PromptDecision = serde_json::from_str(&raw).expect("decision shape");
+        // The line is a PromptDecision plus the redundant `decision` verb.
+        let mut shape = v.clone();
+        shape.as_object_mut().expect("object").remove("decision");
+        let decision: PromptDecision = serde_json::from_value(shape).expect("decision shape");
         let rendered = adapter.format_response(&decision);
         // Non-allow verdicts must render a real dialect (never silence): the
         // reason has to reach the harness. Allow is exempt — silence IS the

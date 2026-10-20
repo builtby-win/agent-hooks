@@ -44,7 +44,8 @@
         "start": {"argv": ["muse", "{prompt}"]},
         "exec": {"argv": ["muse", "exec", "{prompt}"]},
         "model_args": ["--model", "{model}"],
-        "model_aliases": ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]
+        "model_aliases": ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"],
+        "yolo_args": ["--yolo"]
       },
       "verified_against": "1.4.7",
       "events": {

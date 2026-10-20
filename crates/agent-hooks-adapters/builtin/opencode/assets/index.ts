@@ -38,8 +38,8 @@
 //
 // Exports: the named `AgentHooksPlugin` is the V1 entry (V1 hosts call every
 // exported function); the default `{ id, setup }` is the V2 entry, which
-// reconstructs V1 busy/idle/question events from V2's session.execution.* /
-// form.* stream (legacy b2v-hooks.ts mapV2EventToV1).
+// registers the prompt-admission hook and reads completed assistant text from
+// session context when execution succeeds.
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -983,11 +983,45 @@ function mapV2EventToV1(event: Fields): Fields[] {
   return [event.data === undefined ? event : { ...event, properties: { ...data, ...fields(event.properties) } }];
 }
 
+type V2PromptEvent = {
+  sessionID?: string;
+  prompt?: { text?: string };
+};
 type V2Context = {
   location?: { directory?: string };
+  session?: {
+    hook?: (
+      name: "prompt",
+      handler: (event: V2PromptEvent) => void,
+    ) => Promise<{ dispose?: () => Promise<void> }>;
+    context?: (input: { sessionID: string }) => Promise<unknown>;
+  };
   event?: { subscribe?: (options?: { signal?: AbortSignal }) => AsyncIterable<unknown> };
 };
 
+function textParts(value: unknown): string | undefined {
+  const root = fields(value);
+  const parts = Array.isArray(value) ? value : Array.isArray(root.content) ? root.content : [];
+  const texts: string[] = [];
+  for (const part of parts) {
+    const block = fields(part);
+    if (block.type !== "text" && block.type !== "output_text") continue;
+    if (typeof block.text === "string" && block.text.trim()) texts.push(block.text.trim());
+  }
+  return texts.length ? texts.join("\n") : undefined;
+}
+
+function latestAssistantText(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined;
+  for (let index = value.length - 1; index >= 0; index -= 1) {
+    const row = fields(value[index]);
+    const message = fields(row.info ?? row);
+    if (message.type !== "assistant") continue;
+    const text = textParts(message.content ?? row.parts);
+    if (text) return text;
+  }
+  return undefined;
+}
 // Process-wide (globalThis) so every location instance and every hot-reloaded
 // copy of this module share it. Bounded; events without an id pass through.
 const SEEN_EVENT_IDS = Symbol.for("agent-hooks.opencode.seen-event-ids");
@@ -1015,11 +1049,26 @@ function ownsV2Event(event: Fields, dir: unknown): boolean {
  * `event.subscribe`; skip so the V1 export owns hooks and nothing double-fires.
  */
 async function setupV2(ctx: V2Context): Promise<() => void> {
-  const subscribe = ctx?.event?.subscribe;
-  if (typeof subscribe !== "function") return () => {};
   const dir = ctx.location?.directory;
   const hooks = await AgentHooksPlugin({ directory: typeof dir === "string" && dir.trim() ? dir : process.cwd() });
+  const promptRegistration =
+    typeof ctx.session?.hook === "function"
+      ? await ctx.session.hook("prompt", (event) => {
+          const sessionID = str(event.sessionID);
+          const text = event.prompt?.text;
+          if (!sessionID || typeof text !== "string" || !text.trim()) return;
+          if (typeof dir === "string" && dir.trim()) remember(sessionDirectories, sessionID, dir.trim());
+          emit("chat.message", { sessionID, message: text, parts: [{ type: "text", text }] });
+        })
+      : undefined;
   const controller = new AbortController();
+  const subscribe = ctx?.event?.subscribe;
+  if (typeof subscribe !== "function") {
+    return () => {
+      controller.abort();
+      void promptRegistration?.dispose?.();
+    };
+  }
   void (async () => {
     try {
       for await (const raw of subscribe.call(ctx.event, { signal: controller.signal })) {
@@ -1041,6 +1090,26 @@ async function setupV2(ctx: V2Context): Promise<() => void> {
           try {
             const mappedProps = fields(mapped.properties);
             const mappedSid = getSessionId(mappedProps);
+            let forwarded = mapped;
+            const idleEvent =
+              mapped.type === "session.status" && sessionStatusType(mappedProps) === "idle";
+            if (
+              idleEvent &&
+              rawEvent.type === "session.execution.succeeded" &&
+              mappedSid &&
+              ctx.session?.context
+            ) {
+              try {
+                const summary = latestAssistantText(
+                  await ctx.session.context({ sessionID: mappedSid }),
+                );
+                if (summary) {
+                  forwarded = { ...mapped, properties: { ...mappedProps, summary } };
+                }
+              } catch (err) {
+                debug(`session context lookup failed: ${err}`);
+              }
+            }
             const directory =
               (typeof eventDirectory === "string" && eventDirectory.trim()
                 ? eventDirectory.trim()
@@ -1048,8 +1117,8 @@ async function setupV2(ctx: V2Context): Promise<() => void> {
             await hooks.event({
               event:
                 directory && mappedProps.directory == null && mappedProps.cwd == null
-                  ? { ...mapped, properties: { ...mappedProps, directory } }
-                  : mapped,
+                  ? { ...forwarded, properties: { ...fields(forwarded.properties), directory } }
+                  : forwarded,
             });
           } catch (err) {
             debug(`v2 event handler failed: ${err}`);
@@ -1060,7 +1129,10 @@ async function setupV2(ctx: V2Context): Promise<() => void> {
       if (!controller.signal.aborted) debug(`v2 event stream ended: ${err}`);
     }
   })();
-  return () => controller.abort();
+  return () => {
+    controller.abort();
+    void promptRegistration?.dispose?.();
+  };
 }
 
 // Dual V1+V2 export (legacy b2v-hooks.ts): V2 reads `id` + `setup()`; V1 uses

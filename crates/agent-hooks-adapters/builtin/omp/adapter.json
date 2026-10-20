@@ -36,7 +36,8 @@
         "start": {"argv": ["omp", "{prompt}"]},
         "exec": {"argv": ["omp", "--print", "{prompt}"]},
         "models": {"argv": ["omp", "models", "--json"], "id_fields": ["id", "selector"]},
-        "model_args": ["--model={model}"]
+        "model_args": ["--model={model}"],
+        "yolo_args": ["--auto-approve"]
       },
       "verified_against": "18.12.3",
       "install": [
@@ -394,7 +395,7 @@
         },
         "response_overrides": {
           "PreToolUse": {
-            "allow": {"decision": "allow", "reply": "{reply}", "answers": "{answer_groups}"},
+            "allow": {"decision": "allow", "reply": "{reply}", "answers": "{answers_structured}"},
             "deny": {"decision": "deny", "reason": "{reason}"}
           },
           "PermissionRequest": {

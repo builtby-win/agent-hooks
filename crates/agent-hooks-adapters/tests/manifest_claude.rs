@@ -451,44 +451,62 @@ fn claude_normalize_response_is_event_aware() {
 }
 
 #[test]
-fn pretooluse_allow_with_answers_renders_additional_context() {
-    // Checkbox picks from the `answer` TUI reach the agent via
-    // additionalContext; empty picks omit the key entirely.
+fn pretooluse_never_carries_answers_and_permission_request_keeps_free_text_exact() {
+    // Claude's PreToolUse(AskUserQuestion) is not a question prompt, so it has
+    // no questions to resolve answers against: answers sent to it fail closed
+    // instead of being guessed into additionalContext.
     let adapter = manifest_adapter();
     let input = make_input(
         "PreToolUse",
-        r#"{"session_id": "s", "tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": "Which files?", "options": [{"label": "a.ts"}, {"label": "b.ts"}]}]}}"#,
+        r#"{"session_id": "s", "tool_name": "AskUserQuestion", "tool_input": {"questions": [{"question": "Which files?", "multiSelect": true, "options": [{"label": "a.ts"}, {"label": "b.ts"}]}]}}"#,
     );
     adapter.parse_event(&input).expect("parse PreToolUse");
     let with_picks = agent_hooks_protocol::PromptDecision {
-        allow: true,
-        custom_input: None,
         answers: vec![agent_hooks_protocol::PromptAnswer {
             question_id: "q0".to_string(),
-            selected_options: vec!["a.ts".to_string(), "b.ts".to_string()],
+            selected_options: vec!["a.ts".to_string()],
             custom_input: None,
         }],
-        ask: false,
-        allow_always: false,
-        suggestion: None,
-        defer: false,
-        additional_context: None,
+        ..agent_hooks_protocol::PromptDecision::allow()
     };
     let out = adapter.format_response(&with_picks);
     assert_eq!(
-        out["hookSpecificOutput"]["additionalContext"],
-        serde_json::json!("a.ts,b.ts")
+        out["hookSpecificOutput"]["permissionDecision"],
+        serde_json::json!("deny"),
+        "got {out}"
+    );
+    assert!(
+        out["hookSpecificOutput"].get("additionalContext").is_none(),
+        "answers must not leak as context, got {out}"
     );
     let plain = adapter.format_response(&agent_hooks_protocol::PromptDecision::allow());
     assert_eq!(
         plain["hookSpecificOutput"]["permissionDecision"],
         serde_json::json!("allow")
     );
-    assert!(
-        plain["hookSpecificOutput"]
-            .get("additionalContext")
-            .is_none(),
-        "empty picks must omit additionalContext, got {plain}"
+    assert!(plain["hookSpecificOutput"]
+        .get("additionalContext")
+        .is_none());
+
+    // The real answer channel is PermissionRequest `updatedInput`; free text
+    // there is carried verbatim, padding and length included.
+    let event = adapter
+        .parse_event(&make_input("PermissionRequest", ASK_DB))
+        .unwrap();
+    let qid = permission_prompt(&event).questions[0].id.clone();
+    let long = format!("  {}\n", "t".repeat(5_000));
+    let with_custom = agent_hooks_protocol::PromptDecision {
+        answers: vec![agent_hooks_protocol::PromptAnswer {
+            question_id: qid,
+            selected_options: vec![],
+            custom_input: Some(long.clone()),
+        }],
+        ..agent_hooks_protocol::PromptDecision::allow()
+    };
+    let out = adapter.format_response(&with_custom);
+    assert_eq!(
+        out["hookSpecificOutput"]["decision"]["updatedInput"]["answers"]["Which database?"],
+        serde_json::json!(long)
     );
 }
 

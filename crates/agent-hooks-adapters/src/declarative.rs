@@ -605,6 +605,24 @@ fn render_inject(value: &serde_json::Value, event: &str, context: &str) -> serde
     }
 }
 
+/// Lay a verdict response over an inject response: objects merge key by key,
+/// recursively, and wherever both define a key the verdict's value wins.
+fn merge_verdict_over(base: &mut serde_json::Value, verdict: serde_json::Value) {
+    match (base, verdict) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(v)) => {
+            for (k, v) in v {
+                match b.get_mut(&k) {
+                    Some(slot) => merge_verdict_over(slot, v),
+                    None => {
+                        b.insert(k, v);
+                    }
+                }
+            }
+        }
+        (slot, v) => *slot = v,
+    }
+}
+
 fn cap_reason(s: &str) -> String {
     const MAX_REASON_CHARS: usize = 2000;
     if s.chars().count() <= MAX_REASON_CHARS {
@@ -614,15 +632,15 @@ fn cap_reason(s: &str) -> String {
     format!("{truncated}...[truncated]")
 }
 
-/// Structured answer groups: one array per answered question, its selected
-/// options with any custom input appended.
+/// Native grouped answers (`{answer_groups}`): one `string[]` per question in
+/// request order — selected options first, then any custom input appended.
 ///
-/// Distinct from `{answers}`, which flattens every pick into one
-/// comma-joined string. That is fine for a host that wants prose context
-/// (Claude Code's `additionalContext`), but lossy for one that wants the
-/// picks back as data — opencode's `question.reply` takes `string[][]` and
-/// has to know which answer belongs to which question. A comma-joined string
-/// cannot say that, so hosts that answer structurally get this placeholder.
+/// This is the projection for hosts whose reply type is literally
+/// `string[][]` (opencode's `question.reply`). It cannot say which entry of a
+/// group is free text, so a host that needs that distinction must take
+/// `{answers_structured}` instead. Callers pass a decision already run through
+/// `PromptDecision::resolve_questions`, which fixes the order to the request's.
+/// Free text is carried verbatim — no trimming, no length cap.
 fn answer_groups(decision: &agent_hooks_protocol::PromptDecision) -> serde_json::Value {
     serde_json::Value::Array(
         decision
@@ -634,13 +652,64 @@ fn answer_groups(decision: &agent_hooks_protocol::PromptDecision) -> serde_json:
                     .iter()
                     .map(|s| serde_json::Value::String(s.clone()))
                     .collect();
-                if let Some(custom) = a.custom_input.as_ref().filter(|c| !c.trim().is_empty()) {
+                if let Some(custom) = a.custom_input.as_ref().filter(|c| !c.is_empty()) {
                     values.push(serde_json::Value::String(custom.clone()));
                 }
                 serde_json::Value::Array(values)
             })
             .collect(),
     )
+}
+
+/// Canonical answers (`{answers_structured}`): the protocol `PromptAnswer[]`
+/// itself, in request order, with picks and custom input kept apart. Lossless
+/// — the only projection a host can consume without guessing which text was
+/// typed and which was an option label.
+fn answers_structured(decision: &agent_hooks_protocol::PromptDecision) -> serde_json::Value {
+    let mut answers =
+        serde_json::to_value(&decision.answers).unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
+    if let Some(answers) = answers.as_array_mut() {
+        for answer in answers {
+            if answer
+                .get("custom_input")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(str::is_empty)
+            {
+                answer
+                    .as_object_mut()
+                    .expect("serialized prompt answer is an object")
+                    .remove("custom_input");
+            }
+        }
+    }
+    answers
+}
+
+fn has_placeholder(value: &serde_json::Value, placeholder: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value == placeholder,
+        serde_json::Value::Array(values) => values.iter().any(|value| has_placeholder(value, placeholder)),
+        serde_json::Value::Object(values) => values.values().any(|value| has_placeholder(value, placeholder)),
+        _ => false,
+    }
+}
+
+/// Prose answers (`{answers}`): every pick and custom input flattened into
+/// one comma-joined string. Lossy by design — question boundaries and the
+/// pick/custom distinction are gone — so it only suits hosts that hand the
+/// text to a model as context. Never capped here.
+fn answers_prose(decision: &agent_hooks_protocol::PromptDecision) -> String {
+    decision
+        .answers
+        .iter()
+        .flat_map(|a| {
+            a.selected_options
+                .iter()
+                .map(String::as_str)
+                .chain(a.custom_input.as_deref().filter(|c| !c.is_empty()))
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Normalized reply verb for hosts that distinguish approving *this* call
@@ -665,28 +734,32 @@ fn render_template_value(
     event: &str,
     answers: &str,
     groups: &serde_json::Value,
+    structured: &serde_json::Value,
     reply: &str,
 ) -> serde_json::Value {
-    // Cap user-controlled substitutions so overlong reasons/answers cannot
-    // bloat host responses; truncation marker preserves debuggability.
+    // Cap the reason so an overlong one cannot bloat host responses; the
+    // truncation marker preserves debuggability. Answers are user data the
+    // agent must receive intact, so they are never capped.
     let reason = cap_reason(reason);
-    let answers = cap_reason(answers);
     match value {
-        // Structured placeholder: replaces the whole value, not a substring,
+        // Structured placeholders: replace the whole value, not a substring,
         // because the payload is an array rather than text.
         serde_json::Value::String(s) if s.trim() == "{answer_groups}" => groups.clone(),
+        serde_json::Value::String(s) if s.trim() == "{answers_structured}" => structured.clone(),
         serde_json::Value::String(s) => {
             let r = s
                 .replace("{reason}", reason.as_str())
                 .replace("{reason?}", reason.as_str())
                 .replace("{event}", event)
-                .replace("{answers}", answers.as_str())
+                .replace("{answers}", answers)
                 .replace("{reply}", reply);
             serde_json::Value::String(r)
         }
         serde_json::Value::Array(arr) => serde_json::Value::Array(
             arr.iter()
-                .map(|v| render_template_value(v, &reason, event, &answers, groups, reply))
+                .map(|v| {
+                    render_template_value(v, &reason, event, answers, groups, structured, reply)
+                })
                 .collect(),
         ),
         serde_json::Value::Object(map) => {
@@ -694,8 +767,8 @@ fn render_template_value(
             for (k, v) in map {
                 // Omit answer-carrying keys when nothing was picked: absent
                 // beats empty (an empty context string is noise the agent
-                // still reads). Scoped to `{answers}` only — `{reason}`
-                // keeps its exact-render behavior.
+                // still reads). Scoped to the answer placeholders only —
+                // `{reason}` keeps its exact-render behavior.
                 if let serde_json::Value::String(s) = v {
                     let t = s.trim();
                     if answers.is_empty() && t == "{answers}" {
@@ -707,13 +780,16 @@ fn render_template_value(
                         continue;
                     }
                     // Same rule for structured picks: no answers, no key.
-                    if t == "{answer_groups}" && groups.as_array().is_some_and(|a| a.is_empty()) {
+                    if (t == "{answer_groups}" && groups.as_array().is_some_and(|a| a.is_empty()))
+                        || (t == "{answers_structured}"
+                            && structured.as_array().is_some_and(|a| a.is_empty()))
+                    {
                         continue;
                     }
                 }
                 out.insert(
                     k.clone(),
-                    render_template_value(v, &reason, event, &answers, groups, reply),
+                    render_template_value(v, &reason, event, answers, groups, structured, reply),
                 );
             }
             serde_json::Value::Object(out)
@@ -949,15 +1025,16 @@ fn lift_questions(value: &serde_json::Value, keys: &LiftKeys<'_>) -> Vec<PromptQ
             .iter()
             .any(|k| obj_get(map, k).and_then(coerce_bool).unwrap_or(false));
         let recommended = first_usize(map, &["recommended", "suggested"]);
+        let custom = obj_get(map, "custom").and_then(coerce_bool).unwrap_or(true);
         out.push(PromptQuestion {
             id,
             header,
             question: text,
             options,
             multiple: multi,
-            // Every answer path (claude updatedInput, codex reason, answer
-            // groups, pi/opencode plugins) carries `custom_input` through.
-            custom: true,
+            // Legacy ask tools allow custom input unless the canonical
+            // question explicitly disables it.
+            custom,
             recommended,
         });
     }
@@ -1161,91 +1238,92 @@ fn legacy_prompt_fields(
 /// echoed back (header / options / `multiSelect` only when true) plus an
 /// `answers` map keyed by question text; multi-picks and custom input join
 /// with ", ".
+///
+/// Claude's answer map is keyed by question *text*, so two questions sharing
+/// text would overwrite each other's answer. That is detected and refused
+/// rather than silently dropping one. `decision` must already have passed
+/// `PromptDecision::resolve_questions`; answers are matched by id only.
 fn claude_updated_input(
     questions: &[PromptQuestion],
     decision: &agent_hooks_protocol::PromptDecision,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, String> {
     let mut answer_map = serde_json::Map::new();
-    let items: Vec<serde_json::Value> = questions
-        .iter()
-        .enumerate()
-        .map(|(index, q)| {
-            let answer = decision
-                .answers
-                .iter()
-                .find(|a| a.question_id == q.id)
-                .or_else(|| decision.answers.get(index));
-            let mut values: Vec<String> = answer
-                .map(|a| a.selected_options.clone())
-                .unwrap_or_default();
-            if let Some(custom) = answer.and_then(|a| a.custom_input.clone()) {
-                values.push(custom);
-            }
-            answer_map.insert(
-                q.question.clone(),
-                serde_json::Value::String(values.join(", ")),
-            );
+    let mut items: Vec<serde_json::Value> = Vec::with_capacity(questions.len());
+    for q in questions {
+        let answer = decision.answers.iter().find(|a| a.question_id == q.id);
+        let mut values: Vec<&str> = answer
+            .map(|a| a.selected_options.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        if let Some(custom) = answer
+            .and_then(|a| a.custom_input.as_deref())
+            .filter(|c| !c.is_empty())
+        {
+            values.push(custom);
+        }
+        if answer_map.contains_key(&q.question) {
+            return Err(format!(
+                "questions share the text {:?}; this host keys answers by question text, so they cannot be answered unambiguously",
+                q.question
+            ));
+        }
+        answer_map.insert(
+            q.question.clone(),
+            serde_json::Value::String(values.join(", ")),
+        );
 
-            let mut item = serde_json::Map::new();
-            item.insert("question".into(), serde_json::json!(q.question));
-            if let Some(header) = &q.header {
-                item.insert("header".into(), serde_json::json!(header));
-            }
-            let options: Vec<serde_json::Value> = q
-                .options
-                .iter()
-                .map(|o| {
-                    let mut opt = serde_json::Map::new();
-                    opt.insert("label".into(), serde_json::json!(o.label));
-                    if let Some(d) = &o.description {
-                        opt.insert("description".into(), serde_json::json!(d));
-                    }
-                    if let Some(p) = &o.preview {
-                        opt.insert("preview".into(), serde_json::json!(p));
-                    }
-                    serde_json::Value::Object(opt)
-                })
-                .collect();
-            item.insert("options".into(), serde_json::Value::Array(options));
-            if q.multiple {
-                item.insert("multiSelect".into(), serde_json::json!(true));
-            }
-            serde_json::Value::Object(item)
-        })
-        .collect();
-    serde_json::json!({ "questions": items, "answers": answer_map })
+        let mut item = serde_json::Map::new();
+        item.insert("question".into(), serde_json::json!(q.question));
+        if let Some(header) = &q.header {
+            item.insert("header".into(), serde_json::json!(header));
+        }
+        let options: Vec<serde_json::Value> = q
+            .options
+            .iter()
+            .map(|o| {
+                let mut opt = serde_json::Map::new();
+                opt.insert("label".into(), serde_json::json!(o.label));
+                if let Some(d) = &o.description {
+                    opt.insert("description".into(), serde_json::json!(d));
+                }
+                if let Some(p) = &o.preview {
+                    opt.insert("preview".into(), serde_json::json!(p));
+                }
+                serde_json::Value::Object(opt)
+            })
+            .collect();
+        item.insert("options".into(), serde_json::Value::Array(options));
+        if q.multiple {
+            item.insert("multiSelect".into(), serde_json::json!(true));
+        }
+        items.push(serde_json::Value::Object(item));
+    }
+    Ok(serde_json::json!({ "questions": items, "answers": answer_map }))
 }
 
 /// Codex answer-by-block text. Mirrors Codex's own answered-question fragment
 /// (`> question\n\nanswer`) so the model reads it like a native reply.
+///
+/// Prose, not a native answer channel: Codex has no in-band reply, so the
+/// answers travel as the deny reason. Replies follow request order and are
+/// matched by id only; `decision` must already be resolved.
 fn codex_answer_reason(
     questions: &[PromptQuestion],
     decision: &agent_hooks_protocol::PromptDecision,
 ) -> String {
-    let replies: Vec<String> = decision
-        .answers
+    let replies: Vec<String> = questions
         .iter()
-        .enumerate()
-        .map(|(index, answer)| {
-            let question = questions
-                .iter()
-                .find(|q| q.id == answer.question_id)
-                .or_else(|| questions.get(index))
-                .map(|q| q.question.as_str())
-                .unwrap_or("Question");
-            let mut values = answer.selected_options.clone();
-            if let Some(custom) = answer
-                .custom_input
-                .as_ref()
-                .filter(|c| !c.trim().is_empty())
-            {
-                values.push(custom.clone());
+        .filter_map(|q| {
+            let answer = decision.answers.iter().find(|a| a.question_id == q.id)?;
+            let mut values: Vec<&str> =
+                answer.selected_options.iter().map(String::as_str).collect();
+            if let Some(custom) = answer.custom_input.as_deref().filter(|c| !c.is_empty()) {
+                values.push(custom);
             }
-            format!(
+            Some(format!(
                 "> {}\n\n{}",
-                question.replace(['\n', '\r'], " "),
+                q.question.replace(['\n', '\r'], " "),
                 values.join(", ")
-            )
+            ))
         })
         .collect();
     format!(
@@ -1689,8 +1767,15 @@ impl DeclarativeAdapter {
             }),
             LifecycleRef::SessionEnd => Ok(AgentLifecycle::SessionEnd { exit_code: None }),
             LifecycleRef::UserPromptSubmit => {
-                let prompt = extract_string_via_sources(payload, &prompt_sources);
-                // also try transcript fallback if not found?
+                let prompt = extract_string_via_sources(payload, &prompt_sources).or_else(|| {
+                    prompt_sources
+                        .iter()
+                        .filter_map(|source| match source {
+                            ExtractionSource::Path(path) => Some(path),
+                            _ => None,
+                        })
+                        .find_map(|path| walk_dotted(payload, path).and_then(flavor_from_value))
+                });
                 Ok(AgentLifecycle::UserPromptSubmit {
                     user_prompt: prompt,
                 })
@@ -2346,6 +2431,25 @@ impl HarnessAdapter for DeclarativeAdapter {
         let host_event = st.host_event.unwrap_or_default();
         let capability = st.capability;
         let vs = self.version_spec();
+        // Every projection below is built from the canonical decision
+        // resolved against the request's questions: answers in request
+        // order, ids/labels/verdict flags validated, no index fallback. A
+        // decision that does not resolve never reaches the host as an answer
+        // (nor as context); it fails closed as a deny carrying the reason.
+        let resolved;
+        let failed;
+        let decision = match decision.resolve_questions(&st.questions) {
+            Ok(d) => {
+                resolved = d;
+                &resolved
+            }
+            Err(e) => {
+                failed = agent_hooks_protocol::PromptDecision::deny(Some(format!(
+                    "invalid question answers: {e}"
+                )));
+                &failed
+            }
+        };
         // Context for the model rides only on a non-blocking verdict, through
         // the event's own `inject` template. No template = dropped silently.
         if decision.allow || decision.defer {
@@ -2360,7 +2464,19 @@ impl HarnessAdapter for DeclarativeAdapter {
                         .and_then(|l| vs.response.inject.get(l.as_str()))
                 });
                 if let Some(template) = template {
-                    return render_inject(template, &host_event, &cap_context(ctx));
+                    let mut injected = render_inject(template, &host_event, &cap_context(ctx));
+                    if decision.answers.is_empty() {
+                        return injected;
+                    }
+                    // Answers and context in one response: render the verdict
+                    // on its own (context stripped, so this cannot recurse
+                    // again) and lay it over the inject shape. On any key
+                    // collision the verdict wins, so context can never
+                    // displace the answer-carrying part.
+                    let mut verdict_only = decision.clone();
+                    verdict_only.additional_context = None;
+                    merge_verdict_over(&mut injected, self.format_response(&verdict_only));
+                    return injected;
                 }
             }
         }
@@ -2380,18 +2496,15 @@ impl HarnessAdapter for DeclarativeAdapter {
                 &host_event,
                 "",
                 &serde_json::Value::Array(Vec::new()),
+                &serde_json::Value::Array(Vec::new()),
                 "",
             );
         }
         let reason = decision.custom_input.clone().unwrap_or_default();
         let event_name = host_event.clone();
-        let answers = decision
-            .answers
-            .iter()
-            .flat_map(|a| a.selected_options.iter().cloned())
-            .collect::<Vec<_>>()
-            .join(",");
+        let answers = answers_prose(decision);
         let groups = answer_groups(decision);
+        let structured = answers_structured(decision);
         let reply = reply_verb(decision);
 
         match capability {
@@ -2471,11 +2584,30 @@ impl HarnessAdapter for DeclarativeAdapter {
                         &event_name,
                         &answers,
                         &groups,
+                        &structured,
                         reply,
                     );
-                    let updated = (!decision.answers.is_empty())
-                        .then(|| claude_updated_input(&st.questions, decision));
-                    let original_input = (decision.allow && vs.response.allow_requires_tool_input)
+                    let needs_updated_input = has_placeholder(&rendered, "{updated_input}");
+                    let updated = if needs_updated_input && !decision.answers.is_empty() {
+                        match claude_updated_input(&st.questions, decision) {
+                            Ok(v) => Some(v),
+                            // A projection the host cannot carry faithfully
+                            // (duplicate question text) must not reach it as
+                            // a guessed answer: fail closed with the reason.
+                            Err(e) => {
+                                return self.format_response(
+                                    &agent_hooks_protocol::PromptDecision::deny(Some(format!(
+                                        "cannot deliver question answers: {e}"
+                                    ))),
+                                );
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let original_input = (needs_updated_input
+                        && decision.allow
+                        && vs.response.allow_requires_tool_input)
                         .then(|| st.tool_input.clone());
                     let updated = updated
                         .as_ref()
@@ -2507,7 +2639,15 @@ impl HarnessAdapter for DeclarativeAdapter {
                         agent_hooks_protocol::NormalizedResponse::Proceed => &cont.stop,
                         _ => &cont.continue_,
                     };
-                    render_template_value(template, &reason, &event_name, &answers, &groups, reply)
+                    render_template_value(
+                        template,
+                        &reason,
+                        &event_name,
+                        &answers,
+                        &groups,
+                        &structured,
+                        reply,
+                    )
                 } else if decision.allow {
                     serde_json::json!({})
                 } else {
@@ -2518,7 +2658,15 @@ impl HarnessAdapter for DeclarativeAdapter {
                 // empty_on_undecided handling: if true and decision is allow with no reason, return observe empty?
                 // For now, always return observe value
                 let obs = vs.response.observe_value();
-                render_template_value(&obs, &reason, &event_name, &answers, &groups, reply)
+                render_template_value(
+                    &obs,
+                    &reason,
+                    &event_name,
+                    &answers,
+                    &groups,
+                    &structured,
+                    reply,
+                )
             }
         }
     }
@@ -2665,8 +2813,8 @@ mod tests {
                 },
                 "ask_tools": ask_tools,
                 "response": {"mode": "json", "gate": {
-                    "allow": {"permission": "allow"},
-                    "deny": {"permission": "deny", "reason": "{reason}", "picked": "{answers}"}
+                    "allow": {"permission": "allow", "picked": "{answers}", "structured": "{answers_structured}", "groups": "{answer_groups}"},
+                    "deny": {"permission": "deny", "reason": "{reason}"}
                 }, "observe": {}}
             }}
         })
@@ -2696,8 +2844,8 @@ mod tests {
                 },
                 "ask_tools": ask_tools,
                 "response": {"mode": "json", "gate": {
-                    "allow": {"permission": "allow"},
-                    "deny": {"permission": "deny", "reason": "{reason}", "picked": "{answers}"}
+                    "allow": {"permission": "allow", "picked": "{answers}", "structured": "{answers_structured}", "groups": "{answer_groups}"},
+                    "deny": {"permission": "deny", "reason": "{reason}"}
                 }, "observe": {}}
             }}
         })
@@ -2864,8 +3012,83 @@ mod tests {
         assert!(!event.is_interactive());
     }
 
+    const TWO_QUESTIONS: &str = r#"{"session_id":"s","tool_name":"ask","tool_input":{"questions":[{"id":"q1","question":"Pick","options":[{"label":"A"},{"label":"B"}]},{"id":"q2","question":"Many","multi":true,"options":[{"label":"X"},{"label":"Y"}]}]}}"#;
+
+    fn answer(
+        id: &str,
+        picks: &[&str],
+        custom: Option<&str>,
+    ) -> agent_hooks_protocol::PromptAnswer {
+        agent_hooks_protocol::PromptAnswer {
+            question_id: id.to_string(),
+            selected_options: picks.iter().map(|s| s.to_string()).collect(),
+            custom_input: custom.map(str::to_string),
+        }
+    }
+
+    fn two_question_adapter() -> DeclarativeAdapter {
+        let adapter = DeclarativeAdapter::new(
+            question_manifest(&["ask"], pre_tool_use_events()),
+            "v1".to_string(),
+        )
+        .unwrap();
+        adapter
+            .parse_event(&qtest_input("preToolUse", TWO_QUESTIONS))
+            .unwrap();
+        adapter
+    }
+
+    fn allow_with(answers: Vec<agent_hooks_protocol::PromptAnswer>) -> PromptDecision {
+        PromptDecision {
+            answers,
+            ..PromptDecision::allow()
+        }
+    }
+
     #[test]
     fn answers_placeholder_renders_selected_options() {
+        let adapter = two_question_adapter();
+        let out = adapter.format_response(&allow_with(vec![
+            answer("q1", &["B"], None),
+            answer("q2", &["X"], None),
+        ]));
+        assert_eq!(out["permission"], "allow");
+        assert_eq!(out["picked"], "B,X");
+        let plain = adapter.format_response(&PromptDecision::allow());
+        assert!(
+            plain.get("picked").is_none() && plain.get("structured").is_none(),
+            "empty picks omit the answer keys instead of rendering empties, got {plain}"
+        );
+    }
+
+    #[test]
+    fn answer_projections_follow_request_order_not_decision_order() {
+        let adapter = two_question_adapter();
+        // Decision lists q2 first; q1's free text collides with option label "A".
+        let out = adapter.format_response(&allow_with(vec![
+            answer("q2", &["X", "Y"], None),
+            answer("q1", &[], Some("A")),
+        ]));
+        assert_eq!(out["permission"], "allow", "got {out}");
+        assert_eq!(out["groups"], serde_json::json!([["A"], ["X", "Y"]]));
+        let structured = out["structured"].as_array().expect("structured array");
+        assert_eq!(structured.len(), 2);
+        assert_eq!(structured[0]["question_id"], "q1");
+        assert_eq!(structured[0]["selected_options"], serde_json::json!([]));
+        // The collision is carried as custom input, never re-derived from labels.
+        assert_eq!(structured[0]["custom_input"], "A");
+        assert_eq!(structured[1]["question_id"], "q2");
+        assert_eq!(
+            structured[1]["selected_options"],
+            serde_json::json!(["X", "Y"])
+        );
+        assert!(structured[1].get("custom_input").is_none());
+        // Prose includes the custom input.
+        assert_eq!(out["picked"], "A,X,Y");
+    }
+
+    #[test]
+    fn structured_answers_do_not_project_duplicate_question_text() {
         let adapter = DeclarativeAdapter::new(
             question_manifest(&["ask"], pre_tool_use_events()),
             "v1".to_string(),
@@ -2874,31 +3097,161 @@ mod tests {
         adapter
             .parse_event(&qtest_input(
                 "preToolUse",
-                r#"{"session_id":"s","tool_name":"Bash","tool_input":{}}"#,
+                r#"{"session_id":"s","tool_name":"ask","tool_input":{"questions":[{"id":"q1","question":"Same?","options":[{"label":"A"}]},{"id":"q2","question":"Same?","options":[{"label":"B"}]}]}}"#,
             ))
             .unwrap();
-        let decision = PromptDecision {
-            allow: false,
-            custom_input: None,
-            answers: vec![agent_hooks_protocol::PromptAnswer {
-                question_id: "favorite_color".to_string(),
-                selected_options: vec!["Blue".to_string()],
-                custom_input: None,
-            }],
-            ask: false,
-            allow_always: false,
-            suggestion: None,
-            defer: false,
-            additional_context: None,
-        };
-        let out = adapter.format_response(&decision);
-        assert_eq!(out["picked"], "Blue");
-        let empty = PromptDecision::deny(None);
-        let out_empty = adapter.format_response(&empty);
-        assert!(
-            out_empty.get("picked").is_none(),
-            "empty picks omit the key instead of rendering \"\", got {out_empty}"
+        let out = adapter.format_response(&allow_with(vec![
+            answer("q1", &["A"], None),
+            answer("q2", &["B"], None),
+        ]));
+        assert_eq!(out["permission"], "allow", "got {out}");
+        assert_eq!(
+            out["structured"],
+            serde_json::json!([
+                {"question_id":"q1","selected_options":["A"]},
+                {"question_id":"q2","selected_options":["B"]}
+            ])
         );
+    }
+
+    #[test]
+    fn empty_custom_input_is_omitted_from_structured_answers() {
+        let adapter = two_question_adapter();
+        let out = adapter.format_response(&allow_with(vec![
+            answer("q1", &["A"], Some("")),
+            answer("q2", &["X"], None),
+        ]));
+        assert_eq!(
+            out["structured"][0],
+            serde_json::json!({"question_id":"q1","selected_options":["A"]})
+        );
+    }
+
+    #[test]
+    fn long_and_padded_free_text_is_preserved_exactly() {
+        let adapter = two_question_adapter();
+        let long = format!("  {}\nend  ", "x".repeat(20_000));
+        let out = adapter.format_response(&allow_with(vec![
+            answer("q1", &[], Some(&long)),
+            answer("q2", &["X"], None),
+        ]));
+        assert_eq!(out["structured"][0]["custom_input"], long.as_str());
+        assert_eq!(out["groups"][0][0], long.as_str());
+        assert_eq!(out["picked"], format!("{long},X").as_str());
+    }
+
+    #[test]
+    fn unresolvable_answers_fail_closed_as_deny() {
+        let adapter = two_question_adapter();
+        let cases = [
+            // unknown id
+            allow_with(vec![
+                answer("q1", &["A"], None),
+                answer("nope", &["X"], None),
+            ]),
+            // missing question
+            allow_with(vec![answer("q1", &["A"], None)]),
+            // invalid label
+            allow_with(vec![answer("q1", &["Z"], None), answer("q2", &["X"], None)]),
+            // several picks on a single select
+            allow_with(vec![
+                answer("q1", &["A", "B"], None),
+                answer("q2", &["X"], None),
+            ]),
+            // answers riding a deny
+            PromptDecision {
+                answers: vec![answer("q1", &["A"], None), answer("q2", &["X"], None)],
+                ..PromptDecision::deny(Some("no".to_string()))
+            },
+        ];
+        for decision in cases {
+            let out = adapter.format_response(&decision);
+            assert_eq!(out["permission"], "deny", "got {out}");
+            assert!(
+                out.get("structured").is_none()
+                    && out.get("groups").is_none()
+                    && out.get("picked").is_none(),
+                "a contradictory decision must not carry answers, got {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_projection_rejects_duplicate_question_text_and_keeps_request_order() {
+        let question = |id: &str, text: &str| PromptQuestion {
+            id: id.to_string(),
+            header: None,
+            question: text.to_string(),
+            options: vec![PromptOption {
+                label: "A".to_string(),
+                description: None,
+                preview: None,
+            }],
+            multiple: false,
+            custom: true,
+            recommended: None,
+        };
+        let decision = allow_with(vec![
+            answer("b", &["A"], None),
+            answer("a", &[], Some("typed")),
+        ]);
+        let distinct = [question("a", "First?"), question("b", "Second?")];
+        let resolved = decision.resolve_questions(&distinct).unwrap();
+        let updated = claude_updated_input(&distinct, &resolved).unwrap();
+        assert_eq!(updated["answers"]["First?"], "typed");
+        assert_eq!(updated["answers"]["Second?"], "A");
+        assert_eq!(updated["questions"][0]["question"], "First?");
+
+        let duplicate = [question("a", "Same?"), question("b", "Same?")];
+        let resolved = decision.resolve_questions(&duplicate).unwrap();
+        let err = claude_updated_input(&duplicate, &resolved).unwrap_err();
+        assert!(err.contains("Same?"), "got {err}");
+    }
+
+    #[test]
+    fn verdict_wins_over_inject_on_collision() {
+        let mut base = serde_json::json!({"a": {"x": 1, "ctx": "c"}, "keep": true});
+        merge_verdict_over(
+            &mut base,
+            serde_json::json!({"a": {"x": 2, "ans": [1]}, "new": 1}),
+        );
+        assert_eq!(
+            base,
+            serde_json::json!({"a": {"x": 2, "ctx": "c", "ans": [1]}, "keep": true, "new": 1})
+        );
+    }
+
+    #[test]
+    fn answers_and_additional_context_travel_together() {
+        let mut manifest = serde_json::to_value(question_manifest(&["ask"], pre_tool_use_events()))
+            .expect("manifest serializes");
+        manifest["versions"]["v1"]["response"]["inject"] = serde_json::json!({
+            "PreToolUse": {"permission": "inject", "extra": "{additional_context}"}
+        });
+        let adapter = DeclarativeAdapter::new(
+            AdapterManifest::parse(&manifest.to_string()).unwrap(),
+            "v1".to_string(),
+        )
+        .unwrap();
+        adapter
+            .parse_event(&qtest_input("preToolUse", TWO_QUESTIONS))
+            .unwrap();
+        let decision = allow_with(vec![
+            answer("q2", &["X"], None),
+            answer("q1", &[], Some("typed")),
+        ])
+        .with_additional_context("be brief");
+        let out = adapter.format_response(&decision);
+        // The gate verdict wins the colliding `permission` key; context and
+        // answers both survive.
+        assert_eq!(out["permission"], "allow", "got {out}");
+        assert_eq!(out["extra"], "be brief");
+        assert_eq!(out["groups"], serde_json::json!([["typed"], ["X"]]));
+        // Invalid answers drop the context too: fail closed.
+        let bad = allow_with(vec![answer("ghost", &["X"], None)]).with_additional_context("ctx");
+        let out = adapter.format_response(&bad);
+        assert_eq!(out["permission"], "deny", "got {out}");
+        assert!(out.get("extra").is_none());
     }
 
     fn verdict_manifest(verdicts: Option<serde_json::Value>) -> AdapterManifest {

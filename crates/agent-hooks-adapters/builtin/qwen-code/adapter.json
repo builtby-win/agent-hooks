@@ -34,7 +34,8 @@
         "executables": ["qwen"],
         "documentation": ["https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/"],
         "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
-        "resume": {"argv": ["qwen", "--resume", "{session_ref}"], "session_ref": "id"}
+        "resume": {"argv": ["qwen", "--resume", "{session_ref}"], "session_ref": "id"},
+        "yolo_args": ["--yolo"]
       },
       "install": [
         {
@@ -242,7 +243,7 @@
         },
         "response_overrides": {
           "PreToolUse": {
-            "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "allow", "additionalContext": "{answers}"}},
+            "allow": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "allow"}},
             "deny": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "deny", "permissionDecisionReason": "{reason?}"}},
             "ask": {"hookSpecificOutput": {"hookEventName": "{event}", "permissionDecision": "ask", "permissionDecisionReason": "{reason?}"}}
           },

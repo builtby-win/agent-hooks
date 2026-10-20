@@ -50,7 +50,7 @@ pub enum Commands {
     #[command(name = "list-adapters")]
     ListAdapters(ListAdaptersArgs),
 
-    /// Answer held gate prompts as a test decider (subscribe decide:true, verdict via stdin)
+    /// Validate or send canonical answers, or open an interactive decider
     Answer(AnswerArgs),
 
     /// Scaffold ~/.agent-hooks.json for daemonless local hooks
@@ -63,9 +63,12 @@ pub enum Commands {
     History(HistoryArgs),
 }
 
-/// Manual test decider: prints each held gate event and reads the verdict.
+/// Answer held prompts, or validate a normalized event without connecting to the daemon.
 #[derive(Parser, Debug)]
 pub struct AnswerArgs {
+    /// Optional session id used to select a pending prompt
+    pub session_id: Option<String>,
+
     /// Daemon socket path to connect to
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
@@ -79,6 +82,34 @@ pub struct AnswerArgs {
     /// Plain stdin/stdout mode instead of the fullscreen TUI
     #[arg(long)]
     pub line: bool,
+
+    /// Validate normalized AgentEvent from stdin and print the resolved decision (no daemon)
+    #[arg(long = "return")]
+    pub return_event: bool,
+
+    /// Canonical PromptDecision JSON
+    #[arg(long, value_name = "JSON")]
+    pub decision: Option<String>,
+
+    /// Respond to this exact pending prompt id
+    #[arg(long, value_name = "ID")]
+    pub prompt_id: Option<String>,
+
+    /// Approve the request (answer flags also imply allow)
+    #[arg(long, conflicts_with_all = ["decision", "deny", "auto", "line"])]
+    pub allow: bool,
+
+    /// Deny the request with a reason
+    #[arg(long, value_name = "REASON", conflicts_with_all = ["decision", "allow", "select", "custom_input", "auto", "line"])]
+    pub deny: Option<String>,
+
+    /// Select an exact option label for a question; repeat for more answers
+    #[arg(long, num_args = 2, value_names = ["QUESTION_ID", "OPTION_LABEL"], action = clap::ArgAction::Append, allow_hyphen_values = true, conflicts_with_all = ["decision", "deny", "auto", "line"])]
+    pub select: Vec<String>,
+
+    /// Supply exact custom input for a question that permits it; once per question
+    #[arg(long, num_args = 2, value_names = ["QUESTION_ID", "TEXT"], action = clap::ArgAction::Append, allow_hyphen_values = true, conflicts_with_all = ["decision", "deny", "auto", "line"])]
+    pub custom_input: Vec<String>,
 }
 
 /// Fast hook shim called by the harness for every lifecycle event.
@@ -334,12 +365,20 @@ pub struct AgentLaunchArgs {
     #[arg(long, requires = "model")]
     pub unchecked: bool,
 
+    /// Start with the harness's YOLO/auto-approve launch arguments, when recorded by its adapter
+    #[arg(long)]
+    pub yolo: bool,
+
     /// Print the resolved argv as JSON instead of running it
     #[arg(long)]
     pub dry_run: bool,
 
     /// Prompt, passed to the agent as a single argument
     pub prompt: String,
+
+    /// Native harness arguments, passed unchanged after `--`
+    #[arg(last = true)]
+    pub native_args: Vec<String>,
 }
 
 #[derive(Parser, Debug)]

@@ -687,6 +687,7 @@ type AskQuestion = {
   readonly header?: string;
   readonly options: readonly AskOption[];
   readonly multi?: boolean;
+  readonly custom?: boolean;
   readonly recommended?: number;
 };
 
@@ -746,54 +747,35 @@ function canRegisterAskBridge(pi: any): boolean {
   return true;
 }
 
-// Verdict `answers` arrive snake_case (protocol PromptAnswer); accept the
-// harness camelCase shape too. Returns undefined when unusable.
+// Verdict `answers` is the canonical protocol PromptAnswer[] (manifest
+// `{answers_structured}`), snake_case only, already resolved to request order
+// on the Rust side. Returns undefined when unusable, or when the verdict is
+// not an allow (a deny never carries answers).
 export function verdictAnswers(decision: unknown, questions: readonly AskQuestion[]): AskAnswer[] | undefined {
   if (typeof decision !== "object" || decision === null) return undefined;
+  if (Reflect.get(decision, "decision") !== "allow") return undefined;
+  const reply: unknown = Reflect.get(decision, "reply");
+  if (reply !== undefined && reply !== "allow" && reply !== "allow_always") return undefined;
   const raw: unknown = Reflect.get(decision, "answers");
   if (!Array.isArray(raw) || raw.length !== questions.length) return undefined;
-  // The manifest renders `{answer_groups}`: one string[] per question, picks
-  // first then any custom text. Split picks from custom input by label.
-  if (raw.every((g: unknown) => Array.isArray(g))) {
-    const grouped: AskAnswer[] = [];
-    for (let i = 0; i < questions.length; i++) {
-      const q = questions[i];
-      const group: unknown[] = raw[i];
-      if (q === undefined || group.some((v) => typeof v !== "string" || !v.trim())) return undefined;
-      const labels = new Set(q.options.map((o) => o.label));
-      const picks = (group as string[]).filter((v) => labels.has(v));
-      const custom = (group as string[]).filter((v) => !labels.has(v));
-      if (custom.length > 1) return undefined;
-      if (new Set(picks).size !== picks.length) return undefined;
-      if (q.multi !== true && picks.length > 1) return undefined;
-      if (picks.length === 0 && custom.length === 0) return undefined;
-      grouped.push({
-        id: q.id,
-        selectedOptions: picks,
-        ...(custom[0] !== undefined ? { customInput: custom[0] } : {}),
-      });
-    }
-    return grouped;
-  }
   const out: AskAnswer[] = [];
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
     const a: unknown = raw[i];
     if (q === undefined || typeof a !== "object" || a === null) return undefined;
-    const id: unknown = Reflect.get(a, "question_id") ?? Reflect.get(a, "id");
+    const id: unknown = Reflect.get(a, "question_id");
     if (id !== q.id) return undefined;
-    const sel: unknown = Reflect.get(a, "selected_options") ?? Reflect.get(a, "selectedOptions");
-    if (!Array.isArray(sel) || sel.some((o: unknown) => typeof o !== "string" || !o.trim())) {
-      return undefined;
-    }
+    const sel: unknown = Reflect.get(a, "selected_options");
+    if (!Array.isArray(sel) || sel.some((o: unknown) => typeof o !== "string")) return undefined;
     const allowed = new Set(q.options.map((o) => o.label));
     if (sel.some((o: unknown) => !allowed.has(o as string))) return undefined;
     if (new Set(sel).size !== sel.length) return undefined;
-    if (q.multi !== true && sel.length > 1) return undefined;
-    const customRaw: unknown = Reflect.get(a, "custom_input") ?? Reflect.get(a, "customInput");
-    const custom = customRaw === null ? undefined : customRaw;
-    if (custom !== undefined && (typeof custom !== "string" || !custom.trim())) return undefined;
-    if (sel.length === 0 && custom === undefined) return undefined;
+    const customRaw: unknown = Reflect.get(a, "custom_input");
+    const custom = customRaw === null || customRaw === "" ? undefined : customRaw;
+    if (custom !== undefined && (typeof custom !== "string" || q.custom === false)) return undefined;
+    const customCount = typeof custom === "string" ? 1 : 0;
+    if (sel.length + customCount === 0) return undefined;
+    if (q.multi !== true && sel.length + customCount > 1) return undefined;
     out.push({
       id: q.id,
       selectedOptions: sel as string[],
@@ -952,6 +934,7 @@ function registerAskBridge(pi: any): boolean {
             header: optional(z.string()),
             options: z.array(z.object({ label: z.string(), description: optional(z.string()), preview: optional(z.string()) })),
             multi: optional(z.boolean()),
+            custom: optional(z.boolean()),
             recommended: optional(call(call(z.number(), "int"), "nonnegative")),
           }),
         ),

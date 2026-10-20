@@ -40,8 +40,8 @@ fn agent_cli(harness: &str) -> anyhow::Result<(String, AgentCliSpec)> {
     Ok((manifest.id, spec))
 }
 
-/// Substitute `{prompt}` and splice `model_args` after the executable and any
-/// leading subcommand (`codex exec`, `opencode run`), since subcommands own
+/// Substitute `{prompt}` and splice launch options after the executable and
+/// any leading subcommand (`codex exec`, `opencode run`), since subcommands own
 /// their flags.
 fn build_argv(
     id: &str,
@@ -49,6 +49,7 @@ fn build_argv(
     mode: Mode,
     prompt: &str,
     model: Option<&str>,
+    yolo: bool,
 ) -> anyhow::Result<Vec<String>> {
     let (label, recipe) = match mode {
         Mode::Start => ("start", &spec.start),
@@ -62,6 +63,7 @@ fn build_argv(
         .iter()
         .map(|arg| arg.replace("{prompt}", prompt))
         .collect();
+    let mut launch_args = Vec::new();
     if let Some(model) = model {
         if recipe.model_unsupported {
             anyhow::bail!(
@@ -71,11 +73,24 @@ fn build_argv(
         if spec.model_args.is_empty() {
             anyhow::bail!("no model_args recorded for '{id}'; cannot pass --model");
         }
-        let model_args = spec.model_args.iter().map(|a| a.replace("{model}", model));
+        launch_args.extend(spec.model_args.iter().map(|a| a.replace("{model}", model)));
+    }
+    if yolo {
+        let mode_args = match mode {
+            Mode::Start if !spec.start_yolo_args.is_empty() => &spec.start_yolo_args,
+            Mode::Exec if !spec.exec_yolo_args.is_empty() => &spec.exec_yolo_args,
+            _ => &spec.yolo_args,
+        };
+        if mode_args.is_empty() {
+            anyhow::bail!("no YOLO launch arguments recorded for '{id} {label}'");
+        }
+        launch_args.extend(mode_args.iter().cloned());
+    }
+    if !launch_args.is_empty() {
         let at = (1..argv.len())
             .find(|&i| argv[i].starts_with('-') || recipe.argv[i].contains("{prompt}"))
             .unwrap_or(argv.len());
-        argv.splice(at..at, model_args);
+        argv.splice(at..at, launch_args);
     }
     Ok(argv)
 }
@@ -132,7 +147,15 @@ pub fn launch(mode: Mode, args: AgentLaunchArgs) -> anyhow::Result<()> {
     if let Some(model) = args.model.as_deref().filter(|_| !args.unchecked) {
         check_model(&id, &spec, model)?;
     }
-    let argv = build_argv(&id, &spec, mode, &args.prompt, args.model.as_deref())?;
+    let mut argv = build_argv(
+        &id,
+        &spec,
+        mode,
+        &args.prompt,
+        args.model.as_deref(),
+        args.yolo,
+    )?;
+    argv.extend(args.native_args);
     if args.dry_run {
         println!("{}", serde_json::to_string(&argv)?);
         return Ok(());
@@ -231,7 +254,9 @@ fn check_model(id: &str, spec: &AgentCliSpec, model: &str) -> anyhow::Result<()>
         Ok(None) => anyhow::bail!(
             "{id} cannot list its models, so '{model}' cannot be verified (use --unchecked to pass it through)"
         ),
-        Err(e) => anyhow::bail!("could not verify '{model}' for {id}: {e}\n(use --unchecked to pass it through anyway)"),
+        Err(e) => anyhow::bail!(
+            "could not verify '{model}' for {id}: {e}\n(use --unchecked to pass it through anyway)"
+        ),
     }
 }
 
@@ -280,12 +305,15 @@ mod tests {
             models: None,
             model_aliases: vec![],
             model_args: vec!["--model={model}".into()],
+            yolo_args: vec![],
+            start_yolo_args: vec![],
+            exec_yolo_args: vec![],
         }
     }
 
     #[test]
     fn splices_model_after_executable_and_keeps_prompt_one_arg() {
-        let argv = build_argv("x", &spec(), Mode::Start, "a b; rm", Some("m1")).unwrap();
+        let argv = build_argv("x", &spec(), Mode::Start, "a b; rm", Some("m1"), false).unwrap();
         assert_eq!(argv, ["x", "--model=m1", "a b; rm"]);
     }
 
@@ -296,8 +324,27 @@ mod tests {
             argv: vec!["x".into(), "run".into(), "{prompt}".into()],
             model_unsupported: false,
         });
-        let argv = build_argv("x", &s, Mode::Exec, "p", Some("m1")).unwrap();
+        let argv = build_argv("x", &s, Mode::Exec, "p", Some("m1"), false).unwrap();
         assert_eq!(argv, ["x", "run", "--model=m1", "p"]);
+    }
+
+    #[test]
+    fn yolo_args_can_be_exec_only() {
+        let mut s = spec();
+        s.exec = Some(PromptCommandSpec {
+            argv: vec!["x".into(), "exec".into(), "{prompt}".into()],
+            model_unsupported: false,
+        });
+        s.exec_yolo_args = vec!["--skip-permissions-unsafe".into()];
+
+        assert!(
+            build_argv("x", &s, Mode::Start, "p", None, true)
+                .unwrap_err()
+                .to_string()
+                .contains("no YOLO launch arguments recorded for 'x start'")
+        );
+        let argv = build_argv("x", &s, Mode::Exec, "p", None, true).unwrap();
+        assert_eq!(argv, ["x", "exec", "--skip-permissions-unsafe", "p"]);
     }
 
     fn cmd(fields: &[&str], col: Option<usize>) -> ModelsCommandSpec {
@@ -379,16 +426,16 @@ mod tests {
     fn modes_without_a_model_option_refuse_one() {
         let mut s = spec();
         s.start.as_mut().unwrap().model_unsupported = true;
-        let err = build_argv("x", &s, Mode::Start, "p", Some("m")).unwrap_err();
+        let err = build_argv("x", &s, Mode::Start, "p", Some("m"), false).unwrap_err();
         assert!(err.to_string().contains("no model option"), "{err}");
-        assert!(build_argv("x", &s, Mode::Start, "p", None).is_ok());
+        assert!(build_argv("x", &s, Mode::Start, "p", None, false).is_ok());
     }
 
     #[test]
     fn missing_recipe_or_model_args_errors() {
-        assert!(build_argv("x", &spec(), Mode::Exec, "p", None).is_err());
+        assert!(build_argv("x", &spec(), Mode::Exec, "p", None, false).is_err());
         let mut s = spec();
         s.model_args.clear();
-        assert!(build_argv("x", &s, Mode::Start, "p", Some("m")).is_err());
+        assert!(build_argv("x", &s, Mode::Start, "p", Some("m"), false).is_err());
     }
 }

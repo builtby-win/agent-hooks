@@ -1,6 +1,6 @@
 ---
 name: verify-harness
-description: End-to-end live verification of an agent-hooks adapter. Opens a herdr or tmux pane, starts the real harness CLI, sends a prompt, triggers a tool permission and a question, answers them through agent-hooks, asserts the event log and the harness screen at every step, quits the agent and checks it unregisters. Ends by asking the user before recording verified_against.
+description: End-to-end live verification of an agent-hooks adapter. Opens a herdr or tmux pane, starts the real harness CLI, sends a prompt, triggers a tool permission and a question, answers them through agent-hooks, asserts the event log and the harness screen at every step, quits the agent and checks it unregisters. Then runs the offline × daemon answer matrix (id-matched/reordered answers, free text, invalid-answer rejects, timeout inheritance, per-adapter channel fidelity). Ends by asking the user before recording verified_against.
 ---
 
 # Verify a harness live (end to end)
@@ -166,7 +166,7 @@ rm -rf "$WORK"
 
 ## 5. Report, then ask
 
-Print the table (step, PASS/FAIL/SKIP, evidence). Then ask the user with
+Print the table (§2 steps and §6 matrix rows: step, PASS/FAIL/SKIP, evidence). Then ask the user with
 AskUserQuestion; don't assume:
 
 1. "Record this as verified?": verified against `<cli> --version` · verified
@@ -177,3 +177,138 @@ AskUserQuestion; don't assume:
 
 A FAIL is an adapter bug, not "unverified": fix the manifest or fixtures and
 re-run the failed steps.
+
+## 6. Answer matrix (offline × daemon)
+
+Run after §2, before §4–§5; rows go into the §5 table. One decision language
+everywhere (canonical `PromptDecision` — config `respond`, command stdout,
+daemon `prompt.respond`); `resolve_questions` matches by `question_id` only,
+reorders into request order, requires every question exactly once, validates
+exact option labels, keeps text verbatim. Invalid answers fail closed:
+daemon RPC errors and the hold stays pending (retryable); offline and adapter
+rendering deny with a reason.
+
+Setup (no harness needed for O/F rows — the real shim, no daemon):
+
+```bash
+MX=$WORK/matrix; mkdir -p $MX
+Q='{"sessionID":"mx1","requestID":"req-mx1","questions":[{"id":"q0","question":"Pick a color","options":[{"label":"Red"},{"label":"Blue"}]},{"id":"q1","question":"Name it","options":[{"label":"my-app"}]}]}'
+qhook() { printf '%s' "$Q" | HOME=$MX timeout 30 $AH hook opencode --event question.asked --socket $MX/none.sock; }
+# per row: write $MX/.agent-hooks.json, run qhook, assert stdout JSON (stderr carries the daemon-unreachable note + deny reasons)
+```
+
+| # | Case | Drive | Assert |
+| :-- | :-- | :-- | :-- |
+| O1 | canned allow | `respond: {"allow": true}` on `PermissionRequest` | allow dialect, no answers (plain allows used to be discarded) |
+| O2 | reversed order | answers `[q1, q0]` | output ordered `q0, q1` (never positional) |
+| O3 | label collision | `q1` `custom_input: "my-app"` (= its option label) | stays `custom_input`, not re-derived into a pick |
+| O4 | ghost id | `answers: [{question_id: "ghost", …}]` | deny, reason `missing answer for "q0"` |
+| O5 | bad label | `q0` picks `["Mango"]` | deny, reason `"Mango" is not an option (valid: ["Red","Blue"])` |
+| O6 | double pick, single-select | `q0` picks `["Red","Blue"]` | deny, reason `single-select: give exactly one…` |
+| O7 | verbatim text | 5k-char padded `custom_input` | byte-identical round trip (no trim/truncate; old cap was 2000) |
+| O8 | timeout inheritance | no-`timeout` `sleep 30` entry; `hook codex --event SessionEnd` (3s window) | `exceeded 1s, killed`; wall ~1s, not 10s. Explicit `timeout` still respected, capped by the window |
+| O9 | stdout verdict | command prints a decision, exit 0 | rendered verdict (needs an `allow` key; stale `{decision:…}` shapes are warned + ignored) |
+| O10 | exit codes | exit 2 with stderr / exit 3 | deny with the stderr reason / ask (beats stdout) |
+| O11 | oversize stdout | >1 MiB, exit 0 | deny with size error, never parsed |
+| O12 | mailbox human | §6d below: script holds, human pane drops the verdict file | rendered dialect; answer inside the entry timeout or the kill discards it (fail-open) |
+
+O1–O7 mirror unit tests (`protocol resolve_questions`, `commands::user_hooks`,
+`manifest_opencode`); O8 mirrors `omitted_timeout_inherits_the_harness_window`.
+Extend those when adding rows — the skill rows are the live proof, not the
+regression net.
+
+Daemon rows (second daemon `SOCK2=$WORK/d.sock`, started per §1; decider in a
+pane: `mux_run $P_DECIDER "python3 $MX/decider.py $SOCK2 $MX"`; invoke the
+shim under test with `--socket $SOCK2` so the gate forwards to the daemon.
+The invoking shim staying blocked while a hold is pending is the
+retryability signal — drop each verdict file promptly (the shim's daemon wait
+is bounded; if it releases with `{}`, you were too slow — re-fire):
+
+| # | Case | Drive | Assert |
+| :-- | :-- | :-- | :-- |
+| D1 | bad label rejected, retryable | verdict `q0: ["Mango"]` → decider log shows RPC error `-32000 Invalid decision…`; shim still blocked | corrected `q0: ["Blue"]` → shim releases with ordered answers |
+| D2 | reversed answers | verdict `[q1, q0]` | delivered in request order |
+| D3 | ghost id | verdict `ghost` → RPC error, still blocked | corrected retry releases |
+| D4 | custom verbatim | padded mixed-case token | token and case exact at the consumer |
+
+```python
+# $MX/decider.py: subscribe decide:true, log holds, answer from $MX/next.json
+import asyncio, json, sys
+SOCK, BOX = sys.argv[1], sys.argv[2]
+def find(o, k):
+    if isinstance(o, dict):
+        if k in o: return o[k]
+        for v in o.values():
+            r = find(v, k)
+            if r is not None: return r
+    elif isinstance(o, list):
+        for v in o:
+            r = find(v, k)
+            if r is not None: return r
+async def main():
+    r, w = await asyncio.open_unix_connection(SOCK)
+    seq, pending = 0, None
+    async def send(method, params):
+        nonlocal seq; seq += 1
+        w.write((json.dumps({"jsonrpc": "2.0", "id": seq, "method": method, "params": params}) + "\n").encode()); await w.drain()
+    await send("subscribe", {"decide": True})
+    import os
+    while True:
+        try: line = await asyncio.wait_for(r.readline(), 0.5)
+        except asyncio.TimeoutError: line = b""
+        if line:
+            try: msg = json.loads(line)
+            except Exception: continue
+            pid = find(msg, "prompt_id")
+            if pid and "result" not in msg and "error" not in msg:
+                pending = pid; print("HOLD", pid, json.dumps(find(msg, "questions") or "?")[:200], flush=True)
+            else: print("RPC", str(msg)[:200], flush=True)
+        vf = os.path.join(BOX, "next.json")
+        if pending and os.path.exists(vf):
+            await send("prompt.respond", {"prompt_id": pending, "decision": json.load(open(vf))})
+            os.remove(vf)
+asyncio.run(main())
+```
+
+Channel fidelity (expected loss per adapter — assert the shape, not equality
+beyond it; `adapter test` replays the repo fixtures for the same paths):
+
+| adapter | channel | fidelity |
+| :-- | :-- | :-- |
+| omp, pi | `{answers_structured}` | lossless: ids, picks, free text |
+| opencode | `{answer_groups}` (`string[][]`) | request-ordered; loses which entry is free text |
+| claude-code, muse, qwen-code | `updatedInput` map keyed by question text | multi-pick comma-joined; duplicate question text → deny |
+| codex | deny block reason | prose only |
+| all | `list --json` answer block | `questions_native` per manifest (native vs prose) |
+
+Live harness rows (only where the harness actually fires hooks — §2 covers
+allow/deny; this is the question path):
+
+| # | Case | Drive | Assert |
+| :-- | :-- | :-- | :-- |
+| L1 | native question → decider → model | ask-question prompt; answer via decider/TUI | model continues with the exact answer |
+| L2 | no-fire diagnosis | nothing in hooks/log after a question + tool call | record harness version + which events never arrive (opencode v2.0.28: V2 `setup()` never registers `tool.execute.before`/`permission.ask`, and no `form.created` reaches the plugin — offline gates never fire there) |
+
+### 6d. Mailbox human-in-the-loop (offline, two panes)
+
+The script cannot use the TUI (`answer` is daemon-only: no daemon, no backlog,
+nothing to address). Instead it parks the verdict in a file the human pane
+completes. Set the entry `timeout` past the harness window you need (see O8).
+
+```bash
+# hook command (ask-human.sh pattern): stdin event -> $MX/mailbox/req-<id>.json
+# (questions with real ids/options), poll resp-<id>.json, cat it to stdout.
+# human pane ($P_HUMAN): show each req without a resp, read the pick from
+# /dev/tty (heredoc stdin is the script — `input()` reads EOF there), write
+# {"allow": true, "answers": [{question_id, selected_options|custom_input}]}.
+mux_run $P_HUMAN "$MX/human.sh"
+# fire the hook (live harness or qhook with a holding command), then type the
+# pick into the human pane:
+mux_text $P_HUMAN "Blue"; mux_key $P_HUMAN enter
+# assert: shim stdout is the rendered dialect with the picked answer, exit 0
+```
+
+Timeout kill is fail-open and discards late verdicts: a human answer must land
+inside the entry timeout. If it cannot, that setup needs the daemon (300s
+holds, retryable rejects) — say so instead of stretching offline past the
+harness kill.

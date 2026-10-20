@@ -153,6 +153,22 @@ fn opencode_manifest_session_lifecycle_and_stop_observe() {
 }
 
 #[test]
+fn opencode_chat_message_extracts_text_parts_only() {
+    let event = load_adapter()
+        .parse_event(&make_input(
+            "chat.message",
+            r#"{"sessionID":"ses-parts","parts":[{"type":"text","text":"Check "},{"type":"tool_use","text":"ignore"},{"type":"text","text":"the migration"},{"type":"image","text":"ignore"}]}"#,
+        ))
+        .expect("parse chat.message with structured parts");
+    match event.lifecycle {
+        AgentLifecycle::UserPromptSubmit { user_prompt } => {
+            assert_eq!(user_prompt.as_deref(), Some("Check\nthe migration"));
+        }
+        other => panic!("expected UserPromptSubmit, got {other:?}"),
+    }
+}
+
+#[test]
 fn opencode_manifest_permission_and_observe_and_registry_pickup() {
     let adapter = load_adapter();
 
@@ -249,7 +265,7 @@ fn opencode_question_asked_lifts_a_question_and_answers_structurally() {
         "question.asked",
         r#"{"sessionID":"o1","requestID":"req-9","questions":[
              {"id":"q1","question":"Which README?","options":[{"label":"Root"},{"label":"Package"}]},
-             {"id":"q2","question":"Run tests?","options":[{"label":"Yes"},{"label":"No"}]}
+             {"id":"q2","question":"Run tests?","multiple":true,"options":[{"label":"Yes"},{"label":"No"}]}
            ]}"#,
     );
     let event = adapter.parse_event(&input).expect("parse question.asked");
@@ -296,6 +312,17 @@ fn opencode_question_asked_lifts_a_question_and_answers_structurally() {
             "answers": [["Root"], ["Yes", "and lint"]]
         })
     );
+
+    // The reply is `string[][]` in request order whatever order the decider
+    // listed answers in; free text is not trimmed or truncated.
+    let long = format!(" {}\n", "z".repeat(10_000));
+    let mut shuffled = decision.clone();
+    shuffled.answers.reverse();
+    shuffled.answers[0].custom_input = Some(long.clone());
+    adapter.parse_event(&input).expect("re-parse");
+    let out = adapter.format_response(&shuffled);
+    assert_eq!(out["answers"][0], serde_json::json!(["Root"]));
+    assert_eq!(out["answers"][1], serde_json::json!(["Yes", long]));
 
     // No picks: the key is omitted rather than sent empty.
     adapter.parse_event(&input).expect("re-parse");

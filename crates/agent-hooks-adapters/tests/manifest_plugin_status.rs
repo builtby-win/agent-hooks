@@ -188,8 +188,10 @@ fn pi_session_title_passthrough() {
 }
 
 // b2v-pi.ts gatePiToolCall remembers allow_always; the asset needs `reply`.
+// Answers ride as the canonical PromptAnswer[] so the bridge never has to
+// guess which entry of a string group was typed text.
 #[test]
-fn pi_gate_renders_reply_and_answer_groups() {
+fn pi_gate_renders_reply_and_structured_answers() {
     use agent_hooks_protocol::{PromptAnswer, PromptDecision};
     let a = omp();
     parse(
@@ -202,22 +204,49 @@ fn pi_gate_renders_reply_and_answer_groups() {
         a.format_response(&PromptDecision::allow_always()),
         serde_json::json!({"decision": "allow", "reply": "allow_always"})
     );
-    parse(
-        &a,
-        "omp",
-        "PreToolUse",
-        r#"{"session_id":"s","toolName":"ask","input":{"questions":[{"id":"q1","question":"Color?","options":[{"label":"Red"},{"label":"Blue"}]}]}}"#,
-    );
+    let ask = r#"{"session_id":"s","toolName":"ask","input":{"questions":[{"id":"q1","question":"Color?","options":[{"label":"Red"},{"label":"Blue"}]},{"id":"q2","question":"Name?","options":[{"label":"foo"}]}]}}"#;
+    parse(&a, "omp", "PreToolUse", ask);
     let mut d = PromptDecision::allow();
-    d.answers = vec![PromptAnswer {
-        question_id: "q1".into(),
-        selected_options: vec!["Blue".into()],
-        custom_input: None,
-    }];
+    d.answers = vec![
+        PromptAnswer {
+            question_id: "q1".into(),
+            selected_options: vec!["Blue".into()],
+            custom_input: None,
+        },
+        PromptAnswer {
+            question_id: "q2".into(),
+            selected_options: vec![],
+            custom_input: Some("foo".into()),
+        },
+    ];
     assert_eq!(
         a.format_response(&d),
-        serde_json::json!({"decision": "allow", "reply": "allow", "answers": [["Blue"]]})
+        serde_json::json!({
+            "decision": "allow",
+            "reply": "allow",
+            "answers": [
+                {"question_id": "q1", "selected_options": ["Blue"]},
+                {"question_id": "q2", "selected_options": [], "custom_input": "foo"}
+            ]
+        }),
+        "custom text equal to an option label must stay custom_input"
     );
+    // Decision order is irrelevant: the bridge receives request order.
+    d.answers.reverse();
+    let out = a.format_response(&d);
+    assert_eq!(out["answers"][0]["question_id"], "q1");
+    assert_eq!(out["answers"][1]["question_id"], "q2");
+    // Long free text survives verbatim.
+    let long = format!(" {}\nend ", "y".repeat(10_000));
+    d.answers[0].custom_input = Some(long.clone());
+    let out = a.format_response(&d);
+    assert_eq!(out["answers"][1]["custom_input"], long.as_str());
+    // An answer that does not match the request never reaches the bridge as
+    // an answer: it fails closed as a deny.
+    d.answers[0].question_id = "ghost".into();
+    let out = a.format_response(&d);
+    assert_eq!(out["decision"], "deny");
+    assert!(out.get("answers").is_none(), "got {out}");
     // Deny keeps the legacy dialect.
     assert_eq!(
         a.format_response(&PromptDecision::deny(Some("no".into()))),

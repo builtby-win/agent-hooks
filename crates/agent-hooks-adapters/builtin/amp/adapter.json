@@ -16,7 +16,7 @@
       "ToolEnd",
       "AfterTool",
       "PermissionRequest",
-      "Notification",
+      "question",
       "Stop",
       "TurnEnd",
       "AgentStop",
@@ -32,6 +32,13 @@
   },
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["amp"],
+        "documentation": ["https://ampcode.com/manual"],
+        "recipe_source": "amp --help; amp threads continue --help (installed CLI help; checked 2026-10-20)",
+        "exec": {"argv": ["amp", "--plugin-ready-timeout", "10", "--execute", "{prompt}"]},
+        "resume": {"argv": ["amp", "threads", "continue", "{session_ref}"], "session_ref": "id"}
+      },
       "install": [
         {
           "op": "stage_assets",
@@ -52,6 +59,7 @@
         "ToolEnd": {"lifecycle": "PostToolUse", "capability": "observe"},
         "AfterTool": {"lifecycle": "PostToolUse", "capability": "observe"},
         "PermissionRequest": {"lifecycle": "PermissionRequest", "capability": "gate"},
+        "question": {"lifecycle": "PermissionRequest", "capability": "gate"},
         "Notification": {"lifecycle": "Notification", "capability": "observe"},
         "session.start": {"lifecycle": "SessionStart", "capability": "observe"},
         "agent.start": {"lifecycle": "UserPromptSubmit", "capability": "observe"},
@@ -199,8 +207,9 @@
       "response": {
         "mode": "json",
         "gate": {
-          "allow": {"decision": "allow"},
-          "deny": {"decision": "deny", "reason": "{reason}"}
+          "allow": {"decision": "allow", "answers": "{answers_structured}"},
+          "deny": {"decision": "deny", "reason": "{reason}"},
+          "ask": {"decision": "ask", "reason": "{reason}"}
         },
         "observe": {},
         "continue": {

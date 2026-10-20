@@ -1,6 +1,6 @@
 use crate::cli::HookArgs;
 use agent_hooks_protocol::{
-    AgentEvent, EventContext, PromptDecision, RawHookInput, ORIGIN_EXTENSION,
+    AgentEvent, EventContext, ORIGIN_EXTENSION, PromptDecision, RawHookInput,
 };
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -326,161 +326,81 @@ fn extract_daemon_stdout(raw: Option<&str>) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// A harness-native verdict (`hookSpecificOutput` as Claude Code prints it),
+/// for daemons that relay a harness's own stdout instead of a verdict line.
+fn native_decision(v: &serde_json::Value) -> Option<PromptDecision> {
+    let hso = v.get("hookSpecificOutput")?;
+    let text = |x: Option<&serde_json::Value>| x.and_then(|x| x.as_str()).map(str::to_string);
+    if let Some(perm) = hso.get("permissionDecision").and_then(|x| x.as_str()) {
+        let reason = text(hso.get("permissionDecisionReason"));
+        match perm.to_ascii_lowercase().as_str() {
+            "deny" => return Some(PromptDecision::deny(reason)),
+            "allow" => return Some(PromptDecision::allow()),
+            "ask" => return Some(PromptDecision::ask(reason)),
+            _ => {}
+        }
+    }
+    let dec = hso.get("decision")?.as_object()?;
+    let behavior = dec.get("behavior")?.as_str()?;
+    if behavior.eq_ignore_ascii_case("deny") {
+        Some(PromptDecision::deny(text(dec.get("message"))))
+    } else if behavior.eq_ignore_ascii_case("allow") {
+        Some(PromptDecision::allow())
+    } else {
+        None
+    }
+}
+
+/// Decode a daemon reply into the canonical [`PromptDecision`].
+///
+/// The daemon's verdict line is a serialized `PromptDecision` plus a
+/// redundant `decision` verb, so serde reads every field the renderer needs
+/// (`allow_always`, `suggestion`, `custom_input`, `answers`, …). Only a
+/// defer — which has no `allow` — is recognized by its verb. `result` /
+/// `stdout` envelopes and harness-native `hookSpecificOutput` are unwrapped
+/// for daemons that relay harness output.
 fn parse_decision_from_value(v: &serde_json::Value) -> Option<PromptDecision> {
-    if v.get("defer").and_then(|x| x.as_bool()) == Some(true)
-        || v.get("decision")
+    if v.get("allow").is_none()
+        && v.get("decision")
             .and_then(|x| x.as_str())
             .is_some_and(|d| d.eq_ignore_ascii_case("defer"))
     {
         return Some(PromptDecision::defer());
     }
-    if let Some(res) = v.get("result") {
-        if let Some(d) = parse_decision_from_value(res) {
-            return Some(d);
-        }
-    }
-    if let Some(stdout_str) = v.get("stdout").and_then(|x| x.as_str()) {
-        if let Ok(inner) = serde_json::from_str::<serde_json::Value>(stdout_str) {
-            if let Some(d) = parse_decision_from_value(&inner) {
-                return Some(d);
-            }
-        }
-    }
-
-    let answers: Vec<agent_hooks_protocol::PromptAnswer> = v
-        .get("answers")
-        .and_then(|a| serde_json::from_value(a.clone()).ok())
-        .unwrap_or_default();
-
-    if let Some(hso) = v.get("hookSpecificOutput") {
-        let perm = hso.get("permissionDecision").and_then(|x| x.as_str());
-        let reason = hso
-            .get("permissionDecisionReason")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string());
-        if let Some(perm) = perm {
-            if perm.eq_ignore_ascii_case("deny") {
-                let mut d = PromptDecision::deny(reason);
-                d.answers = answers;
-                return Some(d);
-            }
-            if perm.eq_ignore_ascii_case("allow") {
-                let mut d = PromptDecision::allow();
-                d.answers = answers;
-                return Some(d);
-            }
-            if perm.eq_ignore_ascii_case("ask") {
-                let mut d = PromptDecision::ask(reason);
-                d.answers = answers;
-                return Some(d);
-            }
-        }
-        if let Some(dec) = hso.get("decision").and_then(|x| x.as_object()) {
-            let behavior = dec.get("behavior").and_then(|x| x.as_str());
-            let msg = dec
-                .get("message")
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_string());
-            if behavior
-                .map(|b| b.eq_ignore_ascii_case("deny"))
-                .unwrap_or(false)
-            {
-                let mut d = PromptDecision::deny(msg);
-                d.answers = answers;
-                return Some(d);
-            }
-            if behavior
-                .map(|b| b.eq_ignore_ascii_case("allow"))
-                .unwrap_or(false)
-            {
-                let mut d = PromptDecision::allow();
-                d.answers = answers;
-                return Some(d);
-            }
-        }
-    }
-
-    if v.get("ask").and_then(|x| x.as_bool()) == Some(true) {
-        let question = v
-            .get("custom_input")
-            .and_then(|x| x.as_str())
-            .or_else(|| v.get("reason").and_then(|x| x.as_str()))
-            .or_else(|| v.get("permissionDecisionReason").and_then(|x| x.as_str()))
-            .map(|s| s.to_string());
-        let mut d = PromptDecision::ask(question);
-        d.answers = answers;
+    if let Some(d) = v.get("result").and_then(parse_decision_from_value) {
         return Some(d);
     }
-    if let Some(allow) = v.get("allow").and_then(|x| x.as_bool()) {
-        let custom_input = v
-            .get("custom_input")
-            .and_then(|x| x.as_str())
-            .or_else(|| v.get("reason").and_then(|x| x.as_str()))
-            .or_else(|| v.get("permissionDecisionReason").and_then(|x| x.as_str()))
-            .map(|s| s.to_string());
-        // A daemon verdict is a serialized PromptDecision: keep every field
-        // the renderer reads. Rebuilding a bare allow() here dropped
-        // allow_always (Claude updatedPermissions) and a typed answer.
-        let mut d = if allow {
-            let mut d = PromptDecision::allow();
-            d.allow_always = v
-                .get("allow_always")
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false);
-            d.suggestion = v
-                .get("suggestion")
-                .and_then(|x| x.as_u64())
-                .map(|i| i as usize);
-            d.custom_input = custom_input;
-            d
-        } else {
-            PromptDecision::deny(custom_input)
-        };
-        d.answers = answers;
+    if let Some(d) = v
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|inner| parse_decision_from_value(&inner))
+    {
         return Some(d);
     }
-    if let Some(dec) = v.get("decision").and_then(|x| x.as_str()) {
-        if dec.eq_ignore_ascii_case("ask") {
-            let question = v
-                .get("reason")
-                .and_then(|x| x.as_str())
-                .or_else(|| v.get("custom_input").and_then(|x| x.as_str()))
-                .or_else(|| v.get("permissionDecisionReason").and_then(|x| x.as_str()))
-                .map(|s| s.to_string());
-            let mut d = PromptDecision::ask(question);
-            d.answers = answers;
-            return Some(d);
-        }
-        let is_allow = dec.eq_ignore_ascii_case("allow");
-        let reason = v
-            .get("reason")
-            .and_then(|x| x.as_str())
-            .or_else(|| v.get("custom_input").and_then(|x| x.as_str()))
-            .or_else(|| v.get("permissionDecisionReason").and_then(|x| x.as_str()))
-            .map(|s| s.to_string());
-        let mut d = if is_allow {
-            PromptDecision::allow()
-        } else {
-            PromptDecision::deny(reason)
-        };
-        d.answers = answers;
+    if let Some(mut d) = native_decision(v) {
+        d.answers = v
+            .get("answers")
+            .and_then(|a| serde_json::from_value(a.clone()).ok())
+            .unwrap_or_default();
         return Some(d);
     }
-    if let Ok(d) = serde_json::from_value::<PromptDecision>(v.clone()) {
-        return Some(d);
-    }
-    None
+    // The daemon's verdict line is a PromptDecision plus a redundant
+    // `decision` verb (an envelope key, not a decision field); everything
+    // else is parsed by the protocol type itself.
+    let mut decision = v.as_object()?.clone();
+    decision.remove("decision");
+    serde_json::from_value::<PromptDecision>(serde_json::Value::Object(decision)).ok()
 }
 
 fn parse_decision(trimmed: &str) -> PromptDecision {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(d) = parse_decision_from_value(&v) {
-            return d;
-        }
-    }
-    // Unparseable daemon reply: no verdict was reached, so hand the call
-    // back to the harness rather than approving it.
-    PromptDecision::defer()
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .as_ref()
+        .and_then(parse_decision_from_value)
+        // Unparseable daemon reply: no verdict was reached, so hand the call
+        // back to the harness rather than approving it.
+        .unwrap_or_else(PromptDecision::defer)
 }
 
 /// Resolve harness_hint and raw_payload from HookArgs, handling the
@@ -535,7 +455,7 @@ const HISTORY_LOCK_WAIT: Duration = Duration::from_millis(200);
 /// store is the off state and stays silent; any other failure is a stderr
 /// warning (never content) and never changes the hook outcome.
 fn record_history(event: Option<&AgentEvent>, origin: Option<&str>) {
-    use agent_hooks_history::{resolve_history_dir, Capture, HistoryError, HistoryWriter};
+    use agent_hooks_history::{Capture, HistoryError, HistoryWriter, resolve_history_dir};
     let Some(event) = event else { return };
     let origin = origin
         .map(str::trim)
@@ -1646,18 +1566,37 @@ mod tests {
     }
     #[test]
     fn parse_decision_ask_shapes() {
-        let d = parse_decision(r#"{"ask":true,"custom_input":"allow deploy?"}"#);
+        // The daemon's verdict line: a PromptDecision plus the `decision` verb.
+        let d = parse_decision(
+            r#"{"decision":"ask","allow":false,"ask":true,"custom_input":"allow deploy?","answers":[]}"#,
+        );
         assert!(d.ask && d.custom_input.as_deref() == Some("allow deploy?"));
-        let d = parse_decision(r#"{"decision":"ask","reason":"run tests?"}"#);
-        assert!(d.ask && d.custom_input.as_deref() == Some("run tests?"));
-        // Round-trip through the wire struct (new field, old readers ignore).
+        // Round-trip through the wire struct.
         let d = parse_decision(
             &serde_json::to_string(&PromptDecision::ask(Some("q".to_string()))).unwrap(),
         );
         assert!(d.ask);
-        // Old payloads without ask still parse as before.
         let d = parse_decision(r#"{"allow":false,"custom_input":"no"}"#);
-        assert!(!d.allow && !d.ask);
+        assert!(d.is_deny() && d.custom_input.as_deref() == Some("no"));
+        // Verb-only / pre-PromptDecision shapes are no verdict: defer, never allow.
+        let d = parse_decision(r#"{"decision":"allow","reason":"legacy"}"#);
+        assert!(d.defer && !d.allow);
+    }
+
+    #[test]
+    fn parse_decision_keeps_answers_and_native_shapes() {
+        let mut allow = PromptDecision::allow();
+        allow.answers = vec![agent_hooks_protocol::PromptAnswer {
+            question_id: "q".to_string(),
+            selected_options: vec!["A".to_string()],
+            custom_input: None,
+        }];
+        let d = parse_decision(&serde_json::to_string(&allow).unwrap());
+        assert_eq!(d, allow);
+        let d = parse_decision(
+            r#"{"stdout":"{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"native\"}}"}"#,
+        );
+        assert!(d.is_deny() && d.custom_input.as_deref() == Some("native"));
     }
 
     // --- --context-cmd -------------------------------------------------
@@ -1865,11 +1804,15 @@ mod tests {
         let unknown: Result<AgentEvent, agent_hooks_adapters::AdapterError> = Err(
             agent_hooks_adapters::AdapterError::UnsupportedEvent("Bogus".into()),
         );
-        assert!(parse_failure_warning(Some(&unknown), Some("Bogus"))
-            .unwrap()
-            .contains("unknown event 'Bogus'"));
-        assert!(parse_failure_warning(None, None)
-            .unwrap()
-            .contains("unknown event"));
+        assert!(
+            parse_failure_warning(Some(&unknown), Some("Bogus"))
+                .unwrap()
+                .contains("unknown event 'Bogus'")
+        );
+        assert!(
+            parse_failure_warning(None, None)
+                .unwrap()
+                .contains("unknown event")
+        );
     }
 }

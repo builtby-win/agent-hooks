@@ -277,16 +277,46 @@ export function buildInput(payload: unknown, context: unknown): string {
     const title = getSessionTitle(context);
     if (title) out.session_title = title;
   }
-  if (out.last_assistant_message == null && Array.isArray(p.messages)) {
-    for (let index = p.messages.length - 1; index >= 0; index--) {
-      const message = fields(p.messages[index]);
-      if (message.role === "assistant" && message.content != null) {
-        out.last_assistant_message = message.content;
-        break;
-      }
-    }
+  // omp's session_stop hands over last_assistant_message as a whole message
+  // object; the history store wants the chat text only.
+  const lastText = assistantText(out.last_assistant_message);
+  if (lastText) out.last_assistant_message = lastText;
+  else delete out.last_assistant_message;
+  if (out.last_assistant_message == null) {
+    const reply = lastAssistantReply(p.messages);
+    if (reply) out.last_assistant_message = reply;
   }
   return JSON.stringify(out);
+}
+
+// Chat text of an assistant message. Accepts a string, a message object, or
+// its content: an array of typed blocks (thinking / text / toolCall) of which
+// only the text blocks are chat.
+export function assistantText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (!Array.isArray(value)) {
+    const content = fields(value).content;
+    return content == null ? "" : assistantText(content);
+  }
+  return value
+    .map((block) => {
+      const b = fields(block);
+      return b.type === "text" && typeof b.text === "string" ? b.text.trim() : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+// Text of the newest assistant message in `messages` that has any.
+function lastAssistantReply(messages: unknown): string {
+  if (!Array.isArray(messages)) return "";
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = fields(messages[index]);
+    if (message.role !== "assistant") continue;
+    const text = assistantText(message);
+    if (text) return text;
+  }
+  return "";
 }
 
 // Explicit child marker set by launchers that fork outside the harness.
@@ -452,22 +482,42 @@ export function nestedParentId(context: unknown): string | undefined {
   return undefined;
 }
 
+// Observe events go out one at a time: each is its own process, so two emitted
+// milliseconds apart (plan_approval_requested right after PostToolUse) could
+// otherwise reach the store swapped and leave the session looking busy. Never
+// awaited by callers; a hung child releases the chain after EMIT_ORDER_TIMEOUT_MS.
+const EMIT_ORDER_TIMEOUT_MS = 2_000;
+let emitChain: Promise<void> = Promise.resolve();
+
 function emit(agentEvent: string, payload: any, context: any): void {
   if (hooksDisabled()) return;
-  let child;
-  try {
-    child = spawn(BINARY, hookArgs(agentEvent), {
-      stdio: ["pipe", "ignore", "ignore"],
-    });
-  } catch {
-    return; // binary missing — never block the agent
-  }
-  child.on("error", () => {});
-  try {
-    child.stdin.end(buildInput(payload, context));
-  } catch {
-    // ignore
-  }
+  const input = buildInput(payload, context);
+  emitChain = emitChain.then(
+    () =>
+      new Promise<void>((done) => {
+        let child;
+        try {
+          child = spawn(BINARY, hookArgs(agentEvent), {
+            stdio: ["pipe", "ignore", "ignore"],
+          });
+        } catch {
+          done(); // binary missing — never block the agent
+          return;
+        }
+        const timer = setTimeout(done, EMIT_ORDER_TIMEOUT_MS);
+        const finish = () => {
+          clearTimeout(timer);
+          done();
+        };
+        child.on("error", finish);
+        child.on("close", finish);
+        try {
+          child.stdin.end(input);
+        } catch {
+          // ignore
+        }
+      }),
+  );
 }
 
 // Awaited forward for gate hooks. Resolves the binary's verdict JSON;
@@ -541,17 +591,18 @@ export function isTerminalAgentEnd(payload: unknown): boolean {
 }
 
 // Current omp dispatches plan approval as a `write` to the `xd://propose`
-// device URL; older builds used a `resolve` call with action "apply". Either
-// way the tool result text says the plan awaits the user (b2v-pi.ts
-// isPlanApprovalResult, f5c918940).
+// device URL; a successful one is the proposal, whatever its result text says.
+// Older builds used a `resolve` call with action "apply", which is also used
+// for non-plan edits, so only that branch falls back to the result text
+// (b2v-pi.ts isPlanApprovalResult, f5c918940).
 const PROPOSE_DEVICE_PATH = "xd://propose";
 export function isPlanApprovalResult(payload: unknown): boolean {
   const p = fields(payload);
+  if (p.isError === true) return false;
   const input = fields(p.input);
   const tool = p.toolName ?? p.tool_name;
-  const isWrite = tool === "write" && (input.path ?? input.file_path) === PROPOSE_DEVICE_PATH;
-  const isLegacyResolve = tool === "resolve" && input.action === "apply";
-  if (!isWrite && !isLegacyResolve) return false;
+  if (tool === "write") return (input.path ?? input.file_path) === PROPOSE_DEVICE_PATH;
+  if (tool !== "resolve" || input.action !== "apply") return false;
   const content = p.content;
   if (!Array.isArray(content)) return false;
   return content.some((c: unknown) => {
@@ -562,8 +613,18 @@ export function isPlanApprovalResult(payload: unknown): boolean {
 
 // Per-session run state. A pending plan approval keeps the session waiting:
 // the run's terminal event must not flip it to idle underneath the user
-// (b2v-pi.ts agent_end handler). The next turn_start clears it.
+// (b2v-pi.ts agent_end handler). The hold lasts until the user starts the next
+// run (before_agent_start): omp opens and aborts one more turn while it shows
+// the approval dialog, so turn_start cannot release it.
 const planApprovalPending = new Set<string>();
+// Last non-empty assistant text of the run in progress, per session, taken
+// from turn_end. The terminal event's own payload may not carry the reply.
+const lastAssistantText = new Map<string, string>();
+// Per session, whether the current run already emitted a Stop carrying the
+// reply. omp fires both agent_end and session_stop per run; once one has
+// delivered the reply the other is dropped, but a Stop without a reply never
+// suppresses a later one that has it. The next turn_start re-arms the session.
+const stopEmitted = new Map<string, boolean>();
 // Tools the user approved with "allow always", per session: later calls skip
 // the gate hold (still observed). Mirrors b2v-pi.ts sessionAllowed.
 const allowedAlways = new Map<string, Set<string>>();
@@ -954,7 +1015,16 @@ export default function agentHooks(pi: any): void {
     try {
       pi.on(nativeEvent, (payload: any, context: any) => {
         const p = payload ?? {};
-        if (nativeEvent === "turn_start") planApprovalPending.delete(sessionKey(p, context));
+        const key = sessionKey(p, context);
+        if (nativeEvent === "turn_start") stopEmitted.delete(key);
+        if (nativeEvent === "turn_end") {
+          const message = fields(p.message);
+          const text = message.role === "assistant" ? assistantText(message) : "";
+          if (text) lastAssistantText.set(key, text);
+        }
+        // While a plan awaits approval, the turn omp opens and aborts for the
+        // dialog would flip the session from waiting back to running.
+        if (planApprovalPending.has(key) && (nativeEvent === "turn_start" || nativeEvent === "turn_end")) return;
         emit(agentEvent, p, context);
         // A plan awaiting approval parks the session on the user: surface it
         // as a question-type notification (WaitingForInput).
@@ -989,6 +1059,7 @@ export default function agentHooks(pi: any): void {
     pi.on("before_agent_start", async (payload: any, context: any) => {
       const p = payload ?? {};
       const key = sessionKey(p, context);
+      planApprovalPending.delete(key);
       const text = [
         sessionContext.get(key),
         contextOf(await query("UserPromptSubmit", p, context, CONTEXT_TIMEOUT_MS)),
@@ -1011,8 +1082,13 @@ export default function agentHooks(pi: any): void {
         const p = payload ?? {};
         if (!isTerminalAgentEnd(p)) return;
         const key = sessionKey(p, context);
-        if (planApprovalPending.delete(key)) return;
-        emit("Stop", p, context);
+        if (planApprovalPending.has(key)) return;
+        if (stopEmitted.get(key)) return;
+        const reply =
+          assistantText(p.last_assistant_message) || lastAssistantReply(p.messages) || lastAssistantText.get(key) || "";
+        lastAssistantText.delete(key);
+        stopEmitted.set(key, reply !== "");
+        emit("Stop", reply ? { ...p, last_assistant_message: reply } : p, context);
       });
     } catch {
       // Older harness may not know a newer event name — skip it.

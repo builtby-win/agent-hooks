@@ -35,18 +35,42 @@ fn ctx(decision: PromptDecision) -> PromptDecision {
 #[test]
 fn claude_family_injects_on_session_start_and_prompt_submit() {
     let cases = [
-        ("claude-code", include_str!("../builtin/claude-code/adapter.json"), "claude"),
-        ("codex", include_str!("../builtin/codex/adapter.json"), "codex"),
-        ("qwen-code", include_str!("../builtin/qwen-code/adapter.json"), "qwen"),
-        ("qoder", include_str!("../builtin/qoder/adapter.json"), "qoder"),
+        (
+            "claude-code",
+            include_str!("../builtin/claude-code/adapter.json"),
+            "claude",
+        ),
+        (
+            "codex",
+            include_str!("../builtin/codex/adapter.json"),
+            "codex",
+        ),
+        (
+            "qwen-code",
+            include_str!("../builtin/qwen-code/adapter.json"),
+            "qwen",
+        ),
+        (
+            "qoder",
+            include_str!("../builtin/qoder/adapter.json"),
+            "qoder",
+        ),
     ];
     for (name, manifest, hint) in cases {
         let a = adapter(manifest);
         for event in ["SessionStart", "UserPromptSubmit"] {
             parse(&a, hint, event, r#"{"session_id":"s","prompt":"hi"}"#);
             // Observe-style defer (no verdict) and an explicit allow both inject.
-            assert_eq!(a.format_response(&ctx(PromptDecision::defer())), claude_shape(event), "{name} {event} defer");
-            assert_eq!(a.format_response(&ctx(PromptDecision::allow())), claude_shape(event), "{name} {event} allow");
+            assert_eq!(
+                a.format_response(&ctx(PromptDecision::defer())),
+                claude_shape(event),
+                "{name} {event} defer"
+            );
+            assert_eq!(
+                a.format_response(&ctx(PromptDecision::allow())),
+                claude_shape(event),
+                "{name} {event} allow"
+            );
         }
     }
 }
@@ -56,7 +80,10 @@ fn gemini_injects_on_before_agent_and_session_start() {
     let a = adapter(include_str!("../builtin/gemini-cli/adapter.json"));
     for event in ["SessionStart", "BeforeAgent"] {
         parse(&a, "gemini", event, r#"{"session_id":"s","prompt":"hi"}"#);
-        assert_eq!(a.format_response(&ctx(PromptDecision::defer())), claude_shape(event));
+        assert_eq!(
+            a.format_response(&ctx(PromptDecision::defer())),
+            claude_shape(event)
+        );
     }
 }
 
@@ -69,14 +96,27 @@ fn cursor_injects_on_session_start_only() {
         json!({"additional_context": "User is new to Docker."})
     );
     // beforeSubmitPrompt has no context channel: the verdict renders as usual.
-    parse(&a, "cursor", "beforeSubmitPrompt", r#"{"conversation_id":"c","prompt":"hi"}"#);
-    assert_eq!(a.format_response(&ctx(PromptDecision::allow())), json!({"continue": true}));
+    parse(
+        &a,
+        "cursor",
+        "beforeSubmitPrompt",
+        r#"{"conversation_id":"c","prompt":"hi"}"#,
+    );
+    assert_eq!(
+        a.format_response(&ctx(PromptDecision::allow())),
+        json!({"continue": true})
+    );
 }
 
 #[test]
 fn context_never_rides_a_deny_or_ask() {
     let a = adapter(include_str!("../builtin/claude-code/adapter.json"));
-    parse(&a, "claude", "UserPromptSubmit", r#"{"session_id":"s","prompt":"hi"}"#);
+    parse(
+        &a,
+        "claude",
+        "UserPromptSubmit",
+        r#"{"session_id":"s","prompt":"hi"}"#,
+    );
     let out = a.format_response(&ctx(PromptDecision::deny(Some("no".to_string()))));
     assert_eq!(out, json!({"decision": "block", "reason": "no"}));
 }
@@ -84,7 +124,12 @@ fn context_never_rides_a_deny_or_ask() {
 #[test]
 fn events_without_a_template_drop_context() {
     let a = adapter(include_str!("../builtin/claude-code/adapter.json"));
-    parse(&a, "claude", "PostToolUse", r#"{"session_id":"s","tool_name":"Bash","tool_input":{}}"#);
+    parse(
+        &a,
+        "claude",
+        "PostToolUse",
+        r#"{"session_id":"s","tool_name":"Bash","tool_input":{}}"#,
+    );
     let with = a.format_response(&ctx(PromptDecision::defer()));
     let without = a.format_response(&PromptDecision::defer());
     assert_eq!(with, without);
@@ -117,7 +162,12 @@ fn pi_and_omp_hand_context_to_the_bridge() {
                 "{hint} {event}"
             );
         }
-        parse(&a, hint, "PreToolUse", r#"{"session_id":"s","toolName":"bash"}"#);
+        parse(
+            &a,
+            hint,
+            "PreToolUse",
+            r#"{"session_id":"s","toolName":"bash"}"#,
+        );
         assert_eq!(
             a.format_response(&ctx(PromptDecision::allow())),
             a.format_response(&PromptDecision::allow()),

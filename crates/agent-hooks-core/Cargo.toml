@@ -10,6 +10,7 @@ description.workspace = true
 [dependencies]
 agent-hooks-protocol = { workspace = true }
 agent-hooks-adapters = { workspace = true }
+agent-hooks-history = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

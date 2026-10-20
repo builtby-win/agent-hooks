@@ -4,6 +4,7 @@ pub mod answer;
 pub mod answer_tui;
 pub mod daemon;
 pub mod dev;
+pub mod history;
 pub mod hook;
 pub mod install;
 pub mod list;

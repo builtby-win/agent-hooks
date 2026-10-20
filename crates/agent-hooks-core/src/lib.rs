@@ -6,6 +6,7 @@
 pub mod daemon;
 pub mod enricher;
 pub mod error;
+pub mod history_recorder;
 pub mod plugin;
 pub mod prompt_mediator;
 pub mod session_tracker;
@@ -16,6 +17,7 @@ pub use daemon::{
 };
 pub use enricher::{EventEnricher, NoopEnricher};
 pub use error::CoreError;
+pub use history_recorder::HistoryRecorder;
 pub use plugin::{Plugin, PluginManager};
 pub use prompt_mediator::{ClaimOutcome, ParkedQuestion, PromptMediator, PromptMeta, QueueEntry};
 pub use session_tracker::{SessionInfo, SessionTracker};

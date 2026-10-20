@@ -2,8 +2,8 @@ use parking_lot::Mutex;
 use std::collections::BTreeMap;
 
 use agent_hooks_protocol::{
-    AgentEvent, AgentLifecycle, PromptKind, PromptOption, PromptQuestion, PromptRequest,
-    PromptSuggestion, RawHookInput, SuggestionKind,
+    AgentEvent, AgentLifecycle, HistoryIdentity, PromptKind, PromptOption, PromptQuestion,
+    PromptRequest, PromptSuggestion, RawHookInput, SuggestionKind,
 };
 
 use crate::error::AdapterError;
@@ -36,11 +36,15 @@ fn walk_dotted<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde
 /// Read human text blocks without dumping tool arguments or arbitrary JSON.
 fn flavor_from_value(value: &serde_json::Value) -> Option<String> {
     fn append(value: &serde_json::Value, out: &mut String, remaining: &mut usize, depth: usize) {
-        if *remaining == 0 || depth > 8 { return; }
+        if *remaining == 0 || depth > 8 {
+            return;
+        }
         match value {
             serde_json::Value::String(text) => {
                 let text = text.trim();
-                if text.is_empty() { return; }
+                if text.is_empty() {
+                    return;
+                }
                 if !out.is_empty() {
                     out.push('\n');
                     *remaining -= 1;
@@ -53,19 +57,26 @@ fn flavor_from_value(value: &serde_json::Value) -> Option<String> {
             serde_json::Value::Array(parts) => {
                 for part in parts {
                     append(part, out, remaining, depth + 1);
-                    if *remaining == 0 { break; }
+                    if *remaining == 0 {
+                        break;
+                    }
                 }
             }
             serde_json::Value::Object(object) => {
-                if object.get("type").and_then(serde_json::Value::as_str)
-                    .is_some_and(|kind| !matches!(kind, "text" | "input_text" | "output_text")) {
+                if object
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| !matches!(kind, "text" | "input_text" | "output_text"))
+                {
                     return;
                 }
                 for key in ["text", "content", "message"] {
                     if let Some(text) = object.get(key) {
                         let before = out.len();
                         append(text, out, remaining, depth + 1);
-                        if out.len() != before { break; }
+                        if out.len() != before {
+                            break;
+                        }
                     }
                 }
             }
@@ -74,7 +85,11 @@ fn flavor_from_value(value: &serde_json::Value) -> Option<String> {
     }
     let mut out = String::new();
     append(value, &mut out, &mut 300, 0);
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn walk_dotted_str(payload: &serde_json::Value, path: &str) -> Option<String> {
@@ -156,29 +171,41 @@ fn extract_first_prompt(transcript_path: &str) -> Option<String> {
     }
     None
 }
-fn extract_latest_prompt(transcript_path: &str) -> Option<String> {
+
+/// Bounded JSONL tail buffer and the offset of its first complete line.
+/// Unreadable files yield `None` so extraction falls through to the next source.
+fn read_transcript_tail(transcript_path: &str) -> Option<(Vec<u8>, usize)> {
     use std::io::{Read, Seek, SeekFrom};
     const MAX_TAIL: u64 = 1024 * 1024;
 
     let path = crate::traits::expand_tilde_path(transcript_path);
     let mut file = std::fs::File::open(&path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(MAX_TAIL);
+    let start = file.metadata().ok()?.len().saturating_sub(MAX_TAIL);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    let mut lines = text.lines();
-    if start > 0 {
-        lines.next();
-    }
-    for line in lines.rev() {
+    file.take(MAX_TAIL).read_to_end(&mut buf).ok()?;
+    // A window starting mid-file may begin with a cut-off line; drop it.
+    let first_line = if start == 0 {
+        0
+    } else {
+        buf.iter().position(|&b| b == b'\n')? + 1
+    };
+    Some((buf, first_line))
+}
+
+fn is_user_transcript_row(row: &serde_json::Value) -> bool {
+    row.get("source").and_then(serde_json::Value::as_str) == Some("USER_EXPLICIT")
+        || row.get("type").and_then(serde_json::Value::as_str) == Some("USER_INPUT")
+}
+
+fn extract_latest_prompt(transcript_path: &str) -> Option<String> {
+    let (buf, first_line) = read_transcript_tail(transcript_path)?;
+    let tail = String::from_utf8_lossy(&buf[first_line..]);
+    for line in tail.lines().rev() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
-        let is_user = value.get("source").and_then(|s| s.as_str()) == Some("USER_EXPLICIT")
-            || value.get("type").and_then(|s| s.as_str()) == Some("USER_INPUT");
-        if !is_user {
+        if !is_user_transcript_row(&value) {
             continue;
         }
         let Some(content) = value.get("content").and_then(|c| c.as_str()) else {
@@ -196,6 +223,34 @@ fn extract_latest_prompt(transcript_path: &str) -> Option<String> {
         let content = content.trim();
         if !content.is_empty() {
             return Some(content.to_string());
+        }
+    }
+    None
+}
+
+/// Final reply of the turn in progress: the newest completed, non-empty model
+/// response *after* the newest user row. Reaching that user row first means
+/// this turn has no completed reply yet (failed, cancelled, not flushed), and
+/// the previous turn's reply must not be attributed to it.
+fn extract_latest_assistant(transcript_path: &str) -> Option<String> {
+    let (buf, first_line) = read_transcript_tail(transcript_path)?;
+    let tail = String::from_utf8_lossy(&buf[first_line..]);
+    for line in tail.lines().rev() {
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if is_user_transcript_row(&row) {
+            return None;
+        }
+        let field = |name: &str| row.get(name).and_then(serde_json::Value::as_str);
+        let is_completed_reply = field("source") == Some("MODEL")
+            && field("type") == Some("PLANNER_RESPONSE")
+            && field("status") == Some("DONE");
+        if !is_completed_reply {
+            continue;
+        }
+        if let Some(content) = field("content").filter(|c| !c.trim().is_empty()) {
+            return Some(content.to_owned());
         }
     }
     None
@@ -274,6 +329,15 @@ fn extract_session_link(payload: &serde_json::Value, spec: &SessionLinkSpec) -> 
     None
 }
 
+/// Id extraction reads payload paths only: transcript/session-link sources
+/// perform I/O and are meaningless for message or tool call identity.
+fn path_sources_only(sources: Vec<ExtractionSource>) -> Vec<ExtractionSource> {
+    sources
+        .into_iter()
+        .filter(|s| matches!(s, ExtractionSource::Path(_)))
+        .collect()
+}
+
 fn extract_string_via_sources(
     payload: &serde_json::Value,
     sources: &[ExtractionSource],
@@ -313,6 +377,11 @@ fn extract_string_via_sources(
                     }
                     TranscriptExtract::LatestPrompt => {
                         if let Some(s) = extract_latest_prompt(&tp) {
+                            return Some(s);
+                        }
+                    }
+                    TranscriptExtract::LatestAssistant => {
+                        if let Some(s) = extract_latest_assistant(&tp) {
                             return Some(s);
                         }
                     }
@@ -372,6 +441,11 @@ fn extract_value_via_sources(
                     }
                     TranscriptExtract::LatestPrompt => {
                         if let Some(s) = extract_latest_prompt(&tp) {
+                            return Some(serde_json::Value::String(s));
+                        }
+                    }
+                    TranscriptExtract::LatestAssistant => {
+                        if let Some(s) = extract_latest_assistant(&tp) {
                             return Some(serde_json::Value::String(s));
                         }
                     }
@@ -1959,9 +2033,12 @@ impl HarnessAdapter for DeclarativeAdapter {
         // raised from this path.
         let sources = self.get_field_sources("session_id", &host_event, &spec.lifecycle);
         let payloads = [&payload_for_fields, &event_payload, &payload];
-        let session_id = first_across(&payloads, |p| extract_string_via_sources(p, &sources))
-            .or_else(|| first_across(&payloads, |p| extract_session_id(p, input)))
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let extracted_session =
+            first_across(&payloads, |p| extract_string_via_sources(p, &sources))
+                .or_else(|| first_across(&payloads, |p| extract_session_id(p, input)));
+        // History keys only on a session id the harness really sent.
+        let native_session = extracted_session.is_some();
+        let session_id = extracted_session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let mut lifecycle = self
             .build_lifecycle(&spec, &host_event, &payload_for_fields, input)
@@ -2170,11 +2247,32 @@ impl HarnessAdapter for DeclarativeAdapter {
         // every emitted event carries a non-empty turn_id. (AgentEvent::new
         // leaves turn_id None; any other AgentEvent construction site must
         // apply the same fallback.)
-        let turn_id = first_across(&[&payload_for_fields, &event_payload, &payload], |p| {
+        let native_turn_id = first_across(&[&payload_for_fields, &event_payload, &payload], |p| {
             extract_string_field(p, &["turn_id", "turnId"]).filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or_else(|| event.event_id.clone());
-        event.turn_id = Some(turn_id);
+        });
+        event.turn_id = Some(
+            native_turn_id
+                .clone()
+                .unwrap_or_else(|| event.event_id.clone()),
+        );
+        // Native identity for the history store, captured before any fallback.
+        // Only declared/conventional key names are read — no recursive id hunt.
+        let message_id_sources =
+            path_sources_only(self.get_field_sources("message_id", &host_event, &spec.lifecycle));
+        let tool_call_id_sources =
+            path_sources_only(self.get_field_sources("tool_call_id", &host_event, &spec.lifecycle));
+        let id_payloads = [&payload_for_fields, &event_payload, &payload];
+        event.history_identity = Some(HistoryIdentity {
+            native_session,
+            native_turn_id,
+            native_message_id: first_across(&id_payloads, |p| {
+                extract_string_via_sources(p, &message_id_sources)
+            }),
+            native_tool_call_id: first_across(&id_payloads, |p| {
+                extract_string_via_sources(p, &tool_call_id_sources)
+            }),
+            delivery_id: None,
+        });
         // Harness-pushed title: passthrough only, blank means "unknown".
         let title_sources = self.get_field_sources("session_title", &host_event, &spec.lifecycle);
         event.session_title = first_across(&[&payload_for_fields, &event_payload, &payload], |p| {
@@ -2182,15 +2280,24 @@ impl HarnessAdapter for DeclarativeAdapter {
         })
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-        let mut flavor_sources = self.get_field_sources("flavor_text", &host_event, &spec.lifecycle);
-        for source in self.version_spec().extraction.sources_with_defaults("flavor_text") {
-            if !flavor_sources.contains(&source) { flavor_sources.push(source); }
+        let mut flavor_sources =
+            self.get_field_sources("flavor_text", &host_event, &spec.lifecycle);
+        for source in self
+            .version_spec()
+            .extraction
+            .sources_with_defaults("flavor_text")
+        {
+            if !flavor_sources.contains(&source) {
+                flavor_sources.push(source);
+            }
         }
         event.flavor_text = flavor_sources.iter().find_map(|source| {
-            let ExtractionSource::Path(path) = source else { return None; };
-            [&payload_for_fields, &event_payload, &payload].iter().find_map(|payload| {
-                walk_dotted(payload, path).and_then(flavor_from_value)
-            })
+            let ExtractionSource::Path(path) = source else {
+                return None;
+            };
+            [&payload_for_fields, &event_payload, &payload]
+                .iter()
+                .find_map(|payload| walk_dotted(payload, path).and_then(flavor_from_value))
         });
         event.raw_event = Some(input.raw_payload.clone());
         Ok(event)
@@ -2219,7 +2326,11 @@ impl HarnessAdapter for DeclarativeAdapter {
                 let ask_allowed = host_event
                     .as_deref()
                     .map(|key| self.version_spec().ask_allowed(key))
-                    .or_else(|| lifecycle_key.as_deref().map(|key| self.version_spec().ask_allowed(key)))
+                    .or_else(|| {
+                        lifecycle_key
+                            .as_deref()
+                            .map(|key| self.version_spec().ask_allowed(key))
+                    })
                     .unwrap_or(true);
                 NormalizedResponse::from_gate_decision(decision, ask_allowed)
             }
@@ -2285,9 +2396,7 @@ impl HarnessAdapter for DeclarativeAdapter {
 
         match capability {
             Some(Capability::Gate) => {
-                let lifecycle_key = st
-                    .lifecycle
-                    .map(|l| l.as_str().to_string());
+                let lifecycle_key = st.lifecycle.map(|l| l.as_str().to_string());
                 let normalized = self.normalize_response(decision);
                 fn pick<'a>(
                     g: &'a crate::manifest::GateResponse,
@@ -2305,15 +2414,11 @@ impl HarnessAdapter for DeclarativeAdapter {
                         N::Deny { .. } | N::Continue { .. } => &g.deny,
                     }
                 }
-                let override_gate = vs
-                    .response
-                    .response_overrides
-                    .get(&host_event)
-                    .or_else(|| {
-                        lifecycle_key
-                            .as_deref()
-                            .and_then(|key| vs.response.response_overrides.get(key))
-                    });
+                let override_gate = vs.response.response_overrides.get(&host_event).or_else(|| {
+                    lifecycle_key
+                        .as_deref()
+                        .and_then(|key| vs.response.response_overrides.get(key))
+                });
                 let template = override_gate
                     .map(|g| pick(g, &normalized))
                     .or_else(|| vs.response.gate.as_ref().map(|g| pick(g, &normalized)));
@@ -2322,9 +2427,7 @@ impl HarnessAdapter for DeclarativeAdapter {
                 if is_deny_block_reason
                     && (event_name.eq_ignore_ascii_case("PreToolUse")
                         || lifecycle_key.as_deref() == Some("PreToolUse"))
-                    && (st.is_question
-                        || !st.questions.is_empty()
-                        || !decision.answers.is_empty())
+                    && (st.is_question || !st.questions.is_empty() || !decision.answers.is_empty())
                 {
                     // Harness has no in-band answer channel: `updatedInput` only
                     // re-parses the tool's own args. A block reason is handed to the model as the
@@ -2374,9 +2477,9 @@ impl HarnessAdapter for DeclarativeAdapter {
                         .then(|| claude_updated_input(&st.questions, decision));
                     let original_input = (decision.allow && vs.response.allow_requires_tool_input)
                         .then(|| st.tool_input.clone());
-                    let updated = updated.as_ref().or_else(|| {
-                        original_input.as_ref().and_then(|input| input.as_ref())
-                    });
+                    let updated = updated
+                        .as_ref()
+                        .or_else(|| original_input.as_ref().and_then(|input| input.as_ref()));
                     let rendered = fill_placeholder(rendered, "{updated_input}", updated);
                     // Legacy prompt.rs build_claude_permission_response: only
                     // AllowAlways carries the host's own suggestions back.

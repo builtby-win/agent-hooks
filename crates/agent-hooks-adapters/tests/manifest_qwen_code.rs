@@ -90,10 +90,7 @@ fn qwen_manifest_timeouts_stay_below_millisecond_quirk() {
         {
             let check = |label: &str, v: &serde_json::Value| {
                 if let Some(t) = v.get("timeout").and_then(|t| t.as_u64()) {
-                    assert!(
-                        t < 1000,
-                        "{label} timeout {t} would read as milliseconds"
-                    );
+                    assert!(t < 1000, "{label} timeout {t} would read as milliseconds");
                 }
             };
             check("entry", entry);
@@ -147,15 +144,9 @@ fn qwen_manifest_lifecycle_registry_and_batch_observe() {
     // PostToolBatch is observe-only: its decision output format is not
     // documented, so the adapter never blocks on it.
     let batch = adapter
-        .parse_event(&make_input(
-            "PostToolBatch",
-            r#"{"session_id": "qwen-1"}"#,
-        ))
+        .parse_event(&make_input("PostToolBatch", r#"{"session_id": "qwen-1"}"#))
         .expect("parse PostToolBatch");
-    assert!(matches!(
-        batch.lifecycle,
-        AgentLifecycle::PostToolBatch
-    ));
+    assert!(matches!(batch.lifecycle, AgentLifecycle::PostToolBatch));
     let v = adapter.format_response(&PromptDecision::allow());
     assert_eq!(v, serde_json::json!({}));
 

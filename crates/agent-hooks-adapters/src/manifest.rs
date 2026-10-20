@@ -158,6 +158,7 @@ pub enum EditMode {
 pub enum TranscriptExtract {
     FirstPrompt,
     LatestPrompt,
+    LatestAssistant,
     FirstTimestamp,
 }
 
@@ -241,6 +242,14 @@ pub struct ExtractionSpec {
     /// Optional display text; only payload paths are read, never session stores.
     #[serde(default)]
     pub flavor_text: Vec<ExtractionSource>,
+    /// Harness-native message id for the opt-in history store. Only declared
+    /// or conventional key names are read; absent means "no native id".
+    #[serde(default)]
+    pub message_id: Vec<ExtractionSource>,
+    /// Harness-native tool call id for the opt-in history store, used to pair
+    /// a tool's start and end markers. Absent means "no native id".
+    #[serde(default)]
+    pub tool_call_id: Vec<ExtractionSource>,
 }
 
 impl ExtractionSpec {
@@ -260,9 +269,14 @@ impl ExtractionSpec {
             "cwd" => &self.cwd,
             "session_title" => &self.session_title,
             "flavor_text" => &self.flavor_text,
-            "summary" => return self.summary.clone().unwrap_or_else(|| {
-                Self::standard_defaults("summary")
-            }),
+            "message_id" => &self.message_id,
+            "tool_call_id" => &self.tool_call_id,
+            "summary" => {
+                return self
+                    .summary
+                    .clone()
+                    .unwrap_or_else(|| Self::standard_defaults("summary"))
+            }
             _ => return Vec::new(),
         };
 
@@ -278,29 +292,90 @@ impl ExtractionSpec {
     fn standard_defaults(field: &str) -> Vec<ExtractionSource> {
         let paths: &[&str] = match field {
             "session_id" => &[
-                "session_id", "sessionId", "sessionID", "conversation_id",
-                "conversationId", "thread_id", "threadId",
+                "session_id",
+                "sessionId",
+                "sessionID",
+                "conversation_id",
+                "conversationId",
+                "thread_id",
+                "threadId",
             ],
             "parent_session_id" => &[
-                "parent_session_id", "parentSessionId", "parentSessionID",
-                "parent_id", "parentId", "parentID", "parent_session_hash",
-                "parentSessionHash", "session.parent_id", "session.parent_session_id",
-                "session.parentSessionId", "session.parent_session_hash",
-                "properties.session.parent_id", "properties.session.parent_session_id",
+                "parent_session_id",
+                "parentSessionId",
+                "parentSessionID",
+                "parent_id",
+                "parentId",
+                "parentID",
+                "parent_session_hash",
+                "parentSessionHash",
+                "session.parent_id",
+                "session.parent_session_id",
+                "session.parentSessionId",
+                "session.parent_session_hash",
+                "properties.session.parent_id",
+                "properties.session.parent_session_id",
             ],
-            "prompt" => &["prompt", "user_prompt", "userPrompt", "message", "input", "content"],
+            "prompt" => &[
+                "prompt",
+                "user_prompt",
+                "userPrompt",
+                "message",
+                "input",
+                "content",
+            ],
             "tool_name" => &["tool_name", "toolName", "tool", "name"],
-            "tool_input" => &["tool_input", "toolInput", "input", "params", "arguments", "args"],
-            "tool_output" => &["tool_output", "toolOutput", "tool_response", "output", "result", "content"],
+            "tool_input" => &[
+                "tool_input",
+                "toolInput",
+                "input",
+                "params",
+                "arguments",
+                "args",
+            ],
+            "tool_output" => &[
+                "tool_output",
+                "toolOutput",
+                "tool_response",
+                "output",
+                "result",
+                "content",
+            ],
             "error" => &["error", "error_message", "tool_error", "failure"],
             "success" => &["success"],
             "cwd" => &["cwd", "workspacePaths", "workspace_roots"],
             "session_title" => &["session_title", "sessionTitle"],
             "flavor_text" => &["flavor_text", "flavorText", "display_text", "displayText"],
-            "summary" => &["summary", "message", "reason", "result", "notification", "text"],
+            "message_id" => &["message_id", "messageId"],
+            // Dotted `toolCall.id`/`tool_call.id` name the harness's own tool container
+            // (Antigravity, Cursor); they are exact paths, never a recursive id search.
+            "tool_call_id" => &[
+                "tool_use_id",
+                "toolUseId",
+                "toolUseID",
+                "tool_call_id",
+                "toolCallId",
+                "toolCallID",
+                "call_id",
+                "callId",
+                "callID",
+                "toolCall.id",
+                "tool_call.id",
+            ],
+            "summary" => &[
+                "summary",
+                "message",
+                "reason",
+                "result",
+                "notification",
+                "text",
+            ],
             _ => &[],
         };
-        paths.iter().map(|p| ExtractionSource::Path(p.to_string())).collect()
+        paths
+            .iter()
+            .map(|p| ExtractionSource::Path(p.to_string()))
+            .collect()
     }
 }
 
@@ -319,6 +394,8 @@ impl Default for ExtractionSpec {
             summary: None,
             session_title: Vec::new(),
             flavor_text: Vec::new(),
+            message_id: Vec::new(),
+            tool_call_id: Vec::new(),
         }
     }
 }
@@ -938,10 +1015,18 @@ impl AdapterManifest {
                 self.validate_agent_cli(ver_name, agent_cli)?;
             }
             for (ev_name, ev_spec) in &vs.events {
-                if ev_spec.capability == Capability::Gate && ev_spec.verdicts.as_ref().map(|v| v.is_empty()).unwrap_or(false) {
+                if ev_spec.capability == Capability::Gate
+                    && ev_spec
+                        .verdicts
+                        .as_ref()
+                        .map(|v| v.is_empty())
+                        .unwrap_or(false)
+                {
                     tracing::warn!(
                         "Manifest '{}' ({}) event '{}' is a gate but specifies empty verdicts",
-                        self.id, ver_name, ev_name
+                        self.id,
+                        ver_name,
+                        ev_name
                     );
                 }
             }
@@ -968,7 +1053,8 @@ impl AdapterManifest {
         }
         let valid_argv = |argv: &[String], placeholder: &str| {
             let count: usize = argv.iter().map(|a| a.matches(placeholder).count()).sum();
-            argv.first().is_some_and(|exe| cli.executables.contains(exe))
+            argv.first()
+                .is_some_and(|exe| cli.executables.contains(exe))
                 && (placeholder.is_empty() || count == 1)
         };
         if let Some(resume) = &cli.resume {
@@ -984,7 +1070,9 @@ impl AdapterManifest {
             }
         }
         if let Some(models) = &cli.models {
-            if !valid_argv(&models.argv, "") || (!models.id_fields.is_empty() && models.id_column.is_some()) {
+            if !valid_argv(&models.argv, "")
+                || (!models.id_fields.is_empty() && models.id_column.is_some())
+            {
                 return err("models argv must start with a configured executable and must not mix id_fields with id_column".into());
             }
         }
@@ -1324,6 +1412,16 @@ impl AdapterManifest {
 
     fn merge_extraction(base: &ExtractionSpec, local: &ExtractionSpec) -> ExtractionSpec {
         ExtractionSpec {
+            message_id: if local.message_id.is_empty() {
+                base.message_id.clone()
+            } else {
+                local.message_id.clone()
+            },
+            tool_call_id: if local.tool_call_id.is_empty() {
+                base.tool_call_id.clone()
+            } else {
+                local.tool_call_id.clone()
+            },
             flavor_text: if local.flavor_text.is_empty() {
                 base.flavor_text.clone()
             } else {
@@ -1427,5 +1525,8 @@ impl AdapterManifest {
 }
 
 fn valid_model_args(args: &[String]) -> bool {
-    args.iter().map(|a| a.matches("{model}").count()).sum::<usize>() == 1
+    args.iter()
+        .map(|a| a.matches("{model}").count())
+        .sum::<usize>()
+        == 1
 }

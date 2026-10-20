@@ -87,7 +87,7 @@
         "tool_output": ["tool_output", "toolOutput", "output", "result", "content"],
         "error": ["error", "error_message"],
         "success": ["success", "fullyIdle"],
-        "summary": ["terminationReason", "termination_reason", "error", "summary", "message", "reason", "result"]
+        "summary": ["error", "summary", "message", "result", {"transcript": "latest_assistant"}, "terminationReason", "termination_reason", "reason"]
       },
       "response": {
         "mode": "json",

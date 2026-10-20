@@ -43,7 +43,8 @@
         "recipe_source": "start, exec, model_args: muse --help; muse exec --help",
         "start": {"argv": ["muse", "{prompt}"]},
         "exec": {"argv": ["muse", "exec", "{prompt}"]},
-        "model_args": ["--model", "{model}"]
+        "model_args": ["--model", "{model}"],
+        "model_aliases": ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]
       },
       "verified_against": "1.4.7",
       "events": {

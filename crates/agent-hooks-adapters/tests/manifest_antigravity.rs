@@ -220,6 +220,117 @@ fn manifest_antigravity_stop_continue() {
 }
 
 #[test]
+fn manifest_antigravity_stop_reads_completed_reply_from_current_turn() {
+    let adapter = load_adapter();
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("transcript.jsonl");
+    let mut rows = vec![
+        serde_json::json!({"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"hi"}),
+        serde_json::json!({"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"Hi! How can I help you today?"}),
+    ];
+    let parse_stop = |rows: &[serde_json::Value], extra: serde_json::Value| {
+        let text = rows
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&transcript, text + "\n").unwrap();
+        let mut payload = serde_json::json!({
+            "conversationId":"ag-history",
+            "transcriptPath":transcript,
+            "terminationReason":"model_stop",
+            "fullyIdle":true
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        adapter
+            .parse_event(&make_input("Stop", &payload.to_string()))
+            .unwrap()
+            .lifecycle
+    };
+    assert!(matches!(
+        parse_stop(&rows, serde_json::json!({})),
+        AgentLifecycle::Stop { summary: Some(text), success: true }
+            if text == "Hi! How can I help you today?"
+    ));
+    rows.push(serde_json::json!({"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"hello"}));
+    // No reply yet: do not attribute the previous turn's answer to this turn.
+    assert!(matches!(
+        parse_stop(&rows, serde_json::json!({})),
+        AgentLifecycle::Stop { summary: Some(text), .. } if text == "model_stop"
+    ));
+    rows.push(serde_json::json!({"source":"MODEL","type":"PLANNER_RESPONSE","status":"RUNNING","content":"unfinished"}));
+    rows.push(serde_json::json!({"source":"MODEL","type":"THINKING","status":"DONE","content":"private reasoning"}));
+    assert!(matches!(
+        parse_stop(&rows, serde_json::json!({})),
+        AgentLifecycle::Stop { summary: Some(text), .. } if text == "model_stop"
+    ));
+    rows.push(serde_json::json!({"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"Hello! What would you like to work on?"}));
+    assert!(matches!(
+        parse_stop(&rows, serde_json::json!({})),
+        AgentLifecycle::Stop { summary: Some(text), success: true }
+            if text == "Hello! What would you like to work on?"
+    ));
+    // Real errors remain authoritative; weak stops retain their lifecycle.
+    assert!(matches!(
+        parse_stop(&rows, serde_json::json!({"error":"connection failed"})),
+        AgentLifecycle::Stop { summary: Some(text), success: false } if text == "connection failed"
+    ));
+    assert!(matches!(
+        parse_stop(&rows, serde_json::json!({"fullyIdle":false})),
+        AgentLifecycle::TurnEnd { .. }
+    ));
+}
+
+#[test]
+fn manifest_antigravity_stop_reply_extraction_is_bounded_to_transcript_tail() {
+    let adapter = load_adapter();
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("transcript.jsonl");
+    let row = |source: &str, kind: &str, content: &str| {
+        serde_json::json!({"source":source,"type":kind,"status":"DONE","content":content})
+            .to_string()
+    };
+    // Far larger than the 1MB tail window, so the window starts mid-line.
+    let bulk = row("MODEL", "TOOL_RESULT", &"x".repeat(2 * 1024 * 1024));
+    let stop_summary = || {
+        let payload = serde_json::json!({
+            "conversationId":"ag-tail",
+            "transcriptPath":transcript,
+            "terminationReason":"model_stop",
+            "fullyIdle":true
+        });
+        match adapter
+            .parse_event(&make_input("Stop", &payload.to_string()))
+            .unwrap()
+            .lifecycle
+        {
+            AgentLifecycle::Stop { summary, .. } => summary,
+            other => panic!("expected Stop, got {other:?}"),
+        }
+    };
+    let write_rows = |rows: &[String]| std::fs::write(&transcript, rows.join("\n") + "\n").unwrap();
+
+    write_rows(&[
+        row("USER_EXPLICIT", "USER_INPUT", "hi"),
+        bulk.clone(),
+        row("MODEL", "PLANNER_RESPONSE", "Final answer"),
+    ]);
+    assert_eq!(stop_summary().as_deref(), Some("Final answer"));
+
+    // The previous turn's reply sits before the cut-off bulk row and the current
+    // user row is outside the window: still nothing may be attributed.
+    write_rows(&[
+        row("MODEL", "PLANNER_RESPONSE", "Old answer"),
+        row("USER_EXPLICIT", "USER_INPUT", "again"),
+        bulk,
+    ]);
+    assert_eq!(stop_summary().as_deref(), Some("model_stop"));
+}
+
+#[test]
 fn manifest_antigravity_registry_prefers_manifest() {
     let adapter = agent_hooks_adapters::AdapterRegistry::get_versioned("antigravity", None)
         .expect("antigravity adapter resolves");

@@ -58,6 +58,9 @@ pub enum Commands {
 
     /// Manage agent-hooks plugins (install, uninstall, list, enable, disable, validate)
     Plugin(PluginArgs),
+
+    /// Initialize and query the opt-in conversation history store (read-only queries)
+    History(HistoryArgs),
 }
 
 /// Manual test decider: prints each held gate event and reads the verdict.
@@ -149,6 +152,105 @@ pub struct DaemonArgs {
     /// Log level (trace, debug, info, warn, error)
     #[arg(long = "log-level", value_name = "LEVEL", default_value = "info")]
     pub log_level: String,
+
+    /// Record hook events forwarded from other machines (those installed with
+    /// `--origin`) into the history store created by `agent-hooks history init`.
+    /// Local hooks are recorded by their own shim. Off unless passed; fails if
+    /// the store is missing.
+    #[arg(long)]
+    pub history: bool,
+
+    /// History directory (default: $AGENT_HOOKS_HISTORY_DIR, else ~/.agent-hooks/history)
+    #[arg(long = "history-dir", value_name = "PATH", requires = "history")]
+    pub history_dir: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct HistoryArgs {
+    #[command(subcommand)]
+    pub command: HistoryCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HistoryCommand {
+    /// Create or migrate the history store (does not install hooks or start the daemon)
+    Init(HistoryDirArgs),
+    /// List captured sessions
+    Sessions(HistorySessionsArgs),
+    /// List one session's captured messages and tool markers
+    Messages(HistoryMessagesArgs),
+    /// Schema version, counts and last persisted time
+    Status(HistoryDirArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct HistoryDirArgs {
+    /// History directory (default: $AGENT_HOOKS_HISTORY_DIR, else ~/.agent-hooks/history)
+    #[arg(long = "history-dir", value_name = "PATH")]
+    pub history_dir: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct HistorySessionsArgs {
+    /// Only this native session id (exact match)
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Literal substring of the session title, native id, or workspace (ASCII case-insensitive)
+    #[arg(long)]
+    pub search: Option<String>,
+    /// Only this harness
+    #[arg(long)]
+    pub harness: Option<String>,
+    /// Only this origin label (`local` when no `--origin` was installed)
+    #[arg(long)]
+    pub origin: Option<String>,
+    /// Opaque cursor from a previous page's `next_cursor`
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Page size, 1..=1000 (default 100)
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// History directory (default: $AGENT_HOOKS_HISTORY_DIR, else ~/.agent-hooks/history)
+    #[arg(long = "history-dir", value_name = "PATH")]
+    pub history_dir: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct HistoryMessagesArgs {
+    /// Native session id as reported by the harness
+    #[arg(long)]
+    pub session: String,
+    /// Disambiguate when the same session id exists under several harnesses
+    #[arg(long)]
+    pub harness: Option<String>,
+    /// Disambiguate when the same session id exists under several origins
+    #[arg(long)]
+    pub origin: Option<String>,
+    /// Opaque cursor from a previous page's `next_cursor`
+    #[arg(long)]
+    pub after: Option<String>,
+    /// Exclusive upper sequence bound for scroll-up paging: return the
+    /// newest page below this sequence, oldest first. Cannot combine with
+    /// `--after`; pass the first returned item's `seq` to load older rows.
+    #[arg(long)]
+    pub before: Option<i64>,
+    /// Page size, 1..=1000 (default 100)
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Only these entry kinds (comma-separated or repeated); default all. A
+    /// chat view passes `user,assistant` to skip tool bodies.
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub kind: Vec<HistoryKindArg>,
+    /// History directory (default: $AGENT_HOOKS_HISTORY_DIR, else ~/.agent-hooks/history)
+    #[arg(long = "history-dir", value_name = "PATH")]
+    pub history_dir: Option<PathBuf>,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum HistoryKindArg {
+    User,
+    Assistant,
+    Tool,
 }
 
 #[derive(Parser, Debug)]
@@ -158,6 +260,7 @@ pub struct DevArgs {
     pub harness: String,
 
     /// Unix socket path for the dev daemon and installed hooks
+    /// (default: isolated per-user, per-directory socket, see dev_socket_path)
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
 
@@ -244,6 +347,10 @@ pub struct ModelsArgs {
     /// Harness id or alias (see `list-adapters`)
     #[arg(long)]
     pub harness: String,
+
+    /// Output normalized model ids as machine-readable JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -417,4 +524,3 @@ pub struct PluginValidateArgs {
     #[arg(long)]
     pub json: bool,
 }
-

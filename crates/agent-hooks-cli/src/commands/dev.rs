@@ -8,7 +8,7 @@ use std::time::Duration;
 pub async fn run(args: DevArgs) -> anyhow::Result<()> {
     let socket = args
         .socket
-        .unwrap_or_else(|| PathBuf::from(agent_hooks_protocol::default_socket_path()));
+        .unwrap_or_else(|| PathBuf::from(agent_hooks_protocol::dev_socket_path()));
     let binary = std::env::current_exe()?;
 
     println!("agent-hooks dev");
@@ -90,4 +90,3 @@ fn short_id(id: &str) -> &str {
 fn lifecycle_name(event: &agent_hooks_protocol::AgentEvent) -> &'static str {
     event.lifecycle.name()
 }
-

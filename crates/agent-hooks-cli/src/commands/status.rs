@@ -18,6 +18,9 @@ struct DaemonStatus {
     version: Option<String>,
     binary_version: String,
     version_mismatch: bool,
+    /// From the daemon's `ping` reply (`history_enabled`). Absent on older
+    /// daemons, which reads as `false`: same version but no capture.
+    history_enabled: bool,
     latency_ms: Option<u64>,
     error: Option<String>,
 }
@@ -60,6 +63,14 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
         } else {
             println!("  Version: unknown (binary {})", daemon.binary_version);
         }
+        println!(
+            "  History: {}",
+            if daemon.history_enabled {
+                "enabled"
+            } else {
+                "disabled (restart the daemon with --history to capture forwarded events)"
+            }
+        );
         if daemon.version_mismatch {
             println!(
                 "  Warning: version mismatch — binary {} vs daemon {}",
@@ -120,14 +131,15 @@ fn check_daemon(socket_path: &Path) -> DaemonStatus {
     let start = std::time::Instant::now();
 
     match ping_daemon(socket_path) {
-        Ok(version) => {
-            let version_mismatch = version.as_ref().is_some_and(|v| v != &binary_version);
+        Ok(ping) => {
+            let version_mismatch = ping.version.as_ref().is_some_and(|v| v != &binary_version);
             DaemonStatus {
                 socket: socket_str,
                 running: true,
-                version,
+                version: ping.version,
                 binary_version,
                 version_mismatch,
+                history_enabled: ping.history_enabled,
                 latency_ms: Some(start.elapsed().as_millis() as u64),
                 error: None,
             }
@@ -138,13 +150,22 @@ fn check_daemon(socket_path: &Path) -> DaemonStatus {
             version: None,
             binary_version,
             version_mismatch: false,
+            history_enabled: false,
             latency_ms: None,
             error: Some(e.to_string()),
         },
     }
 }
 
-fn ping_daemon(socket_path: &Path) -> anyhow::Result<Option<String>> {
+/// What the daemon's `ping` reply tells us. Older daemons omit
+/// `history_enabled`, which reads as `false` so a same-version daemon started
+/// without `--history` is never mistaken for a capturing one.
+struct PingInfo {
+    version: Option<String>,
+    history_enabled: bool,
+}
+
+fn ping_daemon(socket_path: &Path) -> anyhow::Result<PingInfo> {
     if cfg!(windows) {
         anyhow::bail!("windows named pipe check not yet implemented");
     }
@@ -176,17 +197,25 @@ fn ping_daemon(socket_path: &Path) -> anyhow::Result<Option<String>> {
         let mut buf = vec![0u8; 4096];
         let n = stream.read(&mut buf)?;
         if n == 0 {
-            return Ok(None);
+            return Ok(PingInfo {
+                version: None,
+                history_enabled: false,
+            });
         }
         let resp_str = String::from_utf8_lossy(&buf[..n]).to_string();
         let val: serde_json::Value =
             serde_json::from_str(resp_str.trim()).unwrap_or(serde_json::Value::Null);
-        let version = val
-            .get("result")
-            .and_then(|r| r.get("version"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        Ok(version)
+        let result = val.get("result");
+        Ok(PingInfo {
+            version: result
+                .and_then(|r| r.get("version"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            history_enabled: result
+                .and_then(|r| r.get("history_enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        })
     }
 
     #[cfg(not(unix))]

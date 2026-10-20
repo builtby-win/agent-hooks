@@ -245,6 +245,15 @@ fn models_prints_the_agents_own_listing() {
 }
 
 #[test]
+fn models_json_returns_ids_without_display_labels() {
+    let env = Env::new();
+    let output = env.run(&["models", "--harness", "fakeagent", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let listing: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(listing["models"], serde_json::json!(["m1", "m2"]));
+}
+
+#[test]
 fn project_tier_manifests_cannot_choose_what_runs() {
     let env = Env::new();
     let bin = env.tmp.path().join("bin");

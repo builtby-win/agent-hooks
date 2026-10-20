@@ -15,6 +15,7 @@
 pub mod context;
 pub mod error;
 pub mod event;
+pub mod history;
 pub mod lifecycle;
 pub mod plugin;
 pub mod prompt;
@@ -24,8 +25,15 @@ pub mod rpc;
 pub use context::EventContext;
 pub use error::ProtocolError;
 pub use event::{
-    hook_line_extensions, hook_line_with_extensions, AgentEvent, RawHookInput,
-    HOOK_LINE_EXTENSIONS_KEY,
+    hook_line_delivery_id, hook_line_extensions, hook_line_with_extensions, AgentEvent,
+    HistoryIdentity, RawHookInput, DELIVERY_ID_EXTENSION, HOOK_LINE_EXTENSIONS_KEY,
+    MAX_DELIVERY_ID_LEN, ORIGIN_EXTENSION,
+};
+pub use history::{
+    HistoryCaptureInfo, HistoryEntry, HistoryEntryKind, HistoryErrorBody, HistoryErrorCode,
+    HistoryErrorResponse, HistoryMessagesPage, HistorySession, HistorySessionKey,
+    HistorySessionsPage, HistoryStatus, HistoryToolStatus, HISTORY_API_VERSION,
+    HISTORY_ASSISTANT_CONTENT_SOURCE, HISTORY_CAPTURE_SOURCE, LOCAL_ORIGIN,
 };
 pub use lifecycle::{AgentLifecycle, NormalizedStatus};
 pub use plugin::{PluginConfigProperty, PluginHookDefinition, PluginHookMatch, PluginManifest};
@@ -35,10 +43,11 @@ pub use prompt::{
 };
 pub use response::NormalizedResponse;
 pub use rpc::{
-    default_socket_path, is_valid_env_name, normalize_env_names, Decide, DecideScope,
-    EnvRequestedResponse, JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
-    PromptHold, PromptRespondParams, SubscriptionFilter, DEFAULT_UNIX_SOCKET_PATH,
-    DEFAULT_WINDOWS_PIPE_PATH, ENV_AGENT_HOOKS_SOCKET, ENV_REQUESTED_METHOD,
+    default_socket_path, dev_socket_path, is_valid_env_name, normalize_env_names, Decide,
+    DecideScope, EnvRequestedResponse, JsonRpcError, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse, PromptHold, PromptRespondParams, SubscriptionFilter, DEFAULT_UNIX_SOCKET_PATH,
+    DEFAULT_WINDOWS_PIPE_PATH, DEV_UNIX_SOCKET_PREFIX, ENV_AGENT_HOOKS_SOCKET,
+    ENV_REQUESTED_METHOD,
 };
 
 #[cfg(test)]

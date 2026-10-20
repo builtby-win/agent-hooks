@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::error::CoreError;
+use crate::history_recorder::HistoryRecorder;
 use crate::prompt_mediator::PromptMediator;
 use crate::session_tracker::SessionTracker;
 
@@ -49,6 +50,9 @@ pub struct AgentHooksDaemon {
     mediator: Arc<PromptMediator>,
     broadcaster: broadcast::Sender<AgentEvent>,
     enricher: Arc<dyn crate::enricher::EventEnricher>,
+    /// Opt-in durable history of *forwarded* hook observations (events that
+    /// carry an origin label); `None` unless the CLI enabled it explicitly.
+    history: Option<Arc<HistoryRecorder>>,
 }
 
 impl Default for AgentHooksDaemon {
@@ -65,6 +69,7 @@ impl AgentHooksDaemon {
             mediator: Arc::new(PromptMediator::new()),
             broadcaster: tx,
             enricher: Arc::new(crate::enricher::NoopEnricher),
+            history: None,
         }
     }
 
@@ -78,6 +83,7 @@ impl AgentHooksDaemon {
             mediator: Arc::new(PromptMediator::new()),
             broadcaster: tx,
             enricher,
+            history: None,
         }
     }
 
@@ -91,7 +97,24 @@ impl AgentHooksDaemon {
             mediator,
             broadcaster,
             enricher: Arc::new(crate::enricher::NoopEnricher),
+            history: None,
         }
+    }
+
+    /// Record forwarded hook observations (those carrying an origin label)
+    /// through `history`. Local hooks are recorded by the shim itself. The
+    /// recorder is opened by the caller so an unusable store fails before the
+    /// daemon serves anything.
+    pub fn with_history(mut self, history: Arc<HistoryRecorder>) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// Whether this daemon persists forwarded hook observations. Lets a
+    /// supervisor detect a reused daemon started without `--history` (same
+    /// version, no capture) via `status --json` / `ping`.
+    pub fn history_enabled(&self) -> bool {
+        self.history.is_some()
     }
 
     pub fn tracker(&self) -> &Arc<RwLock<SessionTracker>> {
@@ -189,9 +212,10 @@ impl AgentHooksDaemon {
                                 let mediator = self.mediator.clone();
                                 let broadcaster = self.broadcaster.clone();
                                 let enricher = self.enricher.clone();
+                                let history = self.history.clone();
                                 let conn_id = mediator.connect();
                                 tokio::spawn(async move {
-                                    if let Err(e) = handle_unix_connection(stream, tracker, mediator, broadcaster, enricher, conn_id).await {
+                                    if let Err(e) = handle_unix_connection(stream, tracker, mediator, broadcaster, enricher, history, conn_id).await {
                                         debug!(error = %e, "connection handler error");
                                     }
                                 });
@@ -224,6 +248,7 @@ impl AgentHooksDaemon {
                         let mediator = self.mediator.clone();
                         let broadcaster = self.broadcaster.clone();
                         let enricher = self.enricher.clone();
+                        let history = self.history.clone();
                         let conn_id = mediator.connect();
                         tokio::spawn(async move {
                             let _ = handle_unix_connection(
@@ -232,6 +257,7 @@ impl AgentHooksDaemon {
                                 mediator,
                                 broadcaster,
                                 enricher,
+                                history,
                                 conn_id,
                             )
                             .await;
@@ -275,6 +301,7 @@ impl AgentHooksDaemon {
                     let tracker = self.tracker.clone();
                     let broadcaster = self.broadcaster.clone();
                     let enricher = self.enricher.clone();
+                    let history = self.history.clone();
                     let conn_id = mediator.connect();
                     tokio::spawn(async move {
                         if let Err(e) = handle_interprocess_connection(
@@ -283,6 +310,7 @@ impl AgentHooksDaemon {
                             mediator,
                             broadcaster,
                             enricher,
+                            history,
                             conn_id,
                         )
                         .await
@@ -326,17 +354,16 @@ impl AgentHooksDaemon {
         // at serialization (see subscriber_notification).
         let _ = self.broadcaster.send(event.clone());
 
-        match rx {
+        let decision = match rx {
             Some((rx, hold_for)) => {
                 let pid = hold_prompt_id(&event);
                 let interactive = event.is_interactive();
                 debug!(prompt_id = %pid, "blocking hook waiting for decider verdict");
-                Ok(Some(
-                    await_verdict(&self.mediator, pid, rx, hold_for, interactive).await,
-                ))
+                Some(await_verdict(&self.mediator, pid, rx, hold_for, interactive).await)
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+        Ok(decision)
     }
 
     /// Broadcast helper for tests: returns a receiver.
@@ -549,14 +576,15 @@ async fn await_verdict(
     }
 }
 
-/// Subscriber-bound copy of an event: identical except `raw_event` is
-/// stripped. The full raw payload may contain secrets — it stays populated on
-/// the internal `AgentEvent` (tracker `last_event`, local-hook stdin,
-/// tracing) but is NEVER serialized to subscribers: not on live broadcast,
-/// not on replay/backlog, not on any snapshot.
+/// Subscriber-bound copy with the raw payload and internal delivery receipt
+/// stripped. Raw payloads can contain secrets; delivery ids are transport
+/// metadata used only for history deduplication.
 fn subscriber_event(event: &AgentEvent) -> AgentEvent {
     let mut stripped = event.clone();
     stripped.raw_event = None;
+    if let Some(identity) = &mut stripped.history_identity {
+        identity.delivery_id = None;
+    }
     stripped
 }
 
@@ -607,6 +635,7 @@ async fn handle_unix_connection(
     mediator: Arc<PromptMediator>,
     broadcaster: broadcast::Sender<AgentEvent>,
     enricher: Arc<dyn crate::enricher::EventEnricher>,
+    history: Option<Arc<HistoryRecorder>>,
     conn_id: u64,
 ) -> Result<(), CoreError> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -667,7 +696,7 @@ async fn handle_unix_connection(
                             let trimmed = line.trim();
                             if trimmed.is_empty() { continue; }
                             // Client may send further RPCs (e.g., prompt.respond) on same conn.
-                            let response = dispatch_rpc_line(trimmed, &tracker, &mediator, &broadcaster, &mut is_subscribed, &mut filter, &mut sub_rx, conn_id).await;
+                            let response = dispatch_rpc_line(trimmed, &tracker, &mediator, &broadcaster, &mut is_subscribed, &mut filter, &mut sub_rx, conn_id, history.is_some()).await;
                             if let Some(resp) = response {
                                 let mut out = resp;
                                 if !out.ends_with('\n') { out.push('\n'); }
@@ -712,6 +741,7 @@ async fn handle_unix_connection(
             &mut filter,
             &mut sub_rx,
             conn_id,
+            history.is_some(),
         )
         .await?;
 
@@ -726,8 +756,15 @@ async fn handle_unix_connection(
             continue;
         }
         // Not an RPC — treat as hook.
-        let hook_response =
-            handle_hook_line(trimmed, &tracker, &mediator, &broadcaster, &enricher).await;
+        let hook_response = handle_hook_line(
+            trimmed,
+            &tracker,
+            &mediator,
+            &broadcaster,
+            &enricher,
+            &history,
+        )
+        .await;
         let out = hook_response.unwrap_or_else(|| r#"{"decision":"defer"}"#.to_string());
         let mut out_line = out;
         if !out_line.ends_with('\n') {
@@ -780,6 +817,7 @@ async fn try_handle_as_rpc(
     filter: &mut Option<SubscriptionFilter>,
     sub_rx: &mut Option<broadcast::Receiver<AgentEvent>>,
     conn_id: u64,
+    history_enabled: bool,
 ) -> Result<bool, CoreError> {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -804,6 +842,7 @@ async fn try_handle_as_rpc(
         filter,
         sub_rx,
         conn_id,
+        history_enabled,
     )
     .await;
     if let Some(resp) = response {
@@ -833,6 +872,7 @@ async fn handle_interprocess_connection(
     mediator: Arc<PromptMediator>,
     broadcaster: broadcast::Sender<AgentEvent>,
     enricher: Arc<dyn crate::enricher::EventEnricher>,
+    history: Option<Arc<HistoryRecorder>>,
     conn_id: u64,
 ) -> Result<(), CoreError> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -880,7 +920,7 @@ async fn handle_interprocess_connection(
                         Ok(_) => {
                             let trimmed = line.trim();
                             if trimmed.is_empty() { continue; }
-                            let resp = dispatch_rpc_line(trimmed, &tracker, &mediator, &broadcaster, &mut is_subscribed, &mut filter, &mut sub_rx, conn_id).await;
+                            let resp = dispatch_rpc_line(trimmed, &tracker, &mediator, &broadcaster, &mut is_subscribed, &mut filter, &mut sub_rx, conn_id, history.is_some()).await;
                             if let Some(r) = resp {
                                 let mut out = r;
                                 if !out.ends_with('\n') { out.push('\n'); }
@@ -920,6 +960,7 @@ async fn handle_interprocess_connection(
                     &mut filter,
                     &mut sub_rx,
                     conn_id,
+                    history.is_some(),
                 )
                 .await;
                 if let Some(r) = resp {
@@ -943,8 +984,15 @@ async fn handle_interprocess_connection(
             }
         }
 
-        let hook_response =
-            handle_hook_line(trimmed, &tracker, &mediator, &broadcaster, &enricher).await;
+        let hook_response = handle_hook_line(
+            trimmed,
+            &tracker,
+            &mediator,
+            &broadcaster,
+            &enricher,
+            &history,
+        )
+        .await;
         let out = hook_response.unwrap_or_else(|| r#"{"decision":"defer"}"#.to_string());
         let mut out_line = out;
         if !out_line.ends_with('\n') {
@@ -981,6 +1029,7 @@ async fn handle_hook_line(
     mediator: &Arc<PromptMediator>,
     broadcaster: &broadcast::Sender<AgentEvent>,
     enricher: &Arc<dyn crate::enricher::EventEnricher>,
+    history: &Option<Arc<HistoryRecorder>>,
 ) -> Option<String> {
     // Additive-only wire rule: a schema_version mismatch only warns, never drops.
     let line_value = serde_json::from_str::<Value>(line).ok();
@@ -1023,9 +1072,25 @@ async fn handle_hook_line(
     };
     // Preserve shim passthrough for client-side enrichment — daemon never interprets it.
     event.passthrough_env = input.passthrough_env.clone();
-    // Key-wise merge, before the enricher: the enricher can read what the shim
-    // captured and still has the last word on any key it sets itself.
-    if let Some(ext) = shim_extensions {
+    // Shim-side extensions merge key-wise before the enricher (see above).
+    // The delivery id is internal and must not leak to subscribers. An origin
+    // label marks a forwarded event: only those are recorded here, because a
+    // local hook was already recorded by its own shim.
+    let mut history_origin: Option<String> = None;
+    if let Some(mut ext) = shim_extensions {
+        if let Some(delivery_id) = agent_hooks_protocol::hook_line_delivery_id(&ext) {
+            event
+                .history_identity
+                .get_or_insert_with(Default::default)
+                .delivery_id = Some(delivery_id);
+        }
+        ext.remove(agent_hooks_protocol::DELIVERY_ID_EXTENSION);
+        history_origin = ext
+            .get(agent_hooks_protocol::ORIGIN_EXTENSION)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+            .map(str::to_string);
         event.extensions.extend(ext);
     }
     // Consumer enrichment — Back2Vibing's terminal/mux targets, etc. Populates `extensions`.
@@ -1073,6 +1138,12 @@ async fn handle_hook_line(
         t.track_protected(&event, &held);
     }
 
+    // Persisted off the executor, awaited before the broadcast below so a
+    // subscriber reacting to this event always finds it committed; the
+    // verdict never depends on the database.
+    if let (Some(history), Some(origin)) = (history, &history_origin) {
+        history.record(&event, origin).await;
+    }
     // Hold gate events for a decider verdict while one claims them. Opened
     // before the broadcast so the delivered event carries its own `hold`:
     // the decider is told it is being asked and which id to answer, instead
@@ -1085,12 +1156,12 @@ async fn handle_hook_line(
     // at serialization (see subscriber_notification).
     let _ = broadcaster.send(event.clone());
 
-    if let Some((rx, hold_for)) = rx {
+    let response = if let Some((rx, hold_for)) = rx {
         let prompt_id = hold_prompt_id(&event);
         let interactive = event.is_interactive();
         info!(prompt_id = %prompt_id, "awaiting decider verdict");
         let decision = await_verdict(mediator, prompt_id, rx, hold_for, interactive).await;
-        let resp = serde_json::json!({
+        serde_json::json!({
             "decision": if decision.defer { "defer" } else if decision.ask { "ask" } else if decision.allow { "allow" } else { "deny" },
             "allow": decision.allow,
             "ask": decision.ask,
@@ -1101,16 +1172,17 @@ async fn handle_hook_line(
             "suggestion": decision.suggestion,
             "custom_input": decision.custom_input,
             "answers": decision.answers,
-        });
-        return Some(resp.to_string());
-    }
-
-    // Nobody held this event: defer, so the harness proceeds as if no hook
-    // were installed (native dialog on gates). An allow here would approve
-    // every unclaimed gate — on Claude Code PreToolUse that bypasses its
-    // permission checks. The shim renders defer in the harness dialect.
-    Some(serde_json::json!({"decision":"defer"}).to_string())
+        })
+    } else {
+        // Nobody held this event: defer, so the harness proceeds as if no hook
+        // were installed (native dialog on gates). An allow here would approve
+        // every unclaimed gate — on Claude Code PreToolUse that bypasses its
+        // permission checks. The shim renders defer in the harness dialect.
+        serde_json::json!({"decision":"defer"})
+    };
+    Some(response.to_string())
 }
+
 async fn dispatch_rpc_line(
     line: &str,
     tracker: &Arc<RwLock<SessionTracker>>,
@@ -1120,6 +1192,7 @@ async fn dispatch_rpc_line(
     filter: &mut Option<SubscriptionFilter>,
     sub_rx: &mut Option<broadcast::Receiver<AgentEvent>>,
     conn_id: u64,
+    history_enabled: bool,
 ) -> Option<String> {
     // Additive-only wire rule: unknown fields are ignored by serde default on
     // every inbound shape; a schema_version mismatch only warns, never drops.
@@ -1138,12 +1211,17 @@ async fn dispatch_rpc_line(
     let id = req.id.clone();
     match req.method.as_str() {
         "ping" => {
+            // Additive-only: `history_enabled` lets a supervisor detect a
+            // reused daemon started without `--history`. Old clients ignore
+            // unknown fields; old daemons simply omit it (read as false).
             let resp = JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 id,
-                result: Some(
-                    serde_json::json!({"status":"ok","version": env!("CARGO_PKG_VERSION")}),
-                ),
+                result: Some(serde_json::json!({
+                    "status": "ok",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "history_enabled": history_enabled,
+                })),
                 error: None,
             };
             Some(serde_json::to_string(&resp).unwrap_or_default())
@@ -1427,4 +1505,45 @@ fn parse_with_adapters(input: &RawHookInput) -> Result<ParsedEvent, CoreError> {
         context,
     );
     Ok((ev, None, None, None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_hooks_protocol::{AgentLifecycle, EventContext, HistoryIdentity};
+
+    #[test]
+    fn subscribers_receive_native_identity_but_not_internal_delivery_receipts() {
+        let mut event = AgentEvent::new(
+            "omp",
+            "native-session",
+            AgentLifecycle::SessionStart {
+                resume_command: None,
+            },
+            EventContext::default(),
+        );
+        event.raw_event = Some(r#"{"private":"payload"}"#.into());
+        event.history_identity = Some(HistoryIdentity {
+            native_session: true,
+            native_turn_id: Some("native-turn".into()),
+            delivery_id: Some("internal-receipt".into()),
+            ..Default::default()
+        });
+
+        let notification = serde_json::to_value(subscriber_notification(&event)).unwrap();
+        let params = &notification["params"];
+        assert!(params.get("raw_event").is_none_or(Value::is_null));
+        assert!(params["history_identity"].get("delivery_id").is_none());
+        assert_eq!(params["history_identity"]["native_turn_id"], "native-turn");
+        assert_eq!(
+            event
+                .history_identity
+                .as_ref()
+                .unwrap()
+                .delivery_id
+                .as_deref(),
+            Some("internal-receipt"),
+            "internal state must retain the receipt for deduplication"
+        );
+    }
 }

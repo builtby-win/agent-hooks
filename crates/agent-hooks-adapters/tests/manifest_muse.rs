@@ -290,10 +290,7 @@ fn muse_manifest_llm_markers_stopfailure_and_observe() {
             r#"{"hook_event_name":"PostToolBatch","tool_calls":[{"tool_name":"read_file"}],"session_id":"s3","cwd":"/tmp/w"}"#,
         ))
         .expect("parse PostToolBatch");
-    assert!(matches!(
-        batch.lifecycle,
-        AgentLifecycle::PostToolBatch
-    ));
+    assert!(matches!(batch.lifecycle, AgentLifecycle::PostToolBatch));
 
     // Observe events render {} regardless of decision (never a deny shape).
     // Re-parse an observe event first so format_response renders the observe
@@ -301,10 +298,9 @@ fn muse_manifest_llm_markers_stopfailure_and_observe() {
     let _ = adapter
         .parse_event(&make_input("PostToolUse", r#"{"session_id":"s3"}"#))
         .expect("parse PostToolUse");
-    let observe_deny =
-        adapter.format_response(&agent_hooks_protocol::PromptDecision::deny(Some(
-            "ignored".to_string(),
-        )));
+    let observe_deny = adapter.format_response(&agent_hooks_protocol::PromptDecision::deny(Some(
+        "ignored".to_string(),
+    )));
     assert_eq!(observe_deny, serde_json::json!({}));
 }
 
@@ -338,20 +334,14 @@ fn muse_manifest_observe_events_session_identity_and_registry() {
     let interrupt = adapter
         .parse_event(&make_input("Interrupt", r#"{"session_id":"s4"}"#))
         .expect("parse Interrupt");
-    assert!(matches!(
-        interrupt.lifecycle,
-        AgentLifecycle::Interrupt
-    ));
+    assert!(matches!(interrupt.lifecycle, AgentLifecycle::Interrupt));
     let tool_start = adapter
         .parse_event(&make_input(
             "ToolUseStart",
             r#"{"hook_event_name":"ToolUseStart","tool_name":"read_file","tool_input":{"path":"x"},"tool_use_id":"u1","session_id":"s4","cwd":"/tmp/w"}"#,
         ))
         .expect("parse ToolUseStart");
-    assert!(matches!(
-        tool_start.lifecycle,
-        AgentLifecycle::ToolUseStart
-    ));
+    assert!(matches!(tool_start.lifecycle, AgentLifecycle::ToolUseStart));
     assert_eq!(tool_start.status, NormalizedStatus::Running);
 
     // Registry resolves the builtin manifest by id and alias.
@@ -387,7 +377,6 @@ fn muse_manifest_observe_events_session_identity_and_registry() {
     ));
     assert_eq!(fork.session_id, "fork-9");
 }
-
 
 // Muse hook payloads for internal subagents carry no parent marker; the
 // link lives in the parent's session.jsonl (`child_session_id`, record
@@ -429,7 +418,8 @@ fn muse_subagent_parent_resolved_from_session_store() {
     assert_eq!(ev.parent_session_id, None);
 
     // Unknown child: no link record anywhere, so no parent (never invented).
-    let orphan = r#"{"hook_event_name":"SubagentStart","session_id":"deadbeef-0000","cwd":"/tmp/w"}"#;
+    let orphan =
+        r#"{"hook_event_name":"SubagentStart","session_id":"deadbeef-0000","cwd":"/tmp/w"}"#;
     let ev = adapter
         .parse_event(&make_input("SubagentStart", orphan))
         .expect("parse orphan");

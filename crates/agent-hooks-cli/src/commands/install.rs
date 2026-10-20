@@ -1945,14 +1945,25 @@ mod tests {
             "/b/agent-hooks hook claude-code --event Stop --socket /tmp/agent-hooks.sock --origin maintainer@example.invalid"
         );
         // Unset or blank origin adds nothing (idempotent with older installs).
-        let bare = hook_command(Path::new("/b/agent-hooks"), "x", "Stop", None, None, Some("  "), None);
+        let bare = hook_command(
+            Path::new("/b/agent-hooks"),
+            "x",
+            "Stop",
+            None,
+            None,
+            Some("  "),
+            None,
+        );
         assert_eq!(bare, "/b/agent-hooks hook x --event Stop");
         // Anything outside the safe set is quoted as one word.
         assert_eq!(shell_word("a b\"c"), "\"a b\\\"c\"");
         // Plugin assets get the label as a JSON string literal.
         let staged = substitute_install_placeholders(
             "const INSTALL_ORIGIN = \"__AGENT_HOOKS_ORIGIN__\";",
-            StageVars { origin: Some("dev@127.0.0.1"), ..Default::default() },
+            StageVars {
+                origin: Some("dev@127.0.0.1"),
+                ..Default::default()
+            },
         );
         assert_eq!(staged, "const INSTALL_ORIGIN = \"dev@127.0.0.1\";");
     }
@@ -2366,7 +2377,12 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
         assert!(doc["hooks"]["session_start"].is_str());
     }
 
-    fn install_list_toml(manifest: &AdapterManifest, version: &str, target: &Path, ctx: &Ctx) -> usize {
+    fn install_list_toml(
+        manifest: &AdapterManifest,
+        version: &str,
+        target: &Path,
+        ctx: &Ctx,
+    ) -> usize {
         let Some(InstallOp::TomlListHooks {
             create,
             list_key,

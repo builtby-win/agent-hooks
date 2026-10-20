@@ -292,17 +292,10 @@ fn copilot_manifest_pretooluse_installs_and_ask_tools_listed() {
         "permissionRequest installs its hook"
     );
     assert!(
-        !vs
-            .unavailable
-            .iter()
-            .any(|u| u == "PermissionRequest"),
+        !vs.unavailable.iter().any(|u| u == "PermissionRequest"),
         "PermissionRequest is available"
     );
-    let ask_tools: Vec<String> = vs
-        .ask_tools
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect();
+    let ask_tools: Vec<String> = vs.ask_tools.iter().map(|t| t.name().to_string()).collect();
     assert!(ask_tools.contains(&"ask_user".to_string()));
     assert!(ask_tools.contains(&"AskUserQuestion".to_string()));
 }

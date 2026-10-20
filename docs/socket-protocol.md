@@ -184,7 +184,7 @@ Nonempty answers must cover every question exactly once, matched by exact `quest
 
 ### Local hooks: exit codes and `when`/`respond` config
 
-Daemonless local hooks (`~/.agent-hooks.json`, `./.agent-hooks/hooks.json`) run shell commands with the normalized event JSON on stdin and use process exit codes:
+Daemonless local hooks (`~/.agent-hooks/hooks.json`, `<project>/.agent-hooks/hooks.json`) run shell commands with the normalized event JSON on stdin and use process exit codes:
 - exit `0` → allow.
 - exit `2` → deny; trimmed stderr becomes the reason.
 - exit `3` → ask; trimmed stderr becomes the question for the decider.

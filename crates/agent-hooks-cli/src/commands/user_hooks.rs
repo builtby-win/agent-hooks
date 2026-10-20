@@ -1,4 +1,4 @@
-//! Daemonless local hooks: `~/.agent-hooks.json` + `.agent-hooks/hooks.json`.
+//! Daemonless local hooks: `~/.agent-hooks/hooks.json` + `<project>/.agent-hooks/hooks.json`.
 //!
 //! Maps **normalized** lifecycle names (`PreToolUse`, `Stop`, … — see
 //! `AgentLifecycle::name()`) to shell commands the hook shim runs
@@ -224,16 +224,49 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// `~/.agent-hooks.json` (user tier).
+/// `~/.agent-hooks/hooks.json` (user tier).
 pub fn user_config_path() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".agent-hooks.json"))
+    home_dir().map(|h| h.join(".agent-hooks").join("hooks.json"))
 }
 
-/// `./.agent-hooks/hooks.json` (project tier, wins per lifecycle key).
+/// Every `.agent-hooks/` directory from `start` up to the git root,
+/// outermost first (monorepo root, then nested packages). The search never
+/// reaches the home directory, whose `.agent-hooks/` is the user tier, and an
+/// inner repository's git root bounds it.
+fn find_project_dirs(start: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for dir in start.ancestors() {
+        if home == Some(dir) {
+            break;
+        }
+        let candidate = dir.join(".agent-hooks");
+        if candidate.is_dir() {
+            dirs.push(candidate);
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    dirs.reverse();
+    dirs
+}
+
+/// Nearest project `.agent-hooks/` for `start`, or `<start>/.agent-hooks` when
+/// none exists yet (where a new one is created). Writers (`init --project`,
+/// plugin install/enable/disable) target this one.
+pub fn project_dir_in(start: &Path) -> PathBuf {
+    find_project_dirs(start, home_dir().as_deref())
+        .pop()
+        .unwrap_or_else(|| start.join(".agent-hooks"))
+}
+
+fn project_dir() -> Option<PathBuf> {
+    std::env::current_dir().ok().map(|c| project_dir_in(&c))
+}
+
+/// `<project>/.agent-hooks/hooks.json` (project tier, wins per lifecycle key).
 pub fn project_config_path() -> Option<PathBuf> {
-    std::env::current_dir()
-        .ok()
-        .map(|c| c.join(".agent-hooks/hooks.json"))
+    project_dir().map(|d| d.join("hooks.json"))
 }
 
 pub fn global_plugins_dir() -> Option<PathBuf> {
@@ -241,9 +274,7 @@ pub fn global_plugins_dir() -> Option<PathBuf> {
 }
 
 pub fn project_plugins_dir() -> Option<PathBuf> {
-    std::env::current_dir()
-        .ok()
-        .map(|c| c.join(".agent-hooks").join("plugins"))
+    project_dir().map(|d| d.join("plugins"))
 }
 
 fn load_file(
@@ -307,23 +338,51 @@ fn load_file(
     (out, cfg.disabled_plugins)
 }
 
-/// Load user tier, overlay project tier per lifecycle key, and discover plugins.
-/// Never fails — unreadable tiers become warnings, never errors.
-pub fn load_merged(
-    env_policy: &mut EnvCapturePolicy,
-) -> (BTreeMap<String, Vec<UserHookEntry>>, Vec<String>) {
-    let user = user_config_path().map(|p| (p, false));
-    let project = project_config_path().map(|p| (p, true));
-    load_merged_from(
-        user.as_ref().map(|(p, _)| p.as_path()),
-        project.as_ref().map(|(p, _)| p.as_path()),
-        env_policy,
-    )
+/// A later layer's entries run after earlier ones for the same event. The same
+/// handler defined at two levels runs once, so a hook copied into a project
+/// is not doubled.
+fn append_layer(
+    merged: &mut BTreeMap<String, Vec<UserHookEntry>>,
+    layer: BTreeMap<String, Vec<UserHookEntry>>,
+) {
+    for (key, entries) in layer {
+        let slot = merged.entry(key).or_default();
+        for entry in entries {
+            let value = serde_json::to_value(&entry).ok();
+            if !slot.iter().any(|e| serde_json::to_value(e).ok() == value) {
+                slot.push(entry);
+            }
+        }
+    }
 }
 
+/// Load the user tier plus every project layer, and discover plugins. Layers
+/// accumulate — like Claude Code's user/project/local settings — in the order
+/// user, then each `.agent-hooks/` from the git root down to `project_root`
+/// (default: the process cwd; a harness that runs the shim elsewhere passes
+/// the event's cwd). All of an event's entries run; deny beats ask beats
+/// allow. Never fails — unreadable tiers become warnings, never errors.
+pub fn load_merged(
+    env_policy: &mut EnvCapturePolicy,
+    project_root: Option<&Path>,
+) -> (BTreeMap<String, Vec<UserHookEntry>>, Vec<String>) {
+    let root = match project_root {
+        Some(root) => Some(root.to_path_buf()),
+        None => std::env::current_dir().ok(),
+    };
+    let layers: Vec<PathBuf> = root
+        .map(|r| find_project_dirs(&r, home_dir().as_deref()))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| d.join("hooks.json"))
+        .collect();
+    load_merged_from(user_config_path().as_deref(), &layers, env_policy)
+}
+
+/// `project`: project hooks files, outermost first.
 fn load_merged_from(
     user: Option<&Path>,
-    project: Option<&Path>,
+    project: &[PathBuf],
     env_policy: &mut EnvCapturePolicy,
 ) -> (BTreeMap<String, Vec<UserHookEntry>>, Vec<String>) {
     let mut warnings = Vec::new();
@@ -332,22 +391,24 @@ fn load_merged_from(
 
     if let Some(p) = user {
         let (hooks, dis) = load_file(p, &mut warnings, Some(env_policy));
-        merged.extend(hooks);
+        append_layer(&mut merged, hooks);
         disabled_plugins.extend(dis);
     }
-    if let Some(p) = project {
-        // Project wins per lifecycle key, but cannot authorize env capture.
+    for p in project {
+        // Cannot authorize env capture.
         let (hooks, dis) = load_file(p, &mut warnings, None);
-        merged.extend(hooks);
+        append_layer(&mut merged, hooks);
         disabled_plugins.extend(dis);
     }
 
-    // Discover plugins from ~/.agent-hooks/plugins and .agent-hooks/plugins
-    let g_dir = global_plugins_dir();
-    let p_dir = project_plugins_dir();
+    // Discover plugins from ~/.agent-hooks/plugins, then each project layer's
+    // plugins dir (beside its hooks file); a nearer layer overrides by id.
     let mut plugin_mgr = agent_hooks_core::plugin::PluginManager::new();
     plugin_mgr.set_disabled(disabled_plugins);
-    plugin_mgr.discover(g_dir.as_deref(), p_dir.as_deref());
+    plugin_mgr.discover(global_plugins_dir().as_deref(), None);
+    for dir in project.iter().filter_map(|p| p.parent()) {
+        plugin_mgr.load_from_plugins_dir(&dir.join("plugins"), true);
+    }
 
     for (plugin, event_name, hook_def) in plugin_mgr.all_hooks() {
         if let Some(canon) = normalize_key(event_name) {
@@ -974,6 +1035,49 @@ mod tests {
     }
 
     #[test]
+    fn project_dir_search_stops_at_git_root_and_home() {
+        let root = tempfile::TempDir::new().unwrap();
+        let home = root.path().join("home");
+        // home/.agent-hooks is the user tier, never a project.
+        std::fs::create_dir_all(home.join(".agent-hooks")).unwrap();
+        let repo = home.join("repo");
+        let deep = repo.join("src/deep");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        // No project dir anywhere below home: the walk must not return home's.
+        assert!(find_project_dirs(&deep, Some(&home)).is_empty());
+
+        // A repo-root layer and a nested package layer: outermost first.
+        std::fs::create_dir_all(repo.join(".agent-hooks")).unwrap();
+        let pkg = repo.join("packages/web");
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        std::fs::create_dir_all(pkg.join(".agent-hooks")).unwrap();
+        assert_eq!(
+            find_project_dirs(&pkg.join("src"), Some(&home)),
+            [repo.join(".agent-hooks"), pkg.join(".agent-hooks")]
+        );
+        assert_eq!(
+            find_project_dirs(&deep, Some(&home)),
+            [repo.join(".agent-hooks")]
+        );
+
+        // A git root bounds the search: the outer project's dir is not reached
+        // through an inner repository.
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let inner = repo.join("vendor/inner");
+        std::fs::create_dir_all(inner.join(".git")).unwrap();
+        assert!(find_project_dirs(&inner, Some(&home)).is_empty());
+
+        // An `.agent-hooks/` above a repository's git root is outside it.
+        let outer = home.join("outer");
+        std::fs::create_dir_all(outer.join(".agent-hooks")).unwrap();
+        let nested_repo = outer.join("repo2");
+        std::fs::create_dir_all(nested_repo.join("src")).unwrap();
+        std::fs::create_dir_all(nested_repo.join(".git")).unwrap();
+        assert!(find_project_dirs(&nested_repo.join("src"), Some(&home)).is_empty());
+    }
+
+    #[test]
     fn keys_normalize_case_insensitively() {
         assert_eq!(normalize_key("pretooluse"), Some("PreToolUse"));
         assert_eq!(normalize_key("Stop"), Some("Stop"));
@@ -982,7 +1086,7 @@ mod tests {
     }
 
     #[test]
-    fn project_tier_wins_per_key() {
+    fn project_tier_adds_to_user_tier_per_event() {
         let dir = std::env::temp_dir().join(format!(
             "agent-hooks-usertest-{}-{}",
             std::process::id(),
@@ -1006,13 +1110,46 @@ mod tests {
         .unwrap();
         let (merged, warnings) = load_merged_from(
             Some(&user),
-            Some(&project),
+            &[project.clone()],
             &mut EnvCapturePolicy::default(),
         );
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(merged["PreToolUse"][0].command, "project-cmd");
+        let pre: Vec<&str> = merged["PreToolUse"].iter().map(|e| e.command.as_str()).collect();
+        assert_eq!(pre, ["user-cmd", "project-cmd"]);
         assert_eq!(merged["Stop"][0].command, "user-stop");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Monorepo layering: global, repo root and nested package all contribute.
+    #[test]
+    fn layers_accumulate_in_order_and_identical_handlers_run_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        let user = write(
+            "user.json",
+            r#"{"version":1,"hooks":{"Stop":[{"command":"user-stop"},{"command":"shared"}],"SessionStart":[{"command":"user-start"}]}}"#,
+        );
+        let root = write(
+            "root.json",
+            r#"{"version":1,"hooks":{"Stop":[{"command":"root-stop"},{"command":"shared"}]}}"#,
+        );
+        let pkg = write(
+            "pkg.json",
+            r#"{"version":1,"hooks":{"Stop":[{"command":"pkg-stop"}]}}"#,
+        );
+        let (merged, warnings) = load_merged_from(
+            Some(&user),
+            &[root, pkg],
+            &mut EnvCapturePolicy::default(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let stops: Vec<&str> = merged["Stop"].iter().map(|e| e.command.as_str()).collect();
+        assert_eq!(stops, ["user-stop", "shared", "root-stop", "pkg-stop"]);
+        assert_eq!(merged["SessionStart"][0].command, "user-start");
     }
 
     #[test]
@@ -1023,7 +1160,7 @@ mod tests {
         std::fs::write(&user, r#"{"version":1,"passthrough_env":["USER_ALWAYS"],"allowed_passthrough_env":["USER_REQUESTED"]}"#).unwrap();
         std::fs::write(&project, r#"{"version":1,"passthrough_env":["PROJECT_SECRET"],"allowed_passthrough_env":["PROJECT_REQUESTED"]}"#).unwrap();
         let mut policy = EnvCapturePolicy::default();
-        let (_, warnings) = load_merged_from(Some(&user), Some(&project), &mut policy);
+        let (_, warnings) = load_merged_from(Some(&user), &[project.clone()], &mut policy);
         assert_eq!(policy.always, ["USER_ALWAYS"]);
         assert!(
             warnings
@@ -1054,12 +1191,12 @@ mod tests {
             r#"{"version":1,"hooks":{"Bogus":[{"command":"x"}]}}"#,
         )
         .unwrap();
-        let (m1, w1) = load_merged_from(Some(&bad_json), None, &mut EnvCapturePolicy::default());
-        let (m2, w2) = load_merged_from(Some(&bad_version), None, &mut EnvCapturePolicy::default());
-        let (m3, w3) = load_merged_from(Some(&bad_key), None, &mut EnvCapturePolicy::default());
+        let (m1, w1) = load_merged_from(Some(&bad_json), &[], &mut EnvCapturePolicy::default());
+        let (m2, w2) = load_merged_from(Some(&bad_version), &[], &mut EnvCapturePolicy::default());
+        let (m3, w3) = load_merged_from(Some(&bad_key), &[], &mut EnvCapturePolicy::default());
         let (m4, w4) = load_merged_from(
             Some(&dir.join("missing.json")),
-            None,
+            &[],
             &mut EnvCapturePolicy::default(),
         );
         assert!(m1.is_empty() && w1.len() == 1);
@@ -1907,10 +2044,8 @@ pub fn cmd_init(args: InitArgs) -> anyhow::Result<()> {
     if dest.exists() {
         anyhow::bail!("{} already exists — refusing to overwrite", dest.display());
     }
-    if args.project {
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&dest, format!("{}\n", scaffold_json()))?;
     println!("wrote {}", dest.display());

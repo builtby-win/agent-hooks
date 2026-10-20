@@ -20,7 +20,7 @@ flowchart LR
     class AH core
 ```
 
-You do **not** need the daemon to get value. The fast path is daemonless local hooks (`~/.agent-hooks.json`) — same file works across all 19 harnesses. Add the daemon when you want live policy, cross-harness session tracking, or app subscriptions.
+You do **not** need the daemon to get value. The fast path is daemonless local hooks (`~/.agent-hooks/hooks.json`) — same file works across all 19 harnesses. Add the daemon when you want live policy, cross-harness session tracking, or app subscriptions.
 
 ---
 
@@ -195,7 +195,7 @@ A crates.io install (`cargo install agent-hooks-cli`) will be available after th
 This is the recommended first run. No background process, no socket, works on every harness.
 
 ```bash
-agent-hooks init                  # scaffold ~/.agent-hooks.json
+agent-hooks init                  # scaffold ~/.agent-hooks/hooks.json
 agent-hooks install --harness all # register the shim in every harness config
 ```
 
@@ -213,7 +213,7 @@ agent-hooks install --harness all # register the shim in every harness config
 
 Every hook invocation pipes the normalized `AgentEvent` JSON (session id, tool name/args, context) to your script's stdin, with `AGENT_HOOKS_EVENT` / `AGENT_HOOKS_SESSION` / `AGENT_HOOKS_HARNESS` in the environment. Script protocol: exit `0` = allow, `2` = deny (stderr = reason), `3` = ask (stderr = question); anything else, a timeout, or a missing binary = fail-open allow with a stderr warning. Merge precedence is deny > ask > allow. Full contract in [Local hooks reference](#local-hooks-reference).
 
-Per-project overrides: `agent-hooks init --project` scaffolds `./.agent-hooks/hooks.json`, which wins per event over `~/.agent-hooks.json`.
+Per-project hooks: `agent-hooks init --project` scaffolds `./.agent-hooks/hooks.json`. Project hooks add to `~/.agent-hooks/hooks.json` rather than replacing it: both run for an event. The shim finds the project from the session's working directory (the one the harness reports, else its own) and includes every `.agent-hooks/` up to the git root, so monorepo roots and nested packages all apply.
 
 Then do real work in your agent. To confirm the shim is firing without involving any harness:
 
@@ -356,7 +356,7 @@ Default directory: `$AGENT_HOOKS_HISTORY_DIR`, else `~/.agent-hooks/history` (`h
 
 - **Off by default.** Only `history init` creates the store; a plain `hook` or `daemon` never does. Capture is done by the `hook` shim itself: once the store exists, every hook writes its own entry. No daemon is involved, so history is complete even when the daemon is down or was never started. The shim finds the store at the default location or `$AGENT_HOOKS_HISTORY_DIR` (set it in the agent's environment; `--history-dir` applies only to `history` subcommands).
 - **Remote machines.** A remote shim writes to the *remote* machine's own store (if it has one). To land a remote machine's history on this one, install the remote hooks with `--origin <label>`, forward the daemon socket to the remote (e.g. `ssh -R`), and run `agent-hooks daemon --history` here. The daemon records only events that carry an origin label, because local hooks were already recorded by their own shim; it fails at startup if the store is missing, and nothing is recorded while the daemon is down. Query with `--origin <label>`.
-- **What is stored:** each complete `UserPromptSubmit` prompt, the entire normalized `Stop.summary` as an `assistant` entry (`assistant_content_source: "stop_summary"`), and tool entries: name, call id, status (running/completed/failed), the compact-JSON tool input, and the tool output or error string the adapter normalized from the post-tool hook (a harness may supply only a preview; the store never invents more). Antigravity's adapter reads the latest completed `MODEL`/`PLANNER_RESPONSE` from the current turn in `transcriptPath` before falling back to its termination reason; it never reuses a previous turn's reply. Transcript lookup scans at most the last 1 MiB and falls back when no complete reply is found. Other harnesses may supply only a summary, not the full native reply. Env, raw payloads and the rest of the event are never stored. Captured nonblank text is never truncated or capped, however large.
+- **What is stored:** each complete `UserPromptSubmit` prompt, normalized `TurnEnd.assistant_message` or `Stop.summary` text as an `assistant` entry (`assistant_content_source: "assistant_text"`), and tool entries: name, call id, status (running/completed/failed), the compact-JSON tool input, and the tool output or error string the adapter normalized from the post-tool hook (a harness may supply only a preview; the store never invents more). OMP and Pi capture identified assistant replies at turn end, even while background jobs keep the run busy; a later Stop with the same native message identity updates that entry rather than duplicating it. Antigravity's adapter reads the latest completed `MODEL`/`PLANNER_RESPONSE` from the current turn in `transcriptPath` before falling back to its termination reason; it never reuses a previous turn's reply. Transcript lookup scans at most the last 1 MiB and falls back when no complete reply is found. Other harnesses may supply only a summary, not the full native reply. Env, raw payloads and the rest of the event are never stored. Captured nonblank text is never truncated or capped, however large.
 - **OpenCode V2.** The prompt hook records submitted user text. After a successful execution, the plugin reads the session context and stores the latest assistant text as the `Stop.summary`; reasoning and tool blocks are not treated as assistant prose.
 - **Tool phases stay separate.** A tool entry (`kind: "tool"`) reports `tool_input` (the running/pre-call observation) and `tool_output` (the terminal completed/failed observation) as independent exact strings; either is absent until observed and they are never concatenated. Repeated hooks for the same native tool call update one entry rather than adding rows, and an exact redelivery of one hook is a no-op. Entries recorded by schema v1 kept a single combined tool `text` whose input/output boundary was not recorded; the upgrade preserves that string verbatim in `text` on those old tool entries and does not guess a split. Only pre-upgrade tool entries have tool `text`; user/assistant entries use `text`.
 - **Secrets, compression, no retention limit.** Prompts, summaries and tool inputs/outputs can contain secrets. Access is restricted to the owning user (directory 0700, files 0600), but the data is **not encrypted**: values over 1 KiB are transparently compressed with lossless zstd, only when smaller, purely to save space, and compression is not encryption. Query output is byte-identical to what was captured. There is no retention limit. Remove the history by deleting the directory.
@@ -399,7 +399,7 @@ loop {
 
 ## Local hooks reference
 
-Files: `~/.agent-hooks.json` (user tier), `./.agent-hooks/hooks.json` (project tier, wins **per event**). `AGENT_HOOKS_NO_LOCAL=1` skips local dispatch entirely (escape hatch for benchmarking or debugging the daemon path).
+Files: `~/.agent-hooks/hooks.json` (user tier) and `.agent-hooks/hooks.json` in the session's project (project tier). Tiers **accumulate**, as in Claude Code's user/project/local settings: for each event the entries run user first, then each project layer from the git root down to the session's directory, all in parallel, with deny > ask > allow. A handler defined identically at two levels runs once. A project layer is any `.agent-hooks/` directory from the session's working directory up to the git root — so a monorepo root and a nested package can both contribute — and the search never includes `~`, whose `.agent-hooks/` is the user tier. `AGENT_HOOKS_NO_LOCAL=1` skips local dispatch entirely (escape hatch for benchmarking or debugging the daemon path).
 
 Schema (`deny_unknown_fields` — typos are hard errors, check stderr):
 

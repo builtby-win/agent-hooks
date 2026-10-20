@@ -173,6 +173,7 @@
         "success": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
         "cwd": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
         "summary": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" } },
+        "assistant_message": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" }, "description": "Ordered payload paths for a turn's printed assistant reply (e.g. last_assistant_message). Dedicated field: never falls back to summary. Also supported in extraction_overrides per hook." },
         "session_title": { "type": "array", "items": { "$ref": "#/$defs/ExtractionSource" }, "description": "Harness-pushed session title. Missing or blank titles leave the stored title unchanged." },
         "message_id": { "type": "array", "items": { "type": "string" }, "description": "Ordered payload paths for the native message id; transcript and session-link sources are not used." },
         "tool_call_id": { "type": "array", "items": { "type": "string" }, "description": "Ordered payload paths for the native tool call id, used to pair tool phases." },

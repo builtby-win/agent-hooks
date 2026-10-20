@@ -194,7 +194,7 @@ Setup (no harness needed for O/F rows — the real shim, no daemon):
 MX=$WORK/matrix; mkdir -p $MX
 Q='{"sessionID":"mx1","requestID":"req-mx1","questions":[{"id":"q0","question":"Pick a color","options":[{"label":"Red"},{"label":"Blue"}]},{"id":"q1","question":"Name it","options":[{"label":"my-app"}]}]}'
 qhook() { printf '%s' "$Q" | HOME=$MX timeout 30 $AH hook opencode --event question.asked --socket $MX/none.sock; }
-# per row: write $MX/.agent-hooks.json, run qhook, assert stdout JSON (stderr carries the daemon-unreachable note + deny reasons)
+# per row: write $MX/.agent-hooks/hooks.json (mkdir -p first), run qhook, assert stdout JSON (stderr carries the daemon-unreachable note + deny reasons)
 ```
 
 | # | Case | Drive | Assert |

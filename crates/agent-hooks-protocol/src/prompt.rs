@@ -250,7 +250,7 @@ impl PromptDecision {
     /// Validate this decision against the questions of the prompt it
     /// answers and return the canonical form to deliver.
     ///
-    /// Every consumer (daemon mediator, offline `~/.agent-hooks.json`
+    /// Every consumer (daemon mediator, offline `~/.agent-hooks/hooks.json`
     /// respond, command stdout) calls this instead of re-implementing
     /// matching, so an answer means the same thing everywhere.
     ///

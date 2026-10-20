@@ -93,10 +93,8 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
     // We only forward opaque env vars so the consumer can resolve lazily
     // without adding latency to the <2ms shim.
     let mut env_policy = super::user_hooks::EnvCapturePolicy::default();
-    let (merged_cfg, cfg_warnings) = super::user_hooks::load_merged(&mut env_policy);
-    for warning in &cfg_warnings {
-        eprintln!("agent-hooks: {warning}");
-    }
+    let (mut merged_cfg, mut cfg_warnings) =
+        super::user_hooks::load_merged(&mut env_policy, None);
     let requested = requested_env_names(args.socket.as_deref());
     let context = capture_context();
     let mut passthrough_env = capture_passthrough_env();
@@ -135,8 +133,24 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
     }
     let event = parsed.and_then(|r| r.ok());
 
-    // 4. Deterministic local hooks from ~/.agent-hooks.json overlaid with
-    //    .agent-hooks/hooks.json — no daemon required. Config warnings go
+    // The project tier belongs to the session's project, which the payload
+    // names; the shim's own cwd is only that project when the harness spawns
+    // it from there (OpenCode's shared service does not). Reload from the
+    // event's cwd when it points elsewhere.
+    if let Some(root) = event
+        .as_ref()
+        .and_then(|e| e.context.cwd.as_deref())
+        .filter(|root| !same_dir(root, std::env::current_dir().ok().as_deref()))
+    {
+        (merged_cfg, cfg_warnings) =
+            super::user_hooks::load_merged(&mut Default::default(), Some(root));
+    }
+    for warning in &cfg_warnings {
+        eprintln!("agent-hooks: {warning}");
+    }
+
+    // 4. Deterministic local hooks from ~/.agent-hooks/hooks.json overlaid with
+    //    the project's .agent-hooks/hooks.json — no daemon required. Config warnings go
     //    to stderr but never fail the agent.
     // One budget for the whole event, taken from what this harness says it
     // will wait for this hook. Local scripts spend from it first, then the
@@ -630,6 +644,19 @@ fn write_capture_fixture(dir: &Path, harness: &str, event: Option<&str>, payload
         std::fs::write(dir.join(format!("{harness}-{event}-{unixts}.json")), text)?;
         Ok(())
     })();
+}
+
+/// True when `a` and `b` are the same directory (symlinks such as macOS
+/// `/tmp` -> `/private/tmp` resolved). Unknown `b` is never the same.
+fn same_dir(a: &Path, b: Option<&Path>) -> bool {
+    let Some(b) = b else {
+        return false;
+    };
+    a == b
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(x), Ok(y)) if x == y
+        )
 }
 
 fn capture_context() -> EventContext {

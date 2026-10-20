@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-hooks-adapters"
-version = "0.10.1"
+version = "0.11.1"
 dependencies = [
  "agent-hooks-protocol",
  "async-trait",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "agent-hooks-cli"
-version = "0.10.1"
+version = "0.11.1"
 dependencies = [
  "agent-hooks-adapters",
  "agent-hooks-client",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "agent-hooks-client"
-version = "0.10.1"
+version = "0.11.1"
 dependencies = [
  "agent-hooks-adapters",
  "agent-hooks-core",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "agent-hooks-core"
-version = "0.10.1"
+version = "0.11.1"
 dependencies = [
  "agent-hooks-adapters",
  "agent-hooks-history",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "agent-hooks-history"
-version = "0.10.1"
+version = "0.11.1"
 dependencies = [
  "agent-hooks-protocol",
  "rusqlite",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "agent-hooks-protocol"
-version = "0.10.1"
+version = "0.11.1"
 dependencies = [
  "chrono",
  "serde",

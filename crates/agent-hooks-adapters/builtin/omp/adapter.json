@@ -38,6 +38,7 @@
         "models": {"argv": ["omp", "models", "--json"], "id_fields": ["id", "selector"]},
         "model_args": ["--model={model}"]
       },
+      "verified_against": "18.12.3",
       "install": [
         {
           "op": "stage_assets",

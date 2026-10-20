@@ -65,7 +65,7 @@ Source of truth: `crates/agent-hooks-adapters/builtin/*/adapter.json`. `agent-ho
 | Kiro | `kiro` (`kiro-cli`, `kiro_cli`) | `~/.kiro/agents/agent-hooks.json`, `~/.kiro/settings/cli.json` | `json_hooks, flat`; `json_edit` | Verified |
 | Mistral Vibe | `mistral-vibe` (`mistral`, `vibe`, `mistral-vibe-cli`, `vibe-code`) | `~/.vibe/hooks.toml`, `.vibe/hooks.toml` | `toml_list_hooks` | Docs-only |
 | Muse | `muse` (`muse-code`, `muse-cli`) | `~/.config/muse/settings.json`, `.muse/hooks.json` | `json_hooks, matcher_group` | Verified (1.4.7) |
-| Oh My Pi | `omp` (`oh-my-pi`, `oh_my_pi`) | `$XDG_DATA_HOME/agent-hooks/plugins/oh-my-pi` | `stage_assets`; `run_command` | Verified |
+| Oh My Pi | `omp` (`oh-my-pi`, `oh_my_pi`) | `$XDG_DATA_HOME/agent-hooks/plugins/oh-my-pi` | `stage_assets`; `run_command` | Verified (18.12.3) |
 | OpenCode | `opencode` (`opencode-ai`) | `~/.config/opencode/plugins` | `stage_assets` | Verified |
 | Pi | `pi` (`pi-agent`, `pi_agent`) | `~/.pi/agent/extensions` | `stage_assets` | Verified |
 | Qoder | `qoder` (`qoder-cli`, `qoder_cli`) | `~/.qoder/settings.json`, `.qoder/settings.json`, `.qoder/settings.local.json` | `json_hooks, matcher_group` | Docs-only |

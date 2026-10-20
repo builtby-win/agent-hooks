@@ -53,7 +53,7 @@ pub enum Commands {
     /// Validate or send canonical answers, or open an interactive decider
     Answer(AnswerArgs),
 
-    /// Scaffold ~/.agent-hooks.json for daemonless local hooks
+    /// Scaffold ~/.agent-hooks/hooks.json for daemonless local hooks
     Init(InitArgs),
 
     /// Manage agent-hooks plugins (install, uninstall, list, enable, disable, validate)
@@ -116,7 +116,7 @@ pub struct AnswerArgs {
 ///
 /// Reads payload from stdin (preferred) or trailing argv, captures
 /// TTY/CWD/TMUX/SSH context, runs daemonless local hooks from
-/// ~/.agent-hooks.json, forwards a `RawHookInput` to the daemon
+/// ~/.agent-hooks/hooks.json, forwards a `RawHookInput` to the daemon
 /// over the Unix socket, and prints the merged decision to stdout.
 ///
 /// If the daemon is unreachable the local decision stands (allow when no
@@ -451,7 +451,7 @@ pub struct AdapterListArgs {
 
 #[derive(Parser, Debug)]
 pub struct InitArgs {
-    /// Write ./.agent-hooks/hooks.json (project tier) instead of ~/.agent-hooks.json
+    /// Write ./.agent-hooks/hooks.json (project tier) instead of ~/.agent-hooks/hooks.json
     #[arg(long)]
     pub project: bool,
 }

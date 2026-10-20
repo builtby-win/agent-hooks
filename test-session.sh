@@ -88,7 +88,8 @@ kill $SPID 2>/dev/null; wait $SPID 2>/dev/null
 
 echo; echo "T5  local hooks: parallel + budget-capped + order-deterministic"
 D=$(mktemp -d)
-cat > "$D/.agent-hooks.json" <<'JSON'
+mkdir -p "$D/.agent-hooks"
+cat > "$D/.agent-hooks/hooks.json" <<'JSON'
 {"version":1,"hooks":{"PreToolUse":[
   {"command":"sleep 2","timeout":10},
   {"command":"sleep 2","timeout":10},
@@ -100,7 +101,7 @@ SEC=$(( ($(date +%s%N) - S) / 1000000000 ))
 [ "$SEC" -le 4 ] && ok "3x 'sleep 2' ran concurrently (${SEC}s, sequential would be 6s)" \
   || bad "local hooks not parallel" "${SEC}s"
 
-cat > "$D/.agent-hooks.json" <<'JSON'
+cat > "$D/.agent-hooks/hooks.json" <<'JSON'
 {"version":1,"hooks":{"PreToolUse":[
   {"command":"sleep 1; echo FIRST >&2; exit 2","timeout":10},
   {"command":"echo SECOND >&2; exit 2","timeout":10}]}}

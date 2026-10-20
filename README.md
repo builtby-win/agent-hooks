@@ -20,7 +20,7 @@ flowchart LR
     class AH core
 ```
 
-You do **not** need the daemon to get value. The fast path is daemonless local hooks (`~/.agent-hooks.json`) — same file works across all 19 harnesses. Add the daemon when you want live policy, cross-harness session tracking, or app subscriptions.
+You do **not** need the daemon to get value. The fast path is daemonless local hooks (`~/.agent-hooks/hooks.json`) — same file works across all 19 harnesses. Add the daemon when you want live policy, cross-harness session tracking, or app subscriptions.
 
 ---
 
@@ -195,7 +195,7 @@ A crates.io install (`cargo install agent-hooks-cli`) will be available after th
 This is the recommended first run. No background process, no socket, works on every harness.
 
 ```bash
-agent-hooks init                  # scaffold ~/.agent-hooks.json
+agent-hooks init                  # scaffold ~/.agent-hooks/hooks.json
 agent-hooks install --harness all # register the shim in every harness config
 ```
 
@@ -213,7 +213,7 @@ agent-hooks install --harness all # register the shim in every harness config
 
 Every hook invocation pipes the normalized `AgentEvent` JSON (session id, tool name/args, context) to your script's stdin, with `AGENT_HOOKS_EVENT` / `AGENT_HOOKS_SESSION` / `AGENT_HOOKS_HARNESS` in the environment. Script protocol: exit `0` = allow, `2` = deny (stderr = reason), `3` = ask (stderr = question); anything else, a timeout, or a missing binary = fail-open allow with a stderr warning. Merge precedence is deny > ask > allow. Full contract in [Local hooks reference](#local-hooks-reference).
 
-Per-project overrides: `agent-hooks init --project` scaffolds `./.agent-hooks/hooks.json`, which wins per event over `~/.agent-hooks.json`.
+Per-project hooks: `agent-hooks init --project` scaffolds `./.agent-hooks/hooks.json`. Project hooks add to `~/.agent-hooks/hooks.json` rather than replacing it: both run for an event. The shim finds the project from the session's working directory (the one the harness reports, else its own) and includes every `.agent-hooks/` up to the git root, so monorepo roots and nested packages all apply.
 
 Then do real work in your agent. To confirm the shim is firing without involving any harness:
 
@@ -399,7 +399,7 @@ loop {
 
 ## Local hooks reference
 
-Files: `~/.agent-hooks.json` (user tier), `./.agent-hooks/hooks.json` (project tier, wins **per event**). `AGENT_HOOKS_NO_LOCAL=1` skips local dispatch entirely (escape hatch for benchmarking or debugging the daemon path).
+Files: `~/.agent-hooks/hooks.json` (user tier) and `.agent-hooks/hooks.json` in the session's project (project tier). Tiers **accumulate**, as in Claude Code's user/project/local settings: for each event the entries run user first, then each project layer from the git root down to the session's directory, all in parallel, with deny > ask > allow. A handler defined identically at two levels runs once. A project layer is any `.agent-hooks/` directory from the session's working directory up to the git root — so a monorepo root and a nested package can both contribute — and the search never includes `~`, whose `.agent-hooks/` is the user tier. `AGENT_HOOKS_NO_LOCAL=1` skips local dispatch entirely (escape hatch for benchmarking or debugging the daemon path).
 
 Schema (`deny_unknown_fields` — typos are hard errors, check stderr):
 

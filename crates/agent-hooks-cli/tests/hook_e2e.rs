@@ -1,4 +1,4 @@
-//! Black-box proof that ~/.agent-hooks.json answers as a decider: runs the
+//! Black-box proof that ~/.agent-hooks/hooks.json answers as a decider: runs the
 //! REAL `agent-hooks hook` binary with an isolated HOME (user tier), an
 //! isolated cwd (project tier), and an optional in-process daemon, asserting
 //! the rendered harness-dialect stdout.
@@ -24,6 +24,8 @@ fn bin() -> PathBuf {
 }
 
 fn write(path: &Path, content: &str) {
+    std::fs::create_dir_all(path.parent().expect("fixture path has a parent"))
+        .expect("create fixture dir");
     std::fs::write(path, content).expect("write fixture file");
 }
 
@@ -68,7 +70,7 @@ fn blue_config() -> String {
 fn daemonless_blue_auto_answer_renders_allow() {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = tempfile::TempDir::new().unwrap();
-    write(&home.path().join(".agent-hooks.json"), &blue_config());
+    write(&home.path().join(".agent-hooks/hooks.json"), &blue_config());
     // Socket that nothing listens on: local decision must stand alone.
     let dead = home.path().join("no-daemon.sock");
 
@@ -89,10 +91,10 @@ fn daemonless_blue_auto_answer_renders_allow() {
 }
 
 #[test]
-fn project_tier_overrides_user_tier() {
+fn project_deny_beats_user_allow() {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = tempfile::TempDir::new().unwrap();
-    write(&home.path().join(".agent-hooks.json"), &blue_config());
+    write(&home.path().join(".agent-hooks/hooks.json"), &blue_config());
     std::fs::create_dir(cwd.path().join(".agent-hooks")).unwrap();
     write(
         &cwd.path().join(".agent-hooks/hooks.json"),
@@ -109,12 +111,119 @@ fn project_tier_overrides_user_tier() {
     );
 }
 
+/// The project tier follows the session's project (the payload's cwd), not the
+/// shim's own cwd: OpenCode's shared service spawns the shim from wherever it
+/// was started.
+#[test]
+fn project_tier_follows_payload_cwd_not_process_cwd() {
+    let home = tempfile::TempDir::new().unwrap();
+    let elsewhere = tempfile::TempDir::new().unwrap();
+    let project = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(project.path().join(".agent-hooks")).unwrap();
+    write(
+        &project.path().join(".agent-hooks/hooks.json"),
+        r#"{"version": 1, "hooks": {"PreToolUse": [
+          {"when": {"tool": "Bash"}, "respond": {"allow": false, "custom_input": "project policy"}}
+        ]}}"#,
+    );
+    let dead = home.path().join("no-daemon.sock");
+    let hook = |payload_cwd: &Path| {
+        let payload = serde_json::json!({
+            "sessionID": "ses-cwd", "toolName": "Bash", "args": {"command": "ls"},
+            "cwd": payload_cwd,
+        });
+        run_hook_full(
+            home.path(),
+            elsewhere.path(),
+            "opencode",
+            "tool.execute.before",
+            &dead,
+            payload.to_string().as_bytes(),
+        )
+    };
+
+    let in_project = hook(project.path());
+    assert!(
+        String::from_utf8_lossy(&in_project.stdout).contains("project policy"),
+        "project policy must apply: {:?}",
+        String::from_utf8_lossy(&in_project.stdout),
+    );
+    let outside = hook(elsewhere.path());
+    assert!(
+        !String::from_utf8_lossy(&outside.stdout).contains("project policy"),
+        "another project must not inherit it"
+    );
+}
+
+/// Monorepo: user tier, repo root and nested package hooks for the same event
+/// all run (they accumulate); none replaces another.
+#[test]
+fn user_root_and_nested_hooks_for_one_event_all_run() {
+    let home = tempfile::TempDir::new().unwrap();
+    let repo = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(repo.path().join(".git")).unwrap();
+    let pkg = repo.path().join("packages/web");
+    let cwd = pkg.join("src");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let marks = tempfile::TempDir::new().unwrap();
+    let hook_cfg = |name: &str| {
+        format!(
+            r#"{{"version": 1, "hooks": {{"PreToolUse": [{{"command": "touch {}"}}]}}}}"#,
+            marks.path().join(name).display()
+        )
+    };
+    write(&home.path().join(".agent-hooks/hooks.json"), &hook_cfg("user"));
+    write(&repo.path().join(".agent-hooks/hooks.json"), &hook_cfg("root"));
+    write(&pkg.join(".agent-hooks/hooks.json"), &hook_cfg("pkg"));
+    let dead = home.path().join("no-daemon.sock");
+
+    run_hook(home.path(), &cwd, &dead, BASH_PAYLOAD);
+    for name in ["user", "root", "pkg"] {
+        assert!(marks.path().join(name).exists(), "{name} hook must run");
+    }
+}
+
+/// An agent working in `repo/src/deep` still gets `repo/.agent-hooks/hooks.json`.
+#[test]
+fn project_tier_found_from_subdirectory() {
+    let home = tempfile::TempDir::new().unwrap();
+    let repo = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(repo.path().join(".git")).unwrap();
+    write(
+        &repo.path().join(".agent-hooks/hooks.json"),
+        r#"{"version": 1, "hooks": {"PreToolUse": [
+          {"when": {"tool": "Bash"}, "respond": {"allow": false, "custom_input": "repo policy"}}
+        ]}}"#,
+    );
+    let deep = repo.path().join("src/deep");
+    std::fs::create_dir_all(&deep).unwrap();
+    let dead = home.path().join("no-daemon.sock");
+
+    let v = run_hook(home.path(), &deep, &dead, BASH_PAYLOAD);
+    assert_eq!(
+        v,
+        serde_json::json!({"decision": "deny", "reason": "repo policy"})
+    );
+}
+
+/// The pre-rename `~/.agent-hooks.json` is no longer read.
+#[test]
+fn legacy_home_file_is_ignored() {
+    let home = tempfile::TempDir::new().unwrap();
+    let cwd = tempfile::TempDir::new().unwrap();
+    write(&home.path().join(".agent-hooks.json"), &blue_config());
+    let dead = home.path().join("no-daemon.sock");
+
+    let v = run_hook(home.path(), cwd.path(), &dead, BASH_PAYLOAD);
+    assert_eq!(v, serde_json::json!({}));
+}
+
 #[test]
 fn amp_tool_call_obeys_pre_tool_command_policy() {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = tempfile::TempDir::new().unwrap();
     write(
-        &home.path().join(".agent-hooks.json"),
+        &home.path().join(".agent-hooks/hooks.json"),
         r#"{"version":1,"hooks":{"PreToolUse":[
             {"when":{"prompt_matches":"policy-marker"},"respond":{"allow":false,"custom_input":"blocked command"}}
         ]}}"#,
@@ -163,7 +272,7 @@ fn command_stdout_canonical_decision_answers_like_respond() {
         ..PromptDecision::allow()
     };
     write(
-        &home.path().join(".agent-hooks.json"),
+        &home.path().join(".agent-hooks/hooks.json"),
         &command_config(
             "ask",
             &format!("printf '%s' '{}'", serde_json::to_string(&verdict).unwrap()),
@@ -188,7 +297,7 @@ fn command_stdout_invalid_answer_fails_closed() {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = tempfile::TempDir::new().unwrap();
     write(
-        &home.path().join(".agent-hooks.json"),
+        &home.path().join(".agent-hooks/hooks.json"),
         &command_config(
             "ask",
             r#"printf '%s' '{"allow":true,"answers":[{"question_id":"favorite_color","selected_options":["Green"]}]}'"#,
@@ -212,7 +321,7 @@ fn command_exit_code_beats_stdout_allow() {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = tempfile::TempDir::new().unwrap();
     write(
-        &home.path().join(".agent-hooks.json"),
+        &home.path().join(".agent-hooks/hooks.json"),
         &command_config(
             "Bash",
             r#"printf '%s' '{"allow":true}'; echo vetoed >&2; exit 2"#,
@@ -231,7 +340,7 @@ fn command_exit_code_beats_stdout_allow() {
 async fn daemon_deny_beats_local_allow() {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = tempfile::TempDir::new().unwrap();
-    write(&home.path().join(".agent-hooks.json"), &blue_config());
+    write(&home.path().join(".agent-hooks/hooks.json"), &blue_config());
     let socket = home.path().join("e2e.sock");
 
     let daemon = AgentHooksDaemon::new();
@@ -295,7 +404,7 @@ async fn local_ask_survives_daemon_allow() {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = tempfile::TempDir::new().unwrap();
     write(
-        &home.path().join(".agent-hooks.json"),
+        &home.path().join(".agent-hooks/hooks.json"),
         r#"{"version": 1, "hooks": {"PreToolUse": [
           {"when": {"tool": "Bash"}, "respond": {"allow": false, "ask": true, "custom_input": "sure about this?"}}
         ]}}"#,
@@ -498,7 +607,7 @@ fn unknown_event_matches_no_local_hooks() {
         {"command": format!("echo sentinel > \"{}\"", sentinel.display()), "timeout": 5}
     ]}})
     .to_string();
-    write(&home.path().join(".agent-hooks.json"), &cfg);
+    write(&home.path().join(".agent-hooks/hooks.json"), &cfg);
     let dead = home.path().join("no-daemon.sock");
 
     let o = run_hook_full(
@@ -528,7 +637,7 @@ fn dead_socket_gate_event_fails_open_fast() {
     // Only the `ask` tool is configured: Bash matches nothing, so with the
     // daemon dead there is no verdict from any source.
     write(
-        &home.path().join(".agent-hooks.json"),
+        &home.path().join(".agent-hooks/hooks.json"),
         r#"{"version": 1, "hooks": {"PreToolUse": [{"when": {"tool": "ask"}, "respond": {"allow": true}}]}}"#,
     );
     // Nothing listens here: connect-refused exercises the gate retry budget
@@ -560,7 +669,7 @@ fn dead_socket_gate_event_fails_open_fast() {
 fn dead_socket_observe_event_fails_open_fast() {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = tempfile::TempDir::new().unwrap();
-    write(&home.path().join(".agent-hooks.json"), &blue_config());
+    write(&home.path().join(".agent-hooks/hooks.json"), &blue_config());
     // Observe events get exactly one attempt (fail fast); no daemon running.
     let dead = home.path().join("no-daemon.sock");
 
@@ -604,7 +713,7 @@ fn exit2_deny_exits_2_with_reason_on_stderr() {
     let cwd = tempfile::TempDir::new().unwrap();
     write_exit2t_manifest(cwd.path());
     write(
-        &home.path().join(".agent-hooks.json"),
+        &home.path().join(".agent-hooks/hooks.json"),
         r#"{"version": 1, "hooks": {"PreToolUse": [
           {"when": {"tool": "Bash"}, "respond": {"allow": false, "custom_input": "exit2 deny reason"}}
         ]}}"#,
@@ -642,7 +751,7 @@ fn exit2_ask_exits_2_with_question_on_stderr() {
     let cwd = tempfile::TempDir::new().unwrap();
     write_exit2t_manifest(cwd.path());
     write(
-        &home.path().join(".agent-hooks.json"),
+        &home.path().join(".agent-hooks/hooks.json"),
         r#"{"version": 1, "hooks": {"PreToolUse": [
           {"when": {"tool": "Bash"}, "respond": {"allow": false, "ask": true, "custom_input": "are you quite sure?"}}
         ]}}"#,
@@ -674,7 +783,7 @@ fn exit2_allow_exits_0() {
     let home = tempfile::TempDir::new().unwrap();
     let cwd = tempfile::TempDir::new().unwrap();
     write_exit2t_manifest(cwd.path());
-    write(&home.path().join(".agent-hooks.json"), &blue_config());
+    write(&home.path().join(".agent-hooks/hooks.json"), &blue_config());
     let dead = home.path().join("no-daemon.sock");
 
     let o = run_hook_full(

@@ -43,6 +43,56 @@ pub struct RawHookInput {
     pub passthrough_env: HashMap<String, String>,
 }
 
+/// Extension key carrying the install-time `--origin` label (see
+/// `agent-hooks install --origin`). A consumer with several remotes uses it to
+/// tell which one an event came from.
+pub const ORIGIN_EXTENSION: &str = "agent_hooks.origin";
+
+/// Extension key carrying the hook occurrence's id, stamped by the shim from
+/// its own locally-parsed `event_id`. A daemon recording a forwarded event
+/// uses it as the history delivery id, so a retried send is stored once.
+/// Consumed by the daemon; never reaches subscribers. Reserved: never set by
+/// harness payloads.
+pub const DELIVERY_ID_EXTENSION: &str = "agent_hooks.delivery_id";
+
+/// Longest accepted delivery id. Anything longer is not a UUID-like token and
+/// is ignored rather than stored.
+pub const MAX_DELIVERY_ID_LEN: usize = 128;
+
+/// Native identity facts for the opt-in history store. Captured by the
+/// adapter *before* synthetic fallbacks (random session/turn ids) are
+/// applied, so the store can tell what the harness really said.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryIdentity {
+    /// The harness payload carried a session id. `false` means `session_id`
+    /// is a generated ephemeral UUID that must never key stored history.
+    #[serde(default)]
+    pub native_session: bool,
+    /// Turn id exactly as the harness sent it (no `event_id` fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_turn_id: Option<String>,
+    /// Harness-native message id, only from manifest-declared extraction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_message_id: Option<String>,
+    /// Harness-native tool call id, only from manifest-declared extraction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_tool_call_id: Option<String>,
+    /// Validated `agent_hooks.delivery_id` from transport metadata (daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+}
+
+/// Delivery id carried on a parsed hook line, if present and sane.
+pub fn hook_line_delivery_id(
+    extensions: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    extensions
+        .get(DELIVERY_ID_EXTENSION)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty() && s.len() <= MAX_DELIVERY_ID_LEN)
+        .map(str::to_string)
+}
+
 /// Top-level key on the shim -> daemon hook line that carries shim-side
 /// extensions (e.g. `hook --context-cmd` output). It rides next to the
 /// `RawHookInput` fields instead of inside the struct so every existing
@@ -182,6 +232,11 @@ pub struct AgentEvent {
     /// in-process embeddings.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extensions: HashMap<String, serde_json::Value>,
+
+    /// Native identity facts for the opt-in history store. Absent on events
+    /// from older senders; never interpreted by live consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_identity: Option<HistoryIdentity>,
 }
 
 /// Wire tolerance: fills the current schema version when an inbound event
@@ -226,6 +281,7 @@ impl AgentEvent {
             hold: None,
             passthrough_env: Default::default(),
             extensions: Default::default(),
+            history_identity: None,
         }
     }
 

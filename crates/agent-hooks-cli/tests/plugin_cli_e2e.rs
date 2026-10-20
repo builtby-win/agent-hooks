@@ -39,7 +39,11 @@ fn plugin_lifecycle_e2e() {
         .args(["plugin", "validate", plugin_src.to_str().unwrap()])
         .output()
         .expect("validate command");
-    assert!(out.status.success(), "validate should succeed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "validate should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Plugin validation passed"));
 
@@ -49,10 +53,19 @@ fn plugin_lifecycle_e2e() {
 
     let out = Command::new(&bin)
         .current_dir(&project_dir)
-        .args(["plugin", "install", plugin_src.to_str().unwrap(), "--project"])
+        .args([
+            "plugin",
+            "install",
+            plugin_src.to_str().unwrap(),
+            "--project",
+        ])
         .output()
         .expect("install command");
-    assert!(out.status.success(), "install should succeed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "install should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // 3. List
     let out = Command::new(&bin)
@@ -61,7 +74,8 @@ fn plugin_lifecycle_e2e() {
         .output()
         .expect("list command");
     assert!(out.status.success());
-    let list_json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json list");
+    let list_json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("valid json list");
     assert_eq!(list_json.as_array().unwrap().len(), 1);
     assert_eq!(list_json[0]["id"], "my-test-plugin");
     assert_eq!(list_json[0]["enabled"], true);
@@ -80,7 +94,8 @@ fn plugin_lifecycle_e2e() {
         .args(["plugin", "list", "--project", "--json"])
         .output()
         .expect("list command");
-    let list_json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json list");
+    let list_json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("valid json list");
     assert_eq!(list_json[0]["enabled"], false);
 
     // 5. Enable
@@ -105,7 +120,8 @@ fn plugin_lifecycle_e2e() {
         .args(["plugin", "list", "--project", "--json"])
         .output()
         .expect("list command");
-    let list_json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid json list");
+    let list_json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("valid json list");
     assert_eq!(list_json.as_array().unwrap().len(), 0);
 }
 
@@ -146,7 +162,12 @@ fn plugin_hook_execution_e2e() {
     // Install plugin into project
     let out = Command::new(&bin)
         .current_dir(&project_dir)
-        .args(["plugin", "install", plugin_src.to_str().unwrap(), "--project"])
+        .args([
+            "plugin",
+            "install",
+            plugin_src.to_str().unwrap(),
+            "--project",
+        ])
         .output()
         .expect("install");
     assert!(out.status.success());
@@ -173,7 +194,9 @@ fn plugin_hook_execution_e2e() {
     // Claude Code outputs JSON on stdout with permissionDecision: deny
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains(r#""permissionDecision":"deny""#) || stdout.contains(r#""permissionDecision": "deny""#));
+    assert!(
+        stdout.contains(r#""permissionDecision":"deny""#)
+            || stdout.contains(r#""permissionDecision": "deny""#)
+    );
     assert!(stdout.contains("Blocked by veto-plugin"));
 }
-

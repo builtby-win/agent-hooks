@@ -130,8 +130,12 @@ pub fn run(args: UninstallArgs) -> anyhow::Result<()> {
                         if !path.exists() {
                             continue;
                         }
-                        match remove_toml_list_hooks(&path, list_key, &manifest.id, &manifest.aliases)
-                        {
+                        match remove_toml_list_hooks(
+                            &path,
+                            list_key,
+                            &manifest.id,
+                            &manifest.aliases,
+                        ) {
                             Ok(n) if n > 0 => {
                                 println!(
                                     "✓ {} — removed {} hook(s) from {}",

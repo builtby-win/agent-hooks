@@ -102,11 +102,21 @@ fn list(args: PluginListArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<24} {:<10} {:<10} {:<10} {}", "NAME", "VERSION", "SCOPE", "STATUS", "DESCRIPTION");
-    println!("{:-<24} {:-<10} {:-<10} {:-<10} {:-<30}", "", "", "", "", "");
+    println!(
+        "{:<24} {:<10} {:<10} {:<10} {}",
+        "NAME", "VERSION", "SCOPE", "STATUS", "DESCRIPTION"
+    );
+    println!(
+        "{:-<24} {:-<10} {:-<10} {:-<10} {:-<30}",
+        "", "", "", "", ""
+    );
 
     for p in plugins {
-        let scope = if p.is_project_local { "project" } else { "global" };
+        let scope = if p.is_project_local {
+            "project"
+        } else {
+            "global"
+        };
         let status = if p.enabled { "enabled" } else { "disabled" };
         let desc = p.manifest.description.as_deref().unwrap_or("-");
         println!(
@@ -187,7 +197,8 @@ fn uninstall(args: PluginUninstallArgs) -> Result<()> {
         global_plugins_dir().context("Cannot determine global plugins directory")?
     };
 
-    let removed = PluginManager::uninstall(&args.name, &dest_dir).map_err(|e| anyhow::anyhow!(e))?;
+    let removed =
+        PluginManager::uninstall(&args.name, &dest_dir).map_err(|e| anyhow::anyhow!(e))?;
 
     if !removed {
         bail!("Plugin '{}' not found in {}", args.name, dest_dir.display());
@@ -266,7 +277,11 @@ fn enable(args: PluginEnableArgs) -> Result<()> {
     };
 
     mutate_disabled_in_config(&config_path, &args.name, false)?;
-    println!("Enabled plugin '{}' (updated {})", args.name, config_path.display());
+    println!(
+        "Enabled plugin '{}' (updated {})",
+        args.name,
+        config_path.display()
+    );
     Ok(())
 }
 
@@ -278,7 +293,11 @@ fn disable(args: PluginDisableArgs) -> Result<()> {
     };
 
     mutate_disabled_in_config(&config_path, &args.name, true)?;
-    println!("Disabled plugin '{}' (updated {})", args.name, config_path.display());
+    println!(
+        "Disabled plugin '{}' (updated {})",
+        args.name,
+        config_path.display()
+    );
     Ok(())
 }
 
@@ -290,11 +309,19 @@ fn validate(args: PluginValidateArgs) -> Result<()> {
 
     let manifest = match PluginManager::read_manifest(&path) {
         Some(m) => {
-            checks.push(("manifest".into(), true, format!("found valid manifest for '{}'", m.name)));
+            checks.push((
+                "manifest".into(),
+                true,
+                format!("found valid manifest for '{}'", m.name),
+            ));
             m
         }
         None => {
-            checks.push(("manifest".into(), false, "no plugin.json, .claude-plugin/plugin.json, or package.json found".into()));
+            checks.push((
+                "manifest".into(),
+                false,
+                "no plugin.json, .claude-plugin/plugin.json, or package.json found".into(),
+            ));
             return render_validation_results(&checks, args.json);
         }
     };
@@ -302,25 +329,46 @@ fn validate(args: PluginValidateArgs) -> Result<()> {
     // 1. Name check
     if manifest.name.trim().is_empty() {
         checks.push(("name".into(), false, "plugin name cannot be empty".into()));
-    } else if manifest.name.contains('/') || manifest.name.contains('\\') || manifest.name.contains("..") {
-        checks.push(("name".into(), false, "plugin name contains illegal path traversal characters".into()));
+    } else if manifest.name.contains('/')
+        || manifest.name.contains('\\')
+        || manifest.name.contains("..")
+    {
+        checks.push((
+            "name".into(),
+            false,
+            "plugin name contains illegal path traversal characters".into(),
+        ));
     } else {
-        checks.push(("name".into(), true, format!("name '{}' is valid", manifest.name)));
+        checks.push((
+            "name".into(),
+            true,
+            format!("name '{}' is valid", manifest.name),
+        ));
     }
 
     // 2. Version check
     if manifest.version.trim().is_empty() {
         checks.push(("version".into(), false, "version cannot be empty".into()));
     } else {
-        checks.push(("version".into(), true, format!("version '{}'", manifest.version)));
+        checks.push((
+            "version".into(),
+            true,
+            format!("version '{}'", manifest.version),
+        ));
     }
 
     // 3. Hooks checks
     if manifest.hooks.is_empty() {
-        checks.push(("hooks".into(), true, "no hooks declared (manifest is valid but idle)".into()));
+        checks.push((
+            "hooks".into(),
+            true,
+            "no hooks declared (manifest is valid but idle)".into(),
+        ));
     } else {
         for (event, entries) in &manifest.hooks {
-            let canon = KNOWN_LIFECYCLES.iter().find(|k| k.eq_ignore_ascii_case(event));
+            let canon = KNOWN_LIFECYCLES
+                .iter()
+                .find(|k| k.eq_ignore_ascii_case(event));
             match canon {
                 Some(c) => {
                     checks.push((

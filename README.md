@@ -31,6 +31,7 @@ You do **not** need the daemon to get value. The fast path is daemonless local h
 - [Quickstart: automate your agent in 2 minutes (no daemon)](#quickstart-automate-your-agent-in-2-minutes-no-daemon)
 - [Quickstart: live events for apps (daemon)](#quickstart-live-events-for-apps-daemon)
 - [Command reference](#command-reference)
+- [Conversation history (opt-in)](#conversation-history-opt-in)
 - [Local hooks reference](#local-hooks-reference)
 - [Daemon + socket protocol](#daemon--socket-protocol)
 - [Using with Python / TypeScript / Rust / shell](#using-with-python)
@@ -214,7 +215,7 @@ cargo dev --no-install   # don't touch harness config
 agent-hooks hook <harness> --event <Name> [--harness <override>]
               [--socket PATH] [--adapter-version v1] [--capture-fixtures DIR]
               [payload...]
-agent-hooks daemon [--socket PATH] [--log-level info]
+agent-hooks daemon [--socket PATH] [--log-level info] [--history [--history-dir DIR]]
 agent-hooks dev [--harness all] [--socket PATH] [--no-install] [--log-level info]
 agent-hooks install --harness <id|all> [--binary-path PATH] [--socket PATH]
               [--adapter-version VERSION]
@@ -233,6 +234,30 @@ Notes that bite:
 - `--binary-path` / `--socket` bake non-default locations into installed hook commands (dev daemons, custom sockets). Otherwise the installer embeds the running binary's path and the default socket.
 - `--adapter-version` pins a manifest version (all builtins ship `v1` today). Omit it to use `default_version`.
 - `adapter add` installs an external manifest (file path, git URL, or https tarball) into the user tier with a `.meta.json` provenance sidecar. `adapter list` shows builtin + user + project tiers and their source paths.
+
+
+## Conversation history (opt-in)
+
+```
+agent-hooks history init [--history-dir DIR]
+agent-hooks daemon --history [--history-dir DIR]   # also record events forwarded from remote machines
+agent-hooks history sessions [--session ID] [--harness H] [--origin O] [--after CURSOR] [--limit N]
+agent-hooks history messages --session ID [--harness H] [--origin O] [--after CURSOR] [--before SEQ] [--limit N] [--kind user,assistant]
+agent-hooks history status
+```
+
+Default directory: `$AGENT_HOOKS_HISTORY_DIR`, else `~/.agent-hooks/history` (`history.sqlite3`, mode 0700/0600 on Unix).
+
+- **Off by default.** Only `history init` creates the store; a plain `hook` or `daemon` never does. Capture is done by the `hook` shim itself: once the store exists, every hook writes its own entry. No daemon is involved, so history is complete even when the daemon is down or was never started. The shim finds the store at the default location or `$AGENT_HOOKS_HISTORY_DIR` (set it in the agent's environment; `--history-dir` applies only to `history` subcommands).
+- **Remote machines.** A remote shim writes to the *remote* machine's own store (if it has one). To land a remote machine's history on this one, install the remote hooks with `--origin <label>`, forward the daemon socket to the remote (e.g. `ssh -R`), and run `agent-hooks daemon --history` here. The daemon records only events that carry an origin label, because local hooks were already recorded by their own shim; it fails at startup if the store is missing, and nothing is recorded while the daemon is down. Query with `--origin <label>`.
+- **What is stored:** each complete `UserPromptSubmit` prompt, the entire normalized `Stop.summary` as an `assistant` entry (`assistant_content_source: "stop_summary"`), and tool entries: name, call id, status (running/completed/failed), the compact-JSON tool input, and the tool output or error string the adapter normalized from the post-tool hook (a harness may supply only a preview; the store never invents more). Antigravity's adapter reads the latest completed `MODEL`/`PLANNER_RESPONSE` from the current turn in `transcriptPath` before falling back to its termination reason; it never reuses a previous turn's reply. Transcript lookup scans at most the last 1 MiB and falls back when no complete reply is found. Other harnesses may supply only a summary, not the full native reply. Env, raw payloads and the rest of the event are never stored. Captured nonblank text is never truncated or capped, however large.
+- **Tool phases stay separate.** A tool entry (`kind: "tool"`) reports `tool_input` (the running/pre-call observation) and `tool_output` (the terminal completed/failed observation) as independent exact strings; either is absent until observed and they are never concatenated. Repeated hooks for the same native tool call update one entry rather than adding rows, and an exact redelivery of one hook is a no-op. Entries recorded by schema v1 kept a single combined tool `text` whose input/output boundary was not recorded; the upgrade preserves that string verbatim in `text` on those old tool entries and does not guess a split. Only pre-upgrade tool entries have tool `text`; user/assistant entries use `text`.
+- **Secrets, compression, no retention limit.** Prompts, summaries and tool inputs/outputs can contain secrets. Access is restricted to the owning user (directory 0700, files 0600), but the data is **not encrypted**: values over 1 KiB are transparently compressed with lossless zstd, only when smaller, purely to save space, and compression is not encryption. Query output is byte-identical to what was captured. There is no retention limit. Remove the history by deleting the directory.
+- **Schema upgrades.** `history init` (or the next recording hook) upgrades a v1 store to v2 in one atomic transaction, preserving every entry, session, receipt, cursor position and byte of text; until then read-only queries report `schema_upgrade_required`. A migrated store may keep reusable free pages: the compact metadata and compression reduce the space the data occupies, but the file's historical high-water mark does not shrink on its own, and nothing runs `VACUUM` automatically. Run an explicit SQLite `VACUUM` (with the agents and daemon stopped) to return that space to the filesystem. A store that cannot be decoded (corrupt or truncated compressed data) makes queries fail with `store_unavailable` rather than return garbled text.
+- **Prospective only.** There is no transcript import; sessions are keyed by `(origin, harness, native session id)` and events without a harness-native session id are skipped. Use `--harness`/`--origin` when the same id exists more than once (`ambiguous_session`).
+- **Failure-safe.** A write waits at most 200 ms on the SQLite writer lock (parallel agents share one store), never changes a verdict or exit code, and a failure prints a stderr warning without content. Two separate prompts with identical text are two entries.
+- **Queries are read-only**, need no daemon, and print versioned JSON (`api_version: 2`; v2 adds `tool_input`/`tool_output` on tool entries and no longer concatenates tool phases into `text`) — the JSON, not the SQLite schema, is the contract. There is deliberately no history RPC on the (world-writable) hook socket. `history messages --kind` (repeatable or comma-separated; default all) filters entry kinds in SQL before payloads decode and pages are cut, so a chat view passes `--kind user,assistant` to skip large tool bodies; a cursor only works with the kind set it was issued for.
+- **Scroll-up paging.** `history messages --before SEQ` returns the newest page below that entry sequence, oldest first, in one indexed query with no `next_cursor`; pass the first returned item's `seq` as the next `--before` to keep loading older rows. It cannot combine with `--after`, and a page shorter than `--limit` means the start of the history. Forward `--after` paging is unchanged.
 
 ---
 
@@ -695,6 +720,7 @@ A version may include optional `agent_cli` metadata for consumers that launch an
 
 ```bash
 agent-hooks models --harness codex
+agent-hooks models --harness codex --json  # normalized {"harness":"codex","models":[...]}
 agent-hooks start --harness codex --model gpt-5.6-luna "fix the failing test"
 agent-hooks exec  --harness claude-code --model haiku "summarize README.md"
 agent-hooks exec  --harness opencode --dry-run --model alibaba/qwen-flash "hi"   # prints resolved argv as JSON
@@ -749,7 +775,7 @@ Candidate key lists in **priority order — the true key first**, verified from 
 }
 ```
 
-Per-event quirks go in `extraction_overrides`. One exotic source exists: `{"transcript": "first_prompt"}` replays the session transcript for harnesses whose payload carries no prompt (Antigravity).
+Per-event quirks go in `extraction_overrides`. Transcript sources include `{"transcript": "first_prompt"}`, `"latest_prompt"`, and `"latest_assistant"` for harnesses whose payload carries a transcript path instead of message text (Antigravity). `latest_assistant` selects a completed `MODEL`/`PLANNER_RESPONSE` in the current user turn, scanning a bounded tail of the transcript.
 
 ### Optional display text (`flavor_text`)
 

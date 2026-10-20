@@ -1,0 +1,246 @@
+{
+  "hooks": {
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event Interrupt",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event Notification",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event PermissionRequest",
+            "timeout": 600,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event PostCompact",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostLLMCall": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event PostLLMCall",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event PostToolBatch",
+            "timeout": 600,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event PostToolUse",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event PostToolUseFailure",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event PreCompact",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreLLMCall": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event PreLLMCall",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event PreToolUse",
+            "timeout": 600,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event SessionEnd",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionFork": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event SessionFork",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event SessionStart",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event Stop",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event StopFailure",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event SubagentStart",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event SubagentStop",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "ToolUseStart": [
+      {
+        "hooks": [
+          {
+            "async": true,
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event ToolUseStart",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "/Users/winstonzhao/builtby.win/opensource/agent-hooks-history/target/debug/agent-hooks hook muse --event UserPromptSubmit",
+            "timeout": 600,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ]
+  }
+}

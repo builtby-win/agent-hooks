@@ -54,10 +54,7 @@ fn mistral_manifest_list_rows_carry_hook_types() {
         Some("pre_tool"),
         "default row type is pre_tool"
     );
-    assert_eq!(
-        overrides["PostToolUse"]["type"].as_str(),
-        Some("post_tool")
-    );
+    assert_eq!(overrides["PostToolUse"]["type"].as_str(), Some("post_tool"));
     assert_eq!(overrides["Stop"]["type"].as_str(), Some("post_agent"));
     for (event, o) in overrides {
         assert!(
@@ -134,7 +131,8 @@ fn mistral_manifest_hintless_sniffing() {
 
 #[test]
 fn mistral_manifest_post_tool_and_agent_registry() {
-    let reg = AdapterRegistry::get_versioned("mistral-vibe", None).expect("mistral-vibe registered");
+    let reg =
+        AdapterRegistry::get_versioned("mistral-vibe", None).expect("mistral-vibe registered");
 
     let post = reg
         .parse_event(&make_input(

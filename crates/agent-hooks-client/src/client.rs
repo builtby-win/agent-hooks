@@ -271,7 +271,8 @@ impl AgentHooksClient {
     ) -> Result<Option<String>, ClientError> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let mut stream = connect_stream(&self.path).await?;
-        let mut line = serde_json::to_string(input).map_err(ClientError::Serialization)?;
+        let mut line = agent_hooks_protocol::hook_line_with_extensions(input, &Default::default())
+            .map_err(ClientError::Serialization)?;
         line.push('\n');
 
         stream

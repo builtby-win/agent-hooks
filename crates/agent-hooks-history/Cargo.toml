@@ -1,0 +1,20 @@
+[package]
+name = "agent-hooks-history"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description.workspace = true
+
+[dependencies]
+agent-hooks-protocol = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = { workspace = true }

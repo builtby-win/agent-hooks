@@ -1,5 +1,7 @@
 use crate::cli::HookArgs;
-use agent_hooks_protocol::{AgentEvent, EventContext, PromptDecision, RawHookInput};
+use agent_hooks_protocol::{
+    AgentEvent, EventContext, PromptDecision, RawHookInput, ORIGIN_EXTENSION,
+};
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -8,9 +10,6 @@ use std::time::{Duration, Instant};
 /// hook output" for every JSON harness, so the harness keeps its own
 /// handling. Never a bare allow — that approves calls nobody decided.
 const FALLBACK_PASSTHROUGH: &str = "{}";
-
-/// Extension key carrying the install-time `--origin` label.
-pub(crate) const ORIGIN_EXTENSION: &str = "agent_hooks.origin";
 
 /// Socket read budget for observe/continue events: the daemon answers these
 /// immediately, so waiting longer only stalls the agent.
@@ -156,6 +155,13 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
         )
     });
 
+    // History capture is independent of the daemon and of the verdict: the
+    // store existing is the opt-in, and the decision never depends on it. It
+    // commits before the daemon sees the event, so a subscriber reacting to
+    // that event (and a held gate event, which can wait on a human) always
+    // finds it in the store.
+    record_history(event.as_ref(), args.origin.as_deref());
+
     // 5. Best-effort daemon forward (subscribers + live policy). Gate events
     //    wait long enough for a human decision and retry transport failures
     //    (up to GATE_MAX_ATTEMPTS, ~50ms backoff, inside the hold budget);
@@ -203,6 +209,14 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
             ORIGIN_EXTENSION.to_string(),
             serde_json::Value::String(origin.to_string()),
         );
+        // The shim's own event id doubles as the delivery id, so a retried
+        // send of this occurrence is recorded once by a daemon.
+        if let Some(event) = event.as_ref() {
+            extensions.insert(
+                agent_hooks_protocol::DELIVERY_ID_EXTENSION.to_string(),
+                serde_json::Value::String(event.event_id.clone()),
+            );
+        }
     }
     // Whatever the scripts (and context command) already spent comes out of
     // the daemon's share.
@@ -510,6 +524,40 @@ fn jcode_env_payload(args: &HookArgs, env_payload: Option<&str>) -> Option<(Stri
     harness
         .eq_ignore_ascii_case("jcode")
         .then(|| (harness.to_string(), payload))
+}
+
+/// Lock-wait budget for the shim's history write. Parallel agents each spawn
+/// a shim, and SQLite allows one writer at a time; stays well inside the
+/// harness hook timeouts.
+const HISTORY_LOCK_WAIT: Duration = Duration::from_millis(200);
+
+/// Persist this event into the opt-in history store, if one exists. A missing
+/// store is the off state and stays silent; any other failure is a stderr
+/// warning (never content) and never changes the hook outcome.
+fn record_history(event: Option<&AgentEvent>, origin: Option<&str>) {
+    use agent_hooks_history::{resolve_history_dir, Capture, HistoryError, HistoryWriter};
+    let Some(event) = event else { return };
+    let origin = origin
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+        .unwrap_or(agent_hooks_protocol::LOCAL_ORIGIN);
+    let Some(capture) = Capture::from_event(event, origin) else {
+        return;
+    };
+    let mut writer = match HistoryWriter::open(&resolve_history_dir(None)) {
+        Ok(w) => w,
+        Err(HistoryError::Disabled(_)) => return,
+        Err(e) => {
+            eprintln!("agent-hooks: history capture skipped: {e}");
+            return;
+        }
+    };
+    let result = writer
+        .set_busy_timeout(HISTORY_LOCK_WAIT)
+        .and_then(|()| writer.record(&capture).map(drop));
+    if let Err(e) = result {
+        eprintln!("agent-hooks: history write failed: {e}");
+    }
 }
 
 /// Stderr line for an event the adapter could not turn into an AgentEvent.

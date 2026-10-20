@@ -881,7 +881,12 @@ mod tests {
         let mut policy = EnvCapturePolicy::default();
         let (_, warnings) = load_merged_from(Some(&user), Some(&project), &mut policy);
         assert_eq!(policy.always, ["USER_ALWAYS"]);
-        assert!(warnings.iter().any(|w| w.contains("`allowed_passthrough_env` is deprecated")), "{warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("`allowed_passthrough_env` is deprecated")),
+            "{warnings:?}"
+        );
     }
 
     #[test]
@@ -1386,7 +1391,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stdout_json_context_defers_with_context() {
-        let event = test_event(AgentLifecycle::SessionStart { resume_command: None });
+        let event = test_event(AgentLifecycle::SessionStart {
+            resume_command: None,
+        });
         let entries = [context_entry(r#"printf '{"additional_context":"hello"}'"#)];
         let d = run_local_hooks(&event, &entries, None).expect("context is a decision");
         // No verdict was given, so it must not become an allow that bypasses
@@ -1398,7 +1405,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn stdout_accepts_harness_native_shape() {
-        let event = test_event(AgentLifecycle::SessionStart { resume_command: None });
+        let event = test_event(AgentLifecycle::SessionStart {
+            resume_command: None,
+        });
         let entries = [context_entry(
             r#"printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"native"}}'"#,
         )];
@@ -1409,16 +1418,27 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn plain_or_malformed_stdout_stays_ignored() {
-        let event = test_event(AgentLifecycle::SessionStart { resume_command: None });
-        for cmd in ["echo just logging", "printf '{not json'", r#"printf '{"additional_context":"  "}'"#] {
-            assert!(run_local_hooks(&event, &[context_entry(cmd)], None).is_none(), "{cmd}");
+        let event = test_event(AgentLifecycle::SessionStart {
+            resume_command: None,
+        });
+        for cmd in [
+            "echo just logging",
+            "printf '{not json'",
+            r#"printf '{"additional_context":"  "}'"#,
+        ] {
+            assert!(
+                run_local_hooks(&event, &[context_entry(cmd)], None).is_none(),
+                "{cmd}"
+            );
         }
     }
 
     #[cfg(unix)]
     #[test]
     fn contexts_join_in_entry_order_and_chatty_stdout_does_not_hang() {
-        let event = test_event(AgentLifecycle::SessionStart { resume_command: None });
+        let event = test_event(AgentLifecycle::SessionStart {
+            resume_command: None,
+        });
         let entries = [
             // 1 MB of noise first: the pipe must be drained, not block.
             context_entry("head -c 1000000 /dev/zero | tr '\\0' x; echo"),
@@ -1452,7 +1472,10 @@ mod tests {
         let daemon = PromptDecision::allow().with_additional_context("daemon");
         let merged = merge_decisions(Some(local.clone()), Some(daemon));
         assert!(merged.allow);
-        assert_eq!(merged.additional_context.as_deref(), Some("local\n\ndaemon"));
+        assert_eq!(
+            merged.additional_context.as_deref(),
+            Some("local\n\ndaemon")
+        );
 
         let asked = merge_decisions(
             Some(local),
@@ -1463,7 +1486,9 @@ mod tests {
 
     #[test]
     fn canned_respond_carries_static_context() {
-        let event = test_event(AgentLifecycle::SessionStart { resume_command: None });
+        let event = test_event(AgentLifecycle::SessionStart {
+            resume_command: None,
+        });
         let entries = [UserHookEntry {
             command: String::new(),
             timeout: 5,

@@ -43,5 +43,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Status(args) => commands::status::run(args),
         Commands::ListAdapters(args) => commands::list::run(args),
         Commands::Plugin(args) => commands::plugin::run(args),
+        Commands::History(args) => commands::history::run(args),
     }
 }

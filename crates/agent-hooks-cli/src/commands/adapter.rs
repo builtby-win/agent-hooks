@@ -421,10 +421,9 @@ fn validate_manifest(manifest: &AdapterManifest) -> Vec<(String, Result<(), Stri
                     )),
                     None => {
                         let mut sample = toml_edit::Document::new();
-                        sample.as_table_mut().insert(
-                            list_key,
-                            toml_edit::Item::ArrayOfTables(arr),
-                        );
+                        sample
+                            .as_table_mut()
+                            .insert(list_key, toml_edit::Item::ArrayOfTables(arr));
                         match sample.to_string().parse::<toml_edit::Document>() {
                             Ok(_) => checks.push((
                                 format!("install[{i}].toml_list_hooks renders parseable TOML"),
@@ -751,8 +750,14 @@ fn check_placeholders(template: &serde_json::Value) -> Result<(), String> {
                         let name = &rest[..close];
                         if !matches!(
                             name,
-                            "" | "reason" | "reason?" | "event" | "answers" | "reply"
-                                | "answer_groups" | "updated_input" | "updated_permissions"
+                            "" | "reason"
+                                | "reason?"
+                                | "event"
+                                | "answers"
+                                | "reply"
+                                | "answer_groups"
+                                | "updated_input"
+                                | "updated_permissions"
                         ) {
                             bad.push(format!("{{{name}}}"));
                         }

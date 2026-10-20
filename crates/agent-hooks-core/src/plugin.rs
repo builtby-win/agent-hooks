@@ -132,10 +132,19 @@ impl PluginManager {
             if let Ok(content) = fs::read_to_string(&package_json) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                     let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("plugin");
-                    let version = v.get("version").and_then(|ver| ver.as_str()).unwrap_or("0.1.0");
-                    let desc = v.get("description").and_then(|d| d.as_str()).map(str::to_string);
+                    let version = v
+                        .get("version")
+                        .and_then(|ver| ver.as_str())
+                        .unwrap_or("0.1.0");
+                    let desc = v
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .map(str::to_string);
                     let author = v.get("author").and_then(|a| a.as_str()).map(str::to_string);
-                    let license = v.get("license").and_then(|l| l.as_str()).map(str::to_string);
+                    let license = v
+                        .get("license")
+                        .and_then(|l| l.as_str())
+                        .map(str::to_string);
 
                     let mut m = PluginManifest {
                         name: name.to_string(),
@@ -167,8 +176,16 @@ impl PluginManager {
                         let root = parsed.get("hooks").unwrap_or(&parsed);
                         if let Some(map) = root.as_object() {
                             for (event, entries) in map {
-                                if let Ok(hook_entries) = serde_json::from_value::<Vec<PluginHookDefinition>>(entries.clone()) {
-                                    manifest.hooks.entry(event.clone()).or_default().extend(hook_entries);
+                                if let Ok(hook_entries) =
+                                    serde_json::from_value::<Vec<PluginHookDefinition>>(
+                                        entries.clone(),
+                                    )
+                                {
+                                    manifest
+                                        .hooks
+                                        .entry(event.clone())
+                                        .or_default()
+                                        .extend(hook_entries);
                                 }
                             }
                         }
@@ -225,7 +242,11 @@ impl PluginManager {
     }
 
     /// Install a plugin by copying or symlinking a source directory into the target plugins folder.
-    pub fn install_from_dir(src: &Path, dest_plugins_dir: &Path, link: bool) -> Result<Plugin, String> {
+    pub fn install_from_dir(
+        src: &Path,
+        dest_plugins_dir: &Path,
+        link: bool,
+    ) -> Result<Plugin, String> {
         if !src.is_dir() {
             return Err(format!("Source path is not a directory: {}", src.display()));
         }
@@ -240,8 +261,12 @@ impl PluginManager {
             Self::remove_target_entry(&target_dir)?;
         }
 
-        fs::create_dir_all(dest_plugins_dir)
-            .map_err(|e| format!("Failed to create plugins directory {}: {e}", dest_plugins_dir.display()))?;
+        fs::create_dir_all(dest_plugins_dir).map_err(|e| {
+            format!(
+                "Failed to create plugins directory {}: {e}",
+                dest_plugins_dir.display()
+            )
+        })?;
 
         if link {
             #[cfg(unix)]
@@ -251,8 +276,12 @@ impl PluginManager {
             std::os::windows::fs::symlink_dir(src, &target_dir)
                 .map_err(|e| format!("Failed to symlink plugin: {e}"))?;
         } else {
-            fs::create_dir_all(&target_dir)
-                .map_err(|e| format!("Failed to create plugin directory {}: {e}", target_dir.display()))?;
+            fs::create_dir_all(&target_dir).map_err(|e| {
+                format!(
+                    "Failed to create plugin directory {}: {e}",
+                    target_dir.display()
+                )
+            })?;
             copy_dir_recursive(src, &target_dir)
                 .map_err(|e| format!("Failed to copy plugin files: {e}"))?;
         }
@@ -284,18 +313,21 @@ impl PluginManager {
             if meta.file_type().is_symlink() {
                 #[cfg(unix)]
                 {
-                    fs::remove_file(target)
-                        .map_err(|e| format!("Failed to remove symlink {}: {e}", target.display()))?;
+                    fs::remove_file(target).map_err(|e| {
+                        format!("Failed to remove symlink {}: {e}", target.display())
+                    })?;
                     return Ok(());
                 }
                 #[cfg(windows)]
                 {
                     if target.is_dir() {
-                        fs::remove_dir(target)
-                            .map_err(|e| format!("Failed to remove symlink dir {}: {e}", target.display()))?;
+                        fs::remove_dir(target).map_err(|e| {
+                            format!("Failed to remove symlink dir {}: {e}", target.display())
+                        })?;
                     } else {
-                        fs::remove_file(target)
-                            .map_err(|e| format!("Failed to remove symlink file {}: {e}", target.display()))?;
+                        fs::remove_file(target).map_err(|e| {
+                            format!("Failed to remove symlink file {}: {e}", target.display())
+                        })?;
                     }
                     return Ok(());
                 }

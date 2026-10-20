@@ -291,6 +291,52 @@ pub const DEFAULT_WINDOWS_PIPE_PATH: &str = r"\\.\pipe\agent-hooks";
 /// Environment variable to override the default socket path.
 pub const ENV_AGENT_HOOKS_SOCKET: &str = "AGENT_HOOKS_SOCKET";
 
+/// Default Unix Domain Socket path prefix for isolated `dev` daemons.
+/// The full path appends a per-user, per-directory hash (see [`dev_socket_path`]).
+pub const DEV_UNIX_SOCKET_PREFIX: &str = "/tmp/agent-hooks-dev-";
+
+/// Resolves the isolated socket path for `agent-hooks dev`.
+///
+/// Unlike [`default_socket_path`] (one global socket for every agent), the dev
+/// socket is namespaced by user + current directory so multiple checkouts,
+/// binaries, or `dev` sessions on the same machine never collide. An explicit
+/// `--socket` flag or a non-empty `AGENT_HOOKS_SOCKET` still wins.
+pub fn dev_socket_path() -> String {
+    if let Ok(val) = std::env::var(ENV_AGENT_HOOKS_SOCKET) {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let tag = dev_namespace_tag();
+    if cfg!(windows) {
+        format!(r"\\.\pipe\agent-hooks-dev-{tag}")
+    } else {
+        format!("{DEV_UNIX_SOCKET_PREFIX}{tag}.sock")
+    }
+}
+
+/// Short stable namespace tag for the current user + working directory.
+/// Stable across reruns in the same checkout (so hooks keep reaching the dev
+/// daemon), distinct across users and checkouts (so they never collide).
+fn dev_namespace_tag() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "shared".to_string());
+    let dir = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| String::from("unknown"));
+
+    let mut hasher = DefaultHasher::new();
+    user.hash(&mut hasher);
+    dir.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
 /// Resolves the default socket or named pipe path for the current platform,
 /// respecting the `AGENT_HOOKS_SOCKET` environment variable when present.
 pub fn default_socket_path() -> String {
@@ -310,6 +356,33 @@ pub fn default_socket_path() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dev_socket_path_isolated_stable_and_overridable() {
+        let orig = std::env::var(ENV_AGENT_HOOKS_SOCKET).ok();
+        std::env::remove_var(ENV_AGENT_HOOKS_SOCKET);
+
+        let first = dev_socket_path();
+        let second = dev_socket_path();
+        assert_eq!(first, second, "dev socket must be stable per directory");
+        assert_ne!(
+            first,
+            default_socket_path(),
+            "dev socket must not collide with global"
+        );
+        if !cfg!(windows) {
+            assert!(first.starts_with(DEV_UNIX_SOCKET_PREFIX));
+        }
+
+        std::env::set_var(ENV_AGENT_HOOKS_SOCKET, "/custom/dev.sock");
+        assert_eq!(dev_socket_path(), "/custom/dev.sock");
+
+        if let Some(val) = orig {
+            std::env::set_var(ENV_AGENT_HOOKS_SOCKET, val);
+        } else {
+            std::env::remove_var(ENV_AGENT_HOOKS_SOCKET);
+        }
+    }
 
     #[test]
     fn test_default_socket_path_and_env_override() {

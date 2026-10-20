@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 agent-hooks-protocol = { workspace = true }
 agent-hooks-adapters = { workspace = true }
+agent-hooks-history = { workspace = true }
 agent-hooks-core = { workspace = true }
 agent-hooks-client = { workspace = true }
 serde = { workspace = true }
@@ -33,3 +34,4 @@ crossterm = "0.28"
 [dev-dependencies]
 tempfile = { workspace = true }
 toml_edit = { workspace = true }
+rusqlite = { workspace = true }

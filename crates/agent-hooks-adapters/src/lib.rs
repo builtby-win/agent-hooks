@@ -50,19 +50,71 @@ mod builtin_tests {
     #[test]
     fn builtin_agent_resume_recipes_match_seeded_argv_contract() {
         let cases: &[(&str, &[&str], SessionRefKind)] = &[
-            ("claude-code", &["claude", "--resume", "{session_ref}"], SessionRefKind::Id),
-            ("codex", &["codex", "resume", "{session_ref}"], SessionRefKind::Id),
-            ("copilot", &["copilot", "--resume={session_ref}"], SessionRefKind::Id),
-            ("cursor", &["cursor-agent", "--resume", "{session_ref}"], SessionRefKind::Id),
-            ("droid", &["droid", "--resume", "{session_ref}"], SessionRefKind::Id),
-            ("kimi-code", &["kimi", "--session", "{session_ref}"], SessionRefKind::Id),
-            ("pi", &["pi", "--session", "{session_ref}"], SessionRefKind::IdOrPath),
-            ("omp", &["omp", "--resume={session_ref}"], SessionRefKind::IdOrPath),
-            ("hermes", &["hermes", "--resume", "{session_ref}"], SessionRefKind::Id),
-            ("opencode", &["opencode", "--session", "{session_ref}"], SessionRefKind::Id),
-            ("qoder", &["qodercli", "--resume", "{session_ref}"], SessionRefKind::Id),
-            ("qwen-code", &["qwen", "--resume", "{session_ref}"], SessionRefKind::Id),
-            ("antigravity", &["agy", "--conversation", "{session_ref}"], SessionRefKind::Id),
+            (
+                "claude-code",
+                &["claude", "--resume", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "codex",
+                &["codex", "resume", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "copilot",
+                &["copilot", "--resume={session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "cursor",
+                &["cursor-agent", "--resume", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "droid",
+                &["droid", "--resume", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "kimi-code",
+                &["kimi", "--session", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "pi",
+                &["pi", "--session", "{session_ref}"],
+                SessionRefKind::IdOrPath,
+            ),
+            (
+                "omp",
+                &["omp", "--resume={session_ref}"],
+                SessionRefKind::IdOrPath,
+            ),
+            (
+                "hermes",
+                &["hermes", "--resume", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "opencode",
+                &["opencode", "--session", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "qoder",
+                &["qodercli", "--resume", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "qwen-code",
+                &["qwen", "--resume", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "antigravity",
+                &["agy", "--conversation", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
         ];
 
         for (id, expected_argv, expected_kind) in cases {
@@ -79,10 +131,16 @@ mod builtin_tests {
             let resume = agent_cli.resume.as_ref().expect("resume recipe seeded");
             assert_eq!(
                 resume.argv,
-                expected_argv.iter().map(|arg| (*arg).to_string()).collect::<Vec<_>>(),
+                expected_argv
+                    .iter()
+                    .map(|arg| (*arg).to_string())
+                    .collect::<Vec<_>>(),
                 "{id} argv"
             );
-            assert_eq!(resume.session_ref, *expected_kind, "{id} session reference kind");
+            assert_eq!(
+                resume.session_ref, *expected_kind,
+                "{id} session reference kind"
+            );
         }
     }
 

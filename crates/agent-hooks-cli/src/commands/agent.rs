@@ -237,6 +237,18 @@ fn check_model(id: &str, spec: &AgentCliSpec, model: &str) -> anyhow::Result<()>
 
 pub fn models(args: ModelsArgs) -> anyhow::Result<()> {
     let (id, spec) = agent_cli(&args.harness)?;
+    if args.json {
+        let models = available_models(&spec)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "'{id}' has no model-listing command; pass --model with a name from its docs"
+            )
+        })?;
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"harness": id, "models": models}))?
+        );
+        return Ok(());
+    }
     if spec.models.is_none() && !spec.model_aliases.is_empty() {
         println!("{}", spec.model_aliases.join("\n"));
         return Ok(());

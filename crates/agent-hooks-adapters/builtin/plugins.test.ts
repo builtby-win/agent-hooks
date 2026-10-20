@@ -293,7 +293,7 @@ for (const harness of ["pi", "omp"] as const) {
       expect(c.map((x) => x.input.session_id).sort()).toEqual(["s-branch", "s-switch"]);
     });
 
-    test("plan approval parks the run: no Stop until the next turn", async () => {
+    test("plan approval parks the run: no Stop until the user starts the next run", async () => {
       reset();
       const mod = await load(harness);
       const { api, on } = fakePi();
@@ -305,7 +305,7 @@ for (const harness of ["pi", "omp"] as const) {
         {
           toolName: "write",
           input: { path: "xd://propose" },
-          content: [{ type: "text", text: "Plan ready for approval." }],
+          content: [{ type: "text", text: "Plan ready for review." }],
         },
         ctx,
       );
@@ -316,21 +316,34 @@ for (const harness of ["pi", "omp"] as const) {
       expect(plan?.notification_type).toBe("question");
       expect(plan?.session_id).toBe(`s-plan-${harness}`);
       reset();
-      on.get(terminal)?.({}, ctx);
-      expect(await settle(1, 300)).toEqual([]);
-      // User answered: next turn starts, and that run's end is a real Stop.
+      // omp opens and aborts one more turn while the approval dialog shows;
+      // its busy signals must not flip waiting back to running, and every
+      // terminal event of the parked run is held.
       on.get("turn_start")?.({ turnIndex: 1 }, ctx);
+      on.get("turn_end")?.({ turnIndex: 1, message: { role: "assistant", content: [] } }, ctx);
+      on.get(terminal)?.({}, ctx);
+      on.get(terminal)?.({}, ctx);
+      expect(await settle(1, 500)).toEqual([]);
+      // User answered: the next run starts, and that run's end is a real Stop.
+      reset();
+      await on.get("before_agent_start")?.({ prompt: "Plan approved." }, ctx);
       on.get(terminal)?.({}, ctx);
       c = await settle(2);
-      expect(events(c).sort()).toEqual(["Stop", "TurnStart"]);
+      expect(events(c).sort()).toEqual(["Stop", "UserPromptSubmit"]);
     });
 
-    test("plan approval detection: legacy resolve/apply yes, ordinary write no", async () => {
+    test("plan approval detection: successful xd://propose write, legacy resolve/apply by text", async () => {
       const mod = await load(harness);
+      const propose = { path: "xd://propose" };
       const ready = [{ type: "text", text: "Plan ready for approval." }];
-      expect(mod.isPlanApprovalResult({ toolName: "resolve", input: { action: "apply" }, content: ready })).toBe(true);
+      // The proposal is the write itself; result wording is irrelevant.
+      expect(mod.isPlanApprovalResult({ toolName: "write", input: propose, content: [] })).toBe(true);
+      expect(mod.isPlanApprovalResult({ toolName: "write", input: propose, content: [{ type: "text", text: "anything" }] })).toBe(true);
+      expect(mod.isPlanApprovalResult({ toolName: "write", input: propose, isError: true, content: [] })).toBe(false);
       expect(mod.isPlanApprovalResult({ toolName: "write", input: { path: "/tmp/plan.md" }, content: ready })).toBe(false);
-      expect(mod.isPlanApprovalResult({ toolName: "write", input: { path: "xd://propose" }, content: [] })).toBe(false);
+      // Legacy resolve/apply is not plan-specific, so it still needs the text.
+      expect(mod.isPlanApprovalResult({ toolName: "resolve", input: { action: "apply" }, content: ready })).toBe(true);
+      expect(mod.isPlanApprovalResult({ toolName: "resolve", input: { action: "apply" }, content: [{ type: "text", text: "Applied 2 edits." }] })).toBe(false);
     });
 
     test("allow_always is remembered per session and tool", async () => {
@@ -391,6 +404,39 @@ for (const harness of ["pi", "omp"] as const) {
         { id: "q2", selectedOptions: ["Y"] },
       ]);
     });
+
+    test("Stop carries only the assistant's text blocks as last_assistant_message", async () => {
+      const terminal = harness === "pi" ? "agent_settled" : "session_stop";
+      const reply = [
+        { type: "thinking", thinking: "hmm" },
+        { type: "text", text: "All done." },
+        { type: "toolCall", name: "read" },
+      ];
+      reset();
+      const mod = await load(harness);
+      const { api, on } = fakePi();
+      mod.default(api);
+      const session = (n: number) => ({ sessionManager: new SessionManager(`s-text-${harness}-${n}`) });
+      // A whole message object (omp session_stop) and a plain string both
+      // reduce to the text.
+      on.get(terminal)?.({ last_assistant_message: { role: "assistant", content: reply } }, session(1));
+      on.get(terminal)?.({ last_assistant_message: "All done." }, session(2));
+      // Terminal payload without the reply falls back to the last turn's text.
+      on.get("turn_end")?.({ message: { role: "assistant", content: reply }, toolResults: [] }, session(3));
+      on.get(terminal)?.({}, session(3));
+      const stops = (await settle(4)).filter((c) => c.args.includes("Stop"));
+      expect(stops.map((c) => c.input.last_assistant_message).sort()).toEqual(["All done.", "All done.", "All done."]);
+    });
+
+    test("assistantText skips thinking and tool calls", async () => {
+      const mod = await load(harness);
+      expect(mod.assistantText([{ type: "thinking", thinking: "x" }, { type: "toolCall" }])).toBe("");
+      expect(mod.assistantText({ role: "assistant", content: [{ type: "text", text: "a " }, { type: "text", text: "b" }] })).toBe("a\nb");
+      const out = JSON.parse(
+        mod.buildInput({ messages: [{ role: "assistant", content: [{ type: "text", text: "hi" }] }, { role: "assistant", content: [{ type: "toolCall" }] }] }, {}),
+      );
+      expect(out.last_assistant_message).toBe("hi");
+    });
   });
 }
 
@@ -405,8 +451,35 @@ describe("omp asset", () => {
     on.get("agent_end")?.({ willContinue: true }, ctx);
     expect(await settle(1, 300)).toEqual([]);
     on.get("agent_end")?.({ willContinue: false }, ctx);
-    on.get("agent_end")?.({}, ctx);
-    expect(events(await settle(2))).toEqual(["Stop", "Stop"]);
+    expect(events(await settle(1))).toEqual(["Stop"]);
+  });
+
+  test("agent_end and session_stop of one run emit a single Stop; a new turn re-arms", async () => {
+    reset();
+    const mod = await load("omp");
+    const { api, on } = fakePi();
+    mod.default(api);
+    const ctx = { sessionManager: new SessionManager("s-dedupe") };
+    on.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: "one" }] }] }, ctx);
+    on.get("session_stop")?.({ last_assistant_message: { role: "assistant", content: [{ type: "text", text: "one" }] } }, ctx);
+    expect(events(await settle(2, 400))).toEqual(["Stop"]);
+    on.get("turn_start")?.({}, ctx);
+    on.get("session_stop")?.({ last_assistant_message: "two" }, ctx);
+    const stops = (await settle(3)).filter((c) => c.args.includes("Stop"));
+    expect(stops.map((c) => c.input.last_assistant_message)).toEqual(["one", "two"]);
+  });
+
+  test("a Stop without a reply does not suppress the later Stop that has it", async () => {
+    reset();
+    const mod = await load("omp");
+    const { api, on } = fakePi();
+    mod.default(api);
+    const ctx = { sessionManager: new SessionManager("s-late-reply") };
+    on.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "toolCall" }] }] }, ctx);
+    on.get("session_stop")?.({ last_assistant_message: { role: "assistant", content: [{ type: "text", text: "late" }] } }, ctx);
+    on.get("agent_end")?.({ messages: [] }, ctx);
+    const stops = (await settle(2)).filter((c) => c.args.includes("Stop"));
+    expect(stops.map((c) => c.input.last_assistant_message ?? "").sort()).toEqual(["", "late"]);
   });
 });
 

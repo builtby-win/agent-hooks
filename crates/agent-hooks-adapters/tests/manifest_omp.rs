@@ -51,6 +51,24 @@ fn omp_stop_signals_derive_stop() {
 }
 
 #[test]
+fn omp_stop_carries_last_assistant_message_as_summary() {
+    let adapter = manifest_adapter();
+    for ev in ["agent_end", "session_stop"] {
+        let input = make_input(
+            ev,
+            r#"{"session_id": "ses_omp_1", "last_assistant_message": "All done."}"#,
+        );
+        let event = adapter.parse_event(&input).expect("parse stop signal");
+        match event.lifecycle {
+            AgentLifecycle::Stop { summary, .. } => {
+                assert_eq!(summary.as_deref(), Some("All done."), "summary for {ev}")
+            }
+            other => panic!("expected Stop for {ev}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn omp_registry_resolves_aliases() {
     for hint in ["omp", "oh-my-pi", "oh_my_pi"] {
         let adapter =

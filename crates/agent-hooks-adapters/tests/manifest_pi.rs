@@ -220,6 +220,24 @@ fn pi_parse_event_gate_observe_continue() {
 }
 
 #[test]
+fn pi_stop_carries_last_assistant_message_as_summary() {
+    let adapter = manifest_adapter();
+    for ev in ["agent_settled", "Stop"] {
+        let input = make_input(
+            ev,
+            r#"{"session_id": "ses_pi_1", "last_assistant_message": "All done."}"#,
+        );
+        let event = adapter.parse_event(&input).expect("parse stop signal");
+        match event.lifecycle {
+            AgentLifecycle::Stop { summary, .. } => {
+                assert_eq!(summary.as_deref(), Some("All done."), "summary for {ev}")
+            }
+            other => panic!("expected Stop for {ev}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn pi_format_response_dialect() {
     let adapter = manifest_adapter();
 

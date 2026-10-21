@@ -422,6 +422,20 @@ fn amp_thread_id_is_session() {
     assert_eq!(ev.session_title.as_deref(), Some("Ship it"));
 }
 
+// The Amp plugin forwards amp.system.workspaceRoot as payload cwd so the
+// session pins to the project, not the plugin host dir (~/.config/amp/plugins).
+#[test]
+fn amp_payload_cwd_wins_over_shim_cwd() {
+    let a = amp();
+    let ev = parse(
+        &a,
+        "amp",
+        "agent.end",
+        r#"{"thread":{"id":"T-9"},"cwd":"/Users/dev/project"}"#,
+    );
+    assert_eq!(ev.context.cwd.as_deref(), Some(std::path::Path::new("/Users/dev/project")));
+}
+
 // Amp has no hooks.json; legacy installed a plugin into ~/.config/amp/plugins.
 #[test]
 fn amp_installs_plugin_asset() {

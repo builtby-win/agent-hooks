@@ -94,11 +94,47 @@ function str(...values: unknown[]): string | undefined {
   return undefined;
 }
 
+// Amp events carry no cwd — only the thread id. The workspace root lives on
+// `amp.system.workspaceRoot` (a URI; stable for the plugin process lifetime,
+// reloaded on workspace switch). Without it the spawned `agent-hooks hook`
+// inherits the plugin host cwd (e.g. ~/.config/amp/plugins) and the session
+// gets pinned to the plugins dir instead of the project.
+export function resolveCwd(ctx?: unknown, amp?: unknown): string | undefined {
+  const roots: unknown[] = [fields(ctx).system, fields(amp).system]
+    .map((s) => fields(s).workspaceRoot)
+    .filter((r) => r !== undefined && r !== null);
+  const helpers = fields(fields(amp).helpers);
+  const filePathFromURI = helpers.filePathFromURI;
+  for (const root of roots) {
+    if (typeof root === "string" && root.trim()) {
+      const s = root.trim().replace(/^file:\/\//, "");
+      if (s) return s;
+    }
+    if (typeof filePathFromURI === "function") {
+      try {
+        const p = (filePathFromURI as (uri: unknown) => unknown)(root);
+        if (typeof p === "string" && p.trim()) return p.trim();
+      } catch {
+        // fall through to next candidate
+      }
+    } else if (typeof root === "object" && root !== null && typeof (root as { toString?: unknown }).toString === "function") {
+      try {
+        const s = String((root as { toString(): string }).toString()).replace(/^file:\/\//, "").trim();
+        if (s) return s;
+      } catch {
+        // fall through
+      }
+    }
+  }
+  return undefined;
+}
+
 // Amp names the session by its thread (legacy b2v-amp.ts sessionIdFrom).
-export function buildPayload(event: unknown, ctx?: unknown): Fields {
+export function buildPayload(event: unknown, ctx?: unknown, amp?: unknown): Fields {
   const e = fields(event);
   const thread = fields(e.thread ?? fields(ctx).thread);
   const tool = e.tool;
+  const cwd = str(e.cwd) ?? resolveCwd(ctx, amp);
   return {
     ...e,
     session_id: str(thread.id, e.session_id, e.sessionId, e.thread_id, e.threadId),
@@ -106,13 +142,22 @@ export function buildPayload(event: unknown, ctx?: unknown): Fields {
     request_id: str(e.toolUseID, e.request_id, e.requestId, e.id),
     tool_name: str(e.tool_name, e.toolName, tool, fields(tool).name),
     ...(e.input !== undefined ? { tool_input: e.input } : {}),
+    ...(cwd ? { cwd } : {}),
   };
+}
+
+// Spawn with the workspace cwd when the payload names one: several harnesses
+// run plugins from their own config dir, and the shim falls back to its
+// process cwd when the payload carries no cwd.
+function spawnCwd(payload: Fields): { cwd?: string } {
+  const cwd = str(payload.cwd);
+  return cwd ? { cwd } : {};
 }
 
 function emit(event: string, payload: Fields): void {
   if (hooksDisabled()) return;
   try {
-    const child = spawn(BINARY, hookArgs(event), { stdio: ["pipe", "ignore", "ignore"] });
+    const child = spawn(BINARY, hookArgs(event), { stdio: ["pipe", "ignore", "ignore"], ...spawnCwd(payload) });
     child.on("error", () => {});
     child.stdin?.on("error", () => {});
     child.stdin?.end(JSON.stringify(payload));
@@ -130,7 +175,7 @@ function query(event: string, payload: Fields): Promise<Fields> {
   }
   let child;
   try {
-    child = spawn(BINARY, hookArgs(event), { stdio: ["pipe", "pipe", "ignore"] });
+    child = spawn(BINARY, hookArgs(event), { stdio: ["pipe", "pipe", "ignore"], ...spawnCwd(payload) });
   } catch {
     resolve({});
     return promise;
@@ -185,7 +230,13 @@ type Ui = {
   select(options: { title: string; message: string; options: string[]; allowOther: boolean }): Promise<string | undefined>;
   input(options: { title: string; helpText: string; submitButtonText: string }): Promise<string | undefined>;
 };
-type PluginContext = { ui: Ui; thread?: { id?: string } };
+type PluginContext = {
+  ui: Ui;
+  thread?: { id?: string };
+  system?: { workspaceRoot?: unknown };
+};
+type AmpHelpers = { filePathFromURI?: (uri: unknown) => string };
+type AmpSystem = { workspaceRoot?: unknown };
 type ToolDefinition = {
   name: string;
   title: string;
@@ -196,6 +247,8 @@ type ToolDefinition = {
 type AmpPlugin = {
   on(event: string, handler: (event: unknown, ctx: PluginContext) => unknown): void;
   registerTool(tool: ToolDefinition): void;
+  system?: AmpSystem;
+  helpers?: AmpHelpers;
 };
 
 function normalizeQuestions(value: unknown): AskQuestion[] | undefined {
@@ -340,7 +393,7 @@ function registerAskTool(amp: AmpPlugin): void {
     async execute(input: unknown, ctx: PluginContext): Promise<string> {
       const questions = normalizeQuestions(input);
       if (!questions) throw new Error("Invalid agent_hooks_ask questions");
-      const p = buildPayload(input, ctx);
+      const p = buildPayload(input, ctx, amp);
       let decision: Fields = {};
       try {
         decision = await query("question", {
@@ -367,13 +420,13 @@ function registerAskTool(amp: AmpPlugin): void {
 export default function agentHooks(amp: AmpPlugin) {
   registerAskTool(amp);
   amp.on("session.start", (event: unknown, ctx: PluginContext) => {
-    emit("session.start", buildPayload(event, ctx));
+    emit("session.start", buildPayload(event, ctx, amp));
   });
   amp.on("agent.start", (event: unknown, ctx: PluginContext) => {
-    emit("agent.start", buildPayload(event, ctx));
+    emit("agent.start", buildPayload(event, ctx, amp));
   });
   amp.on("tool.call", async (event: unknown, ctx: PluginContext) => {
-    const payload = buildPayload(event, ctx);
+    const payload = buildPayload(event, ctx, amp);
     if (payload.tool_name === "agent_hooks_ask") return { action: "allow" };
     const decision = await query("tool.call", payload);
     if (decision.decision === "ask") {
@@ -393,9 +446,9 @@ export default function agentHooks(amp: AmpPlugin) {
     return toolCallAction(decision);
   });
   amp.on("tool.result", (event: unknown, ctx: PluginContext) => {
-    emit("tool.result", buildPayload(event, ctx));
+    emit("tool.result", buildPayload(event, ctx, amp));
   });
   amp.on("agent.end", (event: unknown, ctx: PluginContext) => {
-    emit("agent.end", buildPayload(event, ctx));
+    emit("agent.end", buildPayload(event, ctx, amp));
   });
 }

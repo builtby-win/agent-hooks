@@ -802,6 +802,23 @@ describe("amp asset", () => {
     expect(mod.toolCallAction({ decision: "allow" })).toEqual({ action: "allow" });
     expect(mod.toolCallAction({ decision: "deny", reason: "no" })).toEqual({ action: "reject-and-continue", message: "no" });
   });
+  test("workspace root is forwarded as cwd", async () => {
+    const mod = await load("amp");
+    const amp = {
+      system: { workspaceRoot: { toString: () => "file:///Users/dev/project" } },
+      helpers: { filePathFromURI: (uri: unknown) => String(uri).replace(/^file:\/\//, "") },
+    };
+    // ctx.system workspace root wins via amp helpers.
+    expect(
+      mod.buildPayload({ thread: { id: "T-1" } }, { system: { workspaceRoot: "file:///Users/dev/project" } }, amp).cwd,
+    ).toBe("/Users/dev/project");
+    // amp-level fallback when ctx carries no system.
+    expect(mod.resolveCwd({}, amp)).toBe("/Users/dev/project");
+    // event-level cwd is authoritative and never dropped.
+    expect(mod.buildPayload({ thread: { id: "T-1" }, cwd: "/evt/dir" }, {}, amp).cwd).toBe("/evt/dir");
+    // no workspace anywhere => no cwd key (shim falls back to process cwd).
+    expect("cwd" in mod.buildPayload({ thread: { id: "T-1" } })).toBe(false);
+  });
 
   test("canonical answer parsing follows Rust custom-input and option-label semantics", async () => {
     const mod = await load("amp");

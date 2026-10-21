@@ -76,6 +76,7 @@
       "extraction": {
         "session_id": ["session_id", "sessionId", "sessionID", "thread.id", "conversation_id", "conversationId"],
         "parent_session_id": ["parent_session_id", "parentSessionId", "parentSessionID", "parent_id", "parentId", "parentID", "parent_session_hash", "parentSessionHash", "session.parent_id", "session.parent_session_id", "session.parentSessionId", "session.parent_session_hash", "properties.session.parent_id", "properties.session.parent_session_id"],
+        "cwd": ["cwd"],
         "prompt": ["prompt", "user_prompt", "userPrompt", "message"],
         "tool_name": ["tool_name", "toolName", "tool", "name"],
         "tool_input": ["tool_input", "toolInput", "input", "params"],
@@ -218,6 +219,7 @@
         },
         "empty_on_undecided": false
       },
+      "ignore_cwd_patterns": [".config/amp/plugins"],
       "unavailable": ["PostToolUseFailure", "TurnStart"],
       "notes": {
         "post_install": ["Restart amp to load ~/.config/amp/plugins/agent-hooks.ts"]

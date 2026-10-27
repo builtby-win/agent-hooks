@@ -210,6 +210,8 @@ pub enum HistoryCommand {
     Sessions(HistorySessionsArgs),
     /// List one session's captured messages and tool markers
     Messages(HistoryMessagesArgs),
+    /// Search user/assistant message text; one newest hit per session
+    Search(HistorySearchArgs),
     /// Schema version, counts and last persisted time
     Status(HistoryDirArgs),
 }
@@ -272,6 +274,19 @@ pub struct HistoryMessagesArgs {
     /// chat view passes `user,assistant` to skip tool bodies.
     #[arg(long, value_enum, value_delimiter = ',')]
     pub kind: Vec<HistoryKindArg>,
+    /// History directory (default: $AGENT_HOOKS_HISTORY_DIR, else ~/.agent-hooks/history)
+    #[arg(long = "history-dir", value_name = "PATH")]
+    pub history_dir: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct HistorySearchArgs {
+    /// Literal substring to find, case-insensitive; surrounding whitespace is trimmed
+    #[arg(long)]
+    pub query: String,
+    /// Maximum hits (one per session), 1..=1000 (default 100)
+    #[arg(long)]
+    pub limit: Option<u32>,
     /// History directory (default: $AGENT_HOOKS_HISTORY_DIR, else ~/.agent-hooks/history)
     #[arg(long = "history-dir", value_name = "PATH")]
     pub history_dir: Option<PathBuf>,

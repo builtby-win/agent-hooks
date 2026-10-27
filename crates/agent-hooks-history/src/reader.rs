@@ -2,15 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use agent_hooks_protocol::{
-    HistoryCaptureInfo, HistoryEntry, HistoryEntryKind, HistoryMessagesPage, HistorySession,
-    HistorySessionKey, HistorySessionsPage, HistoryStatus, HistoryToolStatus, HISTORY_API_VERSION,
+    HistoryCaptureInfo, HistoryEntry, HistoryEntryKind, HistoryMessageHit, HistoryMessagesPage,
+    HistorySession, HistorySessionKey, HistorySessionsPage, HistoryStatus, HistoryToolStatus,
+    HISTORY_API_VERSION,
 };
 use rusqlite::types::Type;
 use rusqlite::{named_params, Connection, OpenFlags, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 use crate::payload;
-use crate::search::{matching_snippet, MessageHit, MessageSearchQuery};
+use crate::search::{matching_snippet, MessageSearchQuery};
 use crate::store::{check_existing, user_version, version_mismatch};
 use crate::{HistoryError, SCHEMA_VERSION};
 
@@ -214,7 +215,7 @@ fn scan_messages(
     wanted: &HashMap<(&str, &str, &str), &HistorySessionKey>,
     needle: &str,
     limit: usize,
-) -> rusqlite::Result<Vec<MessageHit>> {
+) -> rusqlite::Result<Vec<HistoryMessageHit>> {
     let mut stmt = conn.prepare(
         "SELECT s.origin, s.harness, s.session_id, e.kind, e.text
          FROM entries e JOIN sessions s ON s.first_seq = e.session_ref
@@ -248,7 +249,7 @@ fn scan_messages(
             continue;
         };
         found.insert(session);
-        hits.push(MessageHit {
+        hits.push(HistoryMessageHit {
             session: session.clone(),
             kind,
             snippet,
@@ -537,7 +538,10 @@ impl HistoryReader {
     ///
     /// A corrupt payload in a scoped session fails the whole search, like
     /// [`HistoryReader::messages`].
-    pub fn search_messages(&self, q: &MessageSearchQuery) -> Result<Vec<MessageHit>, HistoryError> {
+    pub fn search_messages(
+        &self,
+        q: &MessageSearchQuery,
+    ) -> Result<Vec<HistoryMessageHit>, HistoryError> {
         let limit = parse_limit(q.limit)?;
         let needle = q.needle.trim().to_lowercase();
         if needle.is_empty() || q.sessions.is_empty() {

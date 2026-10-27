@@ -1,9 +1,9 @@
 //! Substring search over captured user/assistant text.
 //!
-//! The query types and snippet windowing live here; the scan itself is
+//! The query type and snippet windowing live here; the scan itself is
 //! [`HistoryReader::search_messages`](crate::HistoryReader::search_messages).
 
-use agent_hooks_protocol::{HistoryEntryKind, HistorySessionKey};
+use agent_hooks_protocol::HistorySessionKey;
 
 /// Cap on a hit's snippet in characters (a leading `…` is extra), so one
 /// minified dump cannot make a hit enormous.
@@ -22,18 +22,6 @@ pub struct MessageSearchQuery {
     pub sessions: Vec<HistorySessionKey>,
     /// Maximum hits (one per session). Defaults to 100; at most 1000.
     pub limit: Option<u32>,
-}
-
-/// The newest matching message of one session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MessageHit {
-    pub session: HistorySessionKey,
-    /// `User` or `Assistant`; tool entries are not searched.
-    pub kind: HistoryEntryKind,
-    /// The message's last matching line, windowed around the match when the
-    /// line is longer than a snippet. Derived output: unlike stored payloads
-    /// it is shortened.
-    pub snippet: String,
 }
 
 /// The last non-blank line of `text` containing `needle` (already trimmed and

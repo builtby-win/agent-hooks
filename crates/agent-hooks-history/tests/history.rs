@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 
 use agent_hooks_history::{
     init_store, resolve_history_dir, Capture, CaptureEntry, HistoryError, HistoryReader,
-    HistoryWriter, MessagesQuery, RecordOutcome, SessionsQuery, DB_FILE, SCHEMA_VERSION,
+    HistoryWriter, MessageSearchQuery, MessagesQuery, RecordOutcome, SessionsQuery, DB_FILE,
+    SCHEMA_VERSION,
 };
 use agent_hooks_protocol::event::cap_chars;
 use agent_hooks_protocol::{
     AgentEvent, AgentLifecycle, EventContext, HistoryEntryKind, HistoryErrorCode, HistoryIdentity,
-    HistoryMessagesPage, HistoryToolStatus, LOCAL_ORIGIN,
+    HistoryMessagesPage, HistorySessionKey, HistoryToolStatus, LOCAL_ORIGIN,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -1146,6 +1147,108 @@ fn sessions_search_is_literal_case_insensitive_and_composes_with_filters() {
     assert_eq!(ids(&search("BILLING")), ["beta-002"]);
     // Workspace from the first observation is still searchable.
     assert_eq!(ids(&search("proj_x")), ["alpha-001"]);
+}
+
+fn key(origin: &str, session: &str) -> HistorySessionKey {
+    HistorySessionKey {
+        origin: origin.into(),
+        harness: "claude-code".into(),
+        session_id: session.into(),
+    }
+}
+
+#[test]
+fn search_messages_returns_newest_match_per_scoped_session_over_compressed_text() {
+    let (_t, dir) = store();
+    let mut w = HistoryWriter::open(&dir).unwrap();
+    // Over the compression threshold, so stored as a zstd frame.
+    let long = format!(
+        "{}\nAlbuquerque is fixed now\n{}",
+        "x".repeat(2000),
+        "y".repeat(2000)
+    );
+    let mut other_origin = base(
+        "alpha",
+        "d6",
+        6,
+        Some(user("secret from the remote host", None)),
+    );
+    other_origin.origin = "ssh:box".into();
+    for cap in [
+        base(
+            "alpha",
+            "d1",
+            1,
+            Some(user("fix the Albuquerque bug", Some("m1"))),
+        ),
+        base("alpha", "d2", 2, Some(assistant(&long, Some("m2")))),
+        base("beta", "d3", 3, Some(user("nothing relevant", None))),
+        base("gamma", "d4", 4, Some(user("secret from a stranger", None))),
+        base(
+            "alpha",
+            "d5",
+            5,
+            Some(tool_text(
+                "c1",
+                HistoryToolStatus::Completed,
+                Some("Albuquerque in a tool body"),
+            )),
+        ),
+        other_origin,
+    ] {
+        assert_eq!(w.record(&cap).unwrap(), RecordOutcome::Stored);
+    }
+    let r = HistoryReader::open(&dir).unwrap();
+    let search = |needle: &str, sessions: Vec<HistorySessionKey>| {
+        r.search_messages(&MessageSearchQuery {
+            needle: needle.into(),
+            sessions,
+            limit: None,
+        })
+        .unwrap()
+    };
+    let scope = vec![key(LOCAL_ORIGIN, "alpha"), key(LOCAL_ORIGIN, "beta")];
+
+    // The compressed assistant line beats the older user line and the newer
+    // tool entry is never searched.
+    let hits = search("  ALBUQUERQUE ", scope.clone());
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].session, key(LOCAL_ORIGIN, "alpha"));
+    assert_eq!(hits[0].kind, HistoryEntryKind::Assistant);
+    assert_eq!(hits[0].snippet, "Albuquerque is fixed now");
+
+    // Sessions outside the scope (another origin with the same native id, an
+    // unrequested session) never match.
+    assert!(search("secret", scope).is_empty());
+    assert_eq!(
+        search("secret", vec![key("ssh:box", "alpha")])[0].session,
+        key("ssh:box", "alpha")
+    );
+
+    // Blank needle or empty scope searches nothing.
+    assert!(search("   ", vec![key(LOCAL_ORIGIN, "alpha")]).is_empty());
+    assert!(search("albuquerque", Vec::new()).is_empty());
+}
+
+#[test]
+fn search_messages_windows_long_matching_lines() {
+    let (_t, dir) = store();
+    let mut w = HistoryWriter::open(&dir).unwrap();
+    let line = format!("{} needle {}", "a".repeat(300), "b".repeat(300));
+    w.record(&base("alpha", "d1", 1, Some(user(&line, None))))
+        .unwrap();
+    let hits = HistoryReader::open(&dir)
+        .unwrap()
+        .search_messages(&MessageSearchQuery {
+            needle: "needle".into(),
+            sessions: vec![key(LOCAL_ORIGIN, "alpha")],
+            limit: None,
+        })
+        .unwrap();
+    let snippet = &hits[0].snippet;
+    assert!(snippet.starts_with('…'));
+    assert!(snippet.contains("needle"));
+    assert!(snippet.chars().count() <= 241);
 }
 
 #[test]

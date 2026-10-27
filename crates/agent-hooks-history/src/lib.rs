@@ -8,6 +8,7 @@ mod capture;
 mod error;
 mod payload;
 mod reader;
+mod search;
 mod store;
 mod writer;
 
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 pub use capture::{Capture, CaptureEntry};
 pub use error::HistoryError;
 pub use reader::{HistoryReader, MessagesQuery, SessionsQuery};
+pub use search::{MessageHit, MessageSearchQuery};
 pub use store::{init_store, InitReport};
 pub use writer::{HistoryWriter, RecordOutcome};
 

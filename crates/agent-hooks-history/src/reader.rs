@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use agent_hooks_protocol::{
@@ -9,6 +10,7 @@ use rusqlite::{named_params, Connection, OpenFlags, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 use crate::payload;
+use crate::search::{matching_snippet, MessageHit, MessageSearchQuery};
 use crate::store::{check_existing, user_version, version_mismatch};
 use crate::{HistoryError, SCHEMA_VERSION};
 
@@ -203,6 +205,59 @@ fn entry_from_row(row: &Row<'_>) -> rusqlite::Result<HistoryEntry> {
         first_seen_ms: ms(row, 10)?,
         last_seen_ms: ms(row, 11)?,
     })
+}
+
+/// Newest entry first, so a session's first match is its latest one. Scope is
+/// checked before the payload is decoded.
+fn scan_messages(
+    conn: &Connection,
+    wanted: &HashMap<(&str, &str, &str), &HistorySessionKey>,
+    needle: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<MessageHit>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.origin, s.harness, s.session_id, e.kind, e.text
+         FROM entries e JOIN sessions s ON s.first_seq = e.session_ref
+         WHERE e.kind IN ('user', 'assistant') AND e.text IS NOT NULL
+         ORDER BY e.seq DESC",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut found: HashSet<&HistorySessionKey> = HashSet::new();
+    let mut hits = Vec::new();
+    while let Some(row) = rows.next()? {
+        let key = (
+            row.get_ref(0)?.as_str()?,
+            row.get_ref(1)?.as_str()?,
+            row.get_ref(2)?.as_str()?,
+        );
+        let Some(&session) = wanted.get(&key) else {
+            continue;
+        };
+        if found.contains(session) {
+            continue;
+        }
+        let kind = match row.get_ref(3)?.as_str()? {
+            "user" => HistoryEntryKind::User,
+            "assistant" => HistoryEntryKind::Assistant,
+            _ => return Err(conv_err(3, "entry kind")),
+        };
+        let Some(text) = payload::decode(row.get_ref(4)?)? else {
+            continue;
+        };
+        let Some(snippet) = matching_snippet(&text, needle) else {
+            continue;
+        };
+        found.insert(session);
+        hits.push(MessageHit {
+            session: session.clone(),
+            kind,
+            snippet,
+        });
+        if hits.len() == limit || found.len() == wanted.len() {
+            break;
+        }
+    }
+    Ok(hits)
 }
 
 impl HistoryReader {
@@ -473,6 +528,38 @@ impl HistoryReader {
             items,
             next_cursor,
         })
+    }
+
+    /// Newest matching user/assistant message per session in `q.sessions`,
+    /// newest first. Entries of sessions outside the scope are skipped
+    /// before their payload is decoded, and the scan stops once every
+    /// requested session has a hit or `q.limit` is reached.
+    ///
+    /// A corrupt payload in a scoped session fails the whole search, like
+    /// [`HistoryReader::messages`].
+    pub fn search_messages(&self, q: &MessageSearchQuery) -> Result<Vec<MessageHit>, HistoryError> {
+        let limit = parse_limit(q.limit)?;
+        let needle = q.needle.trim().to_lowercase();
+        if needle.is_empty() || q.sessions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        Self::check_version(&tx)?;
+        let wanted: HashMap<(&str, &str, &str), &HistorySessionKey> = q
+            .sessions
+            .iter()
+            .map(|key| {
+                (
+                    (
+                        key.origin.as_str(),
+                        key.harness.as_str(),
+                        key.session_id.as_str(),
+                    ),
+                    key,
+                )
+            })
+            .collect();
+        Ok(scan_messages(&tx, &wanted, &needle, limit)?)
     }
 
     pub fn status(&self) -> Result<HistoryStatus, HistoryError> {

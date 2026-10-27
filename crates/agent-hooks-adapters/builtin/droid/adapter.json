@@ -24,10 +24,11 @@
       "agent_cli": {
         "executables": ["droid"],
         "documentation": ["https://docs.factory.com/droid-cli/cli-reference", "https://docs.factory.com/autonomy-and-safety/auto-run"],
-        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start and exec: https://docs.factory.com/droid-cli/cli-reference",
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start and exec: https://docs.factory.com/droid-cli/cli-reference; model_args: droid exec --help (CLI help, droid 0.147.0)",
         "resume": {"argv": ["droid", "--resume", "{session_ref}"], "session_ref": "id"},
-        "start": {"argv": ["droid", "{prompt}"]},
+        "start": {"argv": ["droid", "{prompt}"], "model_unsupported": true},
         "exec": {"argv": ["droid", "exec", "{prompt}"]},
+        "model_args": ["--model", "{model}"],
         "exec_yolo_args": ["--skip-permissions-unsafe"]
       },
       "install": [

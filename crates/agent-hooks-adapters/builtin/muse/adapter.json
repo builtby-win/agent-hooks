@@ -40,7 +40,8 @@
     "v1": {
       "agent_cli": {
         "executables": ["muse"],
-        "recipe_source": "start, exec, model_args: muse --help; muse exec --help",
+        "recipe_source": "resume, start, exec, model_args: muse --help; muse resume --help; muse exec --help (CLI help, muse 1.4.14)",
+        "resume": {"argv": ["muse", "resume", "{session_ref}"], "session_ref": "id"},
         "start": {"argv": ["muse", "{prompt}"]},
         "exec": {"argv": ["muse", "exec", "{prompt}"]},
         "model_args": ["--model", "{model}"],

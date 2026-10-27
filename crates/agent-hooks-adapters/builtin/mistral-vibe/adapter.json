@@ -18,7 +18,10 @@
       "agent_cli": {
         "executables": ["vibe"],
         "documentation": ["https://docs.mistral.ai/vibe/code/cli/work-with-cli"],
-        "recipe_source": "Vibe CLI docs: `vibe --agent auto-approve`; no start/exec recipe is currently recorded",
+        "recipe_source": "start, exec, resume: https://docs.mistral.ai/vibe/code/cli/work-with-cli (docs only, checked 2026-10-27); YOLO: `vibe --agent auto-approve`",
+        "resume": {"argv": ["vibe", "--resume", "{session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["vibe", "{prompt}"]},
+        "exec": {"argv": ["vibe", "--prompt", "{prompt}"]},
         "yolo_args": ["--agent", "auto-approve"]
       },
       "install": [

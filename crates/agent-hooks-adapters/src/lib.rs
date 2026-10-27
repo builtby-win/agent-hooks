@@ -102,7 +102,7 @@ mod builtin_tests {
             ),
             (
                 "qoder",
-                &["qodercli", "--resume", "{session_ref}"],
+                &["qoder", "--resume", "{session_ref}"],
                 SessionRefKind::Id,
             ),
             (
@@ -113,6 +113,26 @@ mod builtin_tests {
             (
                 "antigravity",
                 &["agy", "--conversation", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "jcode",
+                &["jcode", "--resume", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "muse",
+                &["muse", "resume", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "kiro",
+                &["kiro-cli", "chat", "--resume-id", "{session_ref}"],
+                SessionRefKind::Id,
+            ),
+            (
+                "mistral-vibe",
+                &["vibe", "--resume", "{session_ref}"],
                 SessionRefKind::Id,
             ),
         ];

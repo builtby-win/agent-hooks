@@ -42,8 +42,11 @@
       "agent_cli": {
         "executables": ["hermes"],
         "documentation": ["https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start, exec, model_args: hermes --help; hermes chat --help (CLI help, hermes 0.21.3)",
         "resume": {"argv": ["hermes", "--resume", "{session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["hermes", "chat", "--query", "{prompt}"]},
+        "exec": {"argv": ["hermes", "--oneshot", "{prompt}"]},
+        "model_args": ["--model", "{model}"],
         "yolo_args": ["--yolo"]
       },
       "install": [

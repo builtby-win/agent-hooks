@@ -38,8 +38,11 @@
       "agent_cli": {
         "executables": ["copilot"],
         "documentation": ["https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start, exec, model_args: copilot --help (CLI help, copilot 1.0.17)",
         "resume": {"argv": ["copilot", "--resume={session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["copilot", "-i", "{prompt}"]},
+        "exec": {"argv": ["copilot", "-p", "{prompt}"]},
+        "model_args": ["--model", "{model}"],
         "yolo_args": ["--allow-all"]
       },
       "install": [

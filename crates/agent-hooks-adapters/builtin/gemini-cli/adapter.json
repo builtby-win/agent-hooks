@@ -190,7 +190,10 @@
       "agent_cli": {
         "executables": ["gemini"],
         "documentation": ["https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/cli-reference.md"],
-        "recipe_source": "YOLO flag: https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/cli-reference.md; no start/exec recipe is currently recorded",
+        "recipe_source": "start, exec, model_args: gemini --help (CLI help, gemini 0.50.0); YOLO flag: https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/cli-reference.md; no resume recipe: --resume takes `latest` or a list index, not a stable session id",
+        "start": {"argv": ["gemini", "{prompt}"]},
+        "exec": {"argv": ["gemini", "--prompt", "{prompt}"]},
+        "model_args": ["--model", "{model}"],
         "yolo_args": ["--approval-mode=yolo"]
       }
     }

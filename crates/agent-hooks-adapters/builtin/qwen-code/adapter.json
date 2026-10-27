@@ -33,8 +33,11 @@
       "agent_cli": {
         "executables": ["qwen"],
         "documentation": ["https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start, exec, model_args: https://qwenlm.github.io/qwen-code-docs/en/users/features/headless/ and /configuration/settings/ (docs only, checked 2026-10-27)",
         "resume": {"argv": ["qwen", "--resume", "{session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["qwen", "--prompt-interactive", "{prompt}"]},
+        "exec": {"argv": ["qwen", "--prompt", "{prompt}"]},
+        "model_args": ["--model", "{model}"],
         "yolo_args": ["--yolo"]
       },
       "install": [

@@ -20,6 +20,15 @@
   },
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["jcode"],
+        "documentation": ["https://jcode.sh/docs", "https://github.com/1jehuang/jcode"],
+        "recipe_source": "resume, exec, models, model_args: jcode --help; jcode run --help; jcode model list --help (CLI help, jcode v0.99.1); no start recipe (the TUI takes no initial prompt) and no yolo flag exist",
+        "resume": {"argv": ["jcode", "--resume", "{session_ref}"], "session_ref": "id"},
+        "exec": {"argv": ["jcode", "run", "{prompt}"]},
+        "models": {"argv": ["jcode", "model", "list"]},
+        "model_args": ["--model", "{model}"]
+      },
       "install": [
         {
           "op": "toml_hooks",

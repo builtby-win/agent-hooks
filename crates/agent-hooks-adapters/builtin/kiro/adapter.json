@@ -16,6 +16,15 @@
   },
   "versions": {
     "v1": {
+      "agent_cli": {
+        "executables": ["kiro-cli"],
+        "documentation": ["https://kiro.dev/docs/reference/cli-commands/"],
+        "recipe_source": "resume, start, exec, yolo: https://kiro.dev/docs/reference/cli-commands/ (docs only, checked 2026-10-27; kiro-cli not installed locally)",
+        "resume": {"argv": ["kiro-cli", "chat", "--resume-id", "{session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["kiro-cli", "chat", "{prompt}"]},
+        "exec": {"argv": ["kiro-cli", "chat", "--no-interactive", "{prompt}"]},
+        "yolo_args": ["--trust-all-tools"]
+      },
       "install": [
         {
           "op": "json_hooks",

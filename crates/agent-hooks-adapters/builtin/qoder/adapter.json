@@ -28,10 +28,14 @@
   "versions": {
     "v1": {
       "agent_cli": {
-        "executables": ["qodercli"],
-        "documentation": ["https://docs.qoder.com/cli/hooks"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
-        "resume": {"argv": ["qodercli", "--resume", "{session_ref}"], "session_ref": "id"}
+        "executables": ["qoder"],
+        "documentation": ["https://docs.qoder.com/cli/cli-reference", "https://docs.qoder.com/cli/hooks"],
+        "recipe_source": "resume, start, exec, model_args, yolo: https://docs.qoder.com/cli/cli-reference (docs only, checked 2026-10-27)",
+        "resume": {"argv": ["qoder", "--resume", "{session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["qoder", "--prompt-interactive", "{prompt}"]},
+        "exec": {"argv": ["qoder", "--print", "{prompt}"]},
+        "model_args": ["--model", "{model}"],
+        "yolo_args": ["--yolo"]
       },
       "install": [
         {

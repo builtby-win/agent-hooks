@@ -34,8 +34,11 @@
       "agent_cli": {
         "executables": ["cursor-agent", "cursor-agent.cmd"],
         "documentation": ["https://docs.cursor.com/cli/reference"],
-        "recipe_source": "https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285",
+        "recipe_source": "resume: https://github.com/herdrdev/herdr/blob/master/src/agent_resume.rs#L197-L285; start, exec, model_args: cursor-agent --help (CLI help, cursor-agent 2026.09.02)",
         "resume": {"argv": ["cursor-agent", "--resume", "{session_ref}"], "session_ref": "id"},
+        "start": {"argv": ["cursor-agent", "{prompt}"]},
+        "exec": {"argv": ["cursor-agent", "--print", "{prompt}"]},
+        "model_args": ["--model", "{model}"],
         "yolo_args": ["--force"]
       },
       "install": [

@@ -16,14 +16,58 @@ pub struct SessionInfo {
     pub event_count: u64,
 }
 
+/// Harness-internal config dirs that must never be recorded as a session
+/// working directory (hooks often spawn with the process cwd pointed at
+/// them, e.g. Antigravity's `~/.gemini/config`). Matches a single path
+/// component exactly so `/home/dev/gemini-project` is not flagged.
+pub fn is_config_dir_path(p: &std::path::Path) -> bool {
+    const CONFIG_DIRS: &[&str] = &[
+        ".gemini",
+        ".claude",
+        ".codex",
+        ".cursor",
+        ".opencode",
+        ".pi",
+        ".kilocode",
+        ".aider",
+    ];
+    p.components().any(|c| {
+        let s = c.as_os_str().to_string_lossy();
+        CONFIG_DIRS.iter().any(|d| s == *d)
+            // Legacy substring fallback for paths like `.../.gemini/config`.
+            || s.contains(".gemini")
+    })
+}
+
 impl SessionInfo {
     fn from_event(event: &AgentEvent) -> Self {
+        // Never seed a session with a config dir: SessionStart has no prior
+        // event to backfill from, so strip instead of forwarding.
+        let mut stored = event.clone();
+        if stored
+            .context
+            .cwd
+            .as_ref()
+            .map(|p| is_config_dir_path(p))
+            .unwrap_or(false)
+        {
+            stored.context.cwd = None;
+        }
+        if stored
+            .context
+            .git_worktree
+            .as_ref()
+            .map(|p| is_config_dir_path(p))
+            .unwrap_or(false)
+        {
+            stored.context.git_worktree = None;
+        }
         Self {
             session_id: event.session_id.clone(),
             parent_session_id: event.parent_session_id.clone(),
             harness: event.harness.clone(),
             status: event.status,
-            last_event: Some(event.clone()),
+            last_event: Some(stored),
             last_lifecycle_name: Some(event.lifecycle.name().to_string()),
             created_at_ms: event.timestamp_ms,
             updated_at_ms: event.timestamp_ms,
@@ -44,7 +88,7 @@ impl SessionInfo {
             .context
             .cwd
             .as_ref()
-            .map(|p| p.to_string_lossy().contains(".gemini"))
+            .map(|p| is_config_dir_path(p))
             .unwrap_or(false);
         if event_to_store.context.cwd.is_none() || is_config_dir {
             if let Some(existing_cwd) = self.last_event.as_ref().and_then(|e| e.context.cwd.clone())
@@ -56,6 +100,9 @@ impl SessionInfo {
                         .as_ref()
                         .and_then(|e| e.context.git_worktree.clone());
                 }
+            } else if is_config_dir {
+                // No known workspace to restore: discard, never store the config dir.
+                event_to_store.context.cwd = None;
             }
         }
         self.last_event = Some(event_to_store);
@@ -454,6 +501,28 @@ mod tests {
             last_ev.context.git_worktree,
             Some(PathBuf::from("/Users/developer/project"))
         );
+    }
+
+    #[test]
+    fn first_event_config_dir_is_discarded_not_forwarded() {
+        let mut tracker = SessionTracker::new();
+        let mut ev = mk_event(
+            "sess-config",
+            None,
+            AgentLifecycle::SessionStart {
+                resume_command: None,
+            },
+        );
+        ev.context.cwd = Some(PathBuf::from("/Users/developer/.gemini/config"));
+        ev.context.git_worktree = Some(PathBuf::from("/Users/developer/.gemini/config"));
+        tracker.track(&ev);
+
+        let sess = tracker
+            .get("claude-code", "sess-config")
+            .expect("session exists");
+        let last_ev = sess.last_event.as_ref().expect("last_event exists");
+        assert_eq!(last_ev.context.cwd, None);
+        assert_eq!(last_ev.context.git_worktree, None);
     }
 
     #[test]

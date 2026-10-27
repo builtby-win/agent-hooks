@@ -269,10 +269,13 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
     let target = args.harness.to_lowercase();
 
     let (targets, is_all): (Vec<(AdapterManifest, String)>, bool) = if target == "all" {
-        // For "all", only install into detected harnesses (config exists or binary on PATH).
+        // For "all", only install into detected harnesses: the harness CLI
+        // must be on PATH. A stray config file alone is not detection —
+        // `create: true` ops (and sibling tools) can materialize a settings
+        // file for a harness the user never installed.
         let detected: Vec<(AdapterManifest, String)> = all_manifests_sorted()
             .into_iter()
-            .filter(|m| is_detected(m))
+            .filter(is_detected)
             .map(|m| {
                 let v = m.default_version.clone();
                 (m, v)
@@ -362,44 +365,41 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A harness counts as detected when any of its install paths already exists
-/// or its binary is on PATH (id or alias).
+/// A harness counts as detected only when its CLI binary is on PATH
+/// (declared `agent_cli.executables`, else id + aliases).
+///
+/// Config-file existence alone is deliberately NOT detection: `create: true`
+/// install ops and sibling tools can materialize a settings file for a
+/// harness the user never installed (e.g. a stray `~/.qwen/settings.json`),
+/// and treating that file as proof would make `install --harness all`
+/// self-seeding — every run re-installs hooks for phantom harnesses.
 fn is_detected(manifest: &AdapterManifest) -> bool {
     let Some(vs) = manifest.versions.get(&manifest.default_version) else {
         return false;
     };
-    for op in &vs.install {
-        match op {
-            InstallOp::JsonHooks { paths, .. }
-            | InstallOp::TomlHooks { paths, .. }
-            | InstallOp::TomlListHooks { paths, .. }
-            | InstallOp::JsonEdit { paths, .. } => {
-                if paths.iter().any(|p| expand_op_path(p).exists()) {
-                    return true;
-                }
-            }
-            InstallOp::StageAssets { stage_dir, .. } => {
-                if expand_op_path(stage_dir).exists() {
-                    return true;
-                }
-            }
-            InstallOp::RunCommand { .. } => {}
+    if let Some(cli) = vs.agent_cli.as_ref() {
+        if !cli.executables.is_empty() {
+            return cli
+                .executables
+                .iter()
+                .map(String::as_str)
+                .any(is_binary_on_path);
         }
     }
     std::iter::once(manifest.id.as_str())
         .chain(manifest.aliases.iter().map(String::as_str))
-        .any(|name| is_binary_on_path(name))
+        .any(is_binary_on_path)
 }
 
 fn is_binary_on_path(name: &str) -> bool {
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
             let candidate = dir.join(name);
-            if candidate.exists() {
+            if candidate.is_file() {
                 return true;
             }
             // Windows exe extension
-            if cfg!(windows) && dir.join(format!("{}.exe", name)).exists() {
+            if cfg!(windows) && dir.join(format!("{}.exe", name)).is_file() {
                 return true;
             }
         }

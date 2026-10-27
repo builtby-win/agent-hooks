@@ -394,6 +394,21 @@ fn manifest_antigravity_cwd_from_workspace_paths() {
 }
 
 #[test]
+fn manifest_antigravity_config_fallback_cwd_discarded() {
+    let adapter = load_adapter();
+    // No workspacePaths / transcriptPath payload cwd: the shim fallback is
+    // the poisoned process cwd (~/.gemini/config) and must be discarded.
+    let input = make_input_with_cwd(
+        "SessionStart",
+        r#"{"conversationId":"ec33ebf9-0cba-4100-8142-c61503f6c587"}"#,
+        "/Users/dev/.gemini/config",
+    );
+    let event = adapter.parse_event(&input).expect("parse SessionStart");
+    assert_eq!(event.context.cwd, None);
+    assert_eq!(event.context.git_worktree, None);
+}
+
+#[test]
 fn manifest_antigravity_stop_not_idle_stays_running() {
     let adapter = load_adapter();
     // fullyIdle=false: background tasks still running, agent NOT done.

@@ -6,9 +6,12 @@
 use std::path::{Path, PathBuf};
 
 use agent_hooks_history::{
-    init_store, resolve_history_dir, HistoryError, HistoryReader, MessagesQuery, SessionsQuery,
+    init_store, resolve_history_dir, HistoryError, HistoryReader, MessageSearchQuery,
+    MessagesQuery, SessionsQuery,
 };
+use agent_hooks_protocol::{HistorySearchPage, HistorySessionKey, HISTORY_API_VERSION};
 use serde::Serialize;
+use std::io::Read;
 
 use crate::cli::{HistoryArgs, HistoryCommand, HistoryKindArg};
 
@@ -59,6 +62,7 @@ pub fn run(args: HistoryArgs) -> anyhow::Result<()> {
                 kinds: a.kind.into_iter().map(entry_kind).collect(),
             },
         ),
+        HistoryCommand::Search(a) => search(a.history_dir.as_deref(), a.query, a.limit),
         HistoryCommand::Status(a) => status(a.history_dir.as_deref()),
     };
     match result {
@@ -102,6 +106,29 @@ fn sessions(dir: Option<&Path>, query: SessionsQuery) -> Result<String, HistoryE
 fn messages(dir: Option<&Path>, query: MessagesQuery) -> Result<String, HistoryError> {
     let reader = HistoryReader::open(&resolve_history_dir(dir))?;
     to_json(&reader.messages(&query)?)
+}
+
+/// The sessions to search are a JSON array of session keys on stdin, so a
+/// caller can scope a search to hundreds of sessions without hitting argv
+/// limits. Text of sessions outside that array is never decoded.
+fn search(dir: Option<&Path>, query: String, limit: Option<u32>) -> Result<String, HistoryError> {
+    let mut stdin = String::new();
+    std::io::stdin().read_to_string(&mut stdin)?;
+    let sessions: Vec<HistorySessionKey> = serde_json::from_str(&stdin).map_err(|_| {
+        HistoryError::InvalidArgument(
+            "stdin must be a JSON array of {origin, harness, session_id} session keys".into(),
+        )
+    })?;
+    let reader = HistoryReader::open(&resolve_history_dir(dir))?;
+    let items = reader.search_messages(&MessageSearchQuery {
+        needle: query,
+        sessions,
+        limit,
+    })?;
+    to_json(&HistorySearchPage {
+        api_version: HISTORY_API_VERSION,
+        items,
+    })
 }
 
 fn status(dir: Option<&Path>) -> Result<String, HistoryError> {

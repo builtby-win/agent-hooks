@@ -92,6 +92,25 @@ pub struct HistorySessionsPage {
     pub next_cursor: Option<String>,
 }
 
+/// The newest matching user/assistant message of one session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryMessageHit {
+    pub session: HistorySessionKey,
+    /// `user` or `assistant`; tool entries are not searched.
+    pub kind: HistoryEntryKind,
+    /// The message's last matching line, windowed around the match when the
+    /// line is long. Derived output: unlike stored payloads it is shortened.
+    pub snippet: String,
+}
+
+/// `agent-hooks history search` result: one hit per matching session, newest
+/// session first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistorySearchPage {
+    pub api_version: u32,
+    pub items: Vec<HistoryMessageHit>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub seq: i64,

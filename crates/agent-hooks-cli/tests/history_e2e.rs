@@ -758,3 +758,58 @@ fn sessions_search_uses_pushed_titles_and_preserves_them_when_absent() {
     assert!(ok, "{renamed}");
     assert_eq!(renamed["items"][0]["title"], "Ship authentication");
 }
+
+/// Run `history search`, feeding the session scope on stdin.
+fn search_cli(home: &Path, dir: &Path, query: &str, scope: &Value) -> (bool, Value) {
+    let mut child = Command::new(bin())
+        .args(["history", "search", "--query", query, "--history-dir"])
+        .arg(dir)
+        .env("HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(scope.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let json = serde_json::from_slice(&out.stdout).expect("search stdout is JSON");
+    (out.status.success(), json)
+}
+
+#[test]
+fn search_returns_newest_hit_only_for_the_sessions_on_stdin() {
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join("history");
+    assert!(history_cli(home.path(), &dir, &["init"]).0);
+    for (session, prompt) in [
+        ("s-1", "fix the Albuquerque bug"),
+        ("s-2", "Albuquerque too"),
+    ] {
+        let out = shim(
+            home.path(),
+            &dir,
+            "claude-code",
+            "UserPromptSubmit",
+            json!({"session_id": session, "prompt": prompt}),
+        );
+        assert!(out.status.success());
+    }
+    let key =
+        |session: &str| json!({"origin": "local", "harness": "claude-code", "session_id": session});
+
+    let (ok, page) = search_cli(home.path(), &dir, " ALBUQUERQUE ", &json!([key("s-1")]));
+    assert!(ok, "search failed: {page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["session"]["session_id"], "s-1");
+    assert_eq!(page["items"][0]["kind"], "user");
+    assert_eq!(page["items"][0]["snippet"], "fix the Albuquerque bug");
+
+    // A scope that is not a key array is a failure envelope, not a crash.
+    let (ok, err) = search_cli(home.path(), &dir, "albuquerque", &json!({"nope": 1}));
+    assert!(!ok);
+    assert_eq!(err["error"]["code"], "invalid_argument");
+}

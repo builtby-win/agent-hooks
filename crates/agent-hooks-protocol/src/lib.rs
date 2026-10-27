@@ -34,9 +34,9 @@ pub use event::{
 };
 pub use history::{
     HistoryCaptureInfo, HistoryEntry, HistoryEntryKind, HistoryErrorBody, HistoryErrorCode,
-    HistoryErrorResponse, HistoryMessagesPage, HistorySession, HistorySessionKey,
-    HistorySessionsPage, HistoryStatus, HistoryToolStatus, HISTORY_API_VERSION,
-    HISTORY_ASSISTANT_CONTENT_SOURCE, HISTORY_CAPTURE_SOURCE, LOCAL_ORIGIN,
+    HistoryErrorResponse, HistoryMessageHit, HistoryMessagesPage, HistorySearchPage,
+    HistorySession, HistorySessionKey, HistorySessionsPage, HistoryStatus, HistoryToolStatus,
+    HISTORY_API_VERSION, HISTORY_ASSISTANT_CONTENT_SOURCE, HISTORY_CAPTURE_SOURCE, LOCAL_ORIGIN,
 };
 pub use lifecycle::{AgentLifecycle, NormalizedStatus};
 pub use plugin::{PluginConfigProperty, PluginHookDefinition, PluginHookMatch, PluginManifest};

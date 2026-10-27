@@ -1114,7 +1114,7 @@ async fn handle_hook_line(
                 .context
                 .cwd
                 .as_ref()
-                .map(|p| p.to_string_lossy().contains(".gemini"))
+                .map(|p| crate::session_tracker::is_config_dir_path(p))
                 .unwrap_or(false);
             if event.context.cwd.is_none() || is_config_dir {
                 if let Some(known_cwd) = existing_sess
@@ -1129,8 +1129,20 @@ async fn handle_hook_line(
                             .as_ref()
                             .and_then(|e| e.context.git_worktree.clone());
                     }
+                } else if is_config_dir {
+                    // First sighting with a config dir (SessionStart from a
+                    // poisoned process cwd): discard, never forward it.
+                    event.context.cwd = None;
                 }
             }
+        } else if event
+            .context
+            .cwd
+            .as_ref()
+            .map(|p| crate::session_tracker::is_config_dir_path(p))
+            .unwrap_or(false)
+        {
+            event.context.cwd = None;
         }
         t.track_protected(&event, &held);
     }
@@ -1451,6 +1463,24 @@ fn parse_with_adapters(input: &RawHookInput) -> Result<ParsedEvent, CoreError> {
         .unwrap_or_else(|| "unknown-session".to_string());
 
     let mut context = input.context.clone();
+    // Fallback path has no adapter ignore list: discard a hook-process cwd
+    // that points at a harness config dir instead of forwarding it.
+    if context
+        .cwd
+        .as_ref()
+        .map(|p| crate::session_tracker::is_config_dir_path(p))
+        .unwrap_or(false)
+    {
+        context.cwd = None;
+    }
+    if context
+        .git_worktree
+        .as_ref()
+        .map(|p| crate::session_tracker::is_config_dir_path(p))
+        .unwrap_or(false)
+    {
+        context.git_worktree = None;
+    }
     if let Some(v) = &parsed_json {
         let ws_path = v
             .get("workspacePaths")

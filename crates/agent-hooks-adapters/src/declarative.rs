@@ -2291,6 +2291,32 @@ impl HarnessAdapter for DeclarativeAdapter {
                 context.git_worktree = Some(cwd.clone());
             }
             context.cwd = Some(cwd);
+        } else {
+            // No usable payload cwd: the fallback is the hook process cwd,
+            // which some harnesses point at their own config dir (Antigravity:
+            // `~/.gemini/config`). Discard it when it matches ignore patterns.
+            let fallback_is_config = context
+                .cwd
+                .as_ref()
+                .map(|p| {
+                    let s = p.to_string_lossy();
+                    ignore_cwd.iter().any(|pat| s.contains(pat.as_str()))
+                })
+                .unwrap_or(false);
+            if fallback_is_config {
+                context.cwd = None;
+            }
+            let worktree_is_config = context
+                .git_worktree
+                .as_ref()
+                .map(|p| {
+                    let s = p.to_string_lossy();
+                    ignore_cwd.iter().any(|pat| s.contains(pat.as_str()))
+                })
+                .unwrap_or(false);
+            if worktree_is_config {
+                context.git_worktree = None;
+            }
         }
         // Payload-authoritative tmux: an event whose override declares a
         // `tmux_pane_id` source says the shim's tmux env is stale (jcode's

@@ -66,24 +66,27 @@ Sandboxed apps that cannot write to `~/.agent-hooks` should degrade gracefully (
 
 ## 2. Register your command
 
-`hooks.json` maps **normalized** event names to commands, the same file for every harness:
+**Drop in a plugin directory, one per app.** `~/.agent-hooks/plugins/<your-app>/plugin.json` maps **normalized** event names to commands, the same for every harness:
 
 ```json
 {
-  "version": 1,
+  "name": "myapp",
+  "version": "1.0.0",
   "hooks": {
-    "UserPromptSubmit":  [{ "command": "myapp agent-event" }],
-    "PostToolUse":       [{ "command": "myapp agent-event" }],
-    "PermissionRequest": [{ "command": "myapp agent-event" }],
-    "Stop":              [{ "command": "myapp agent-event" }],
-    "SessionEnd":        [{ "command": "myapp agent-event" }]
+    "UserPromptSubmit":  [{ "command": "myapp agent-event || true" }],
+    "PostToolUse":       [{ "command": "myapp agent-event || true" }],
+    "PermissionRequest": [{ "command": "myapp agent-event || true" }],
+    "Stop":              [{ "command": "myapp agent-event || true" }],
+    "SessionEnd":        [{ "command": "myapp agent-event || true" }]
   }
 }
 ```
 
-- Read-modify-write the file yourself and skip entries whose `command` already exists (identical entries run once). There is no `hooks add` CLI yet. Keep your command a single stable string so reinstalls stay idempotent.
-- Entries from the user tier and every project tier all run, in parallel. Verdicts merge deny > ask > allow, so apps do not conflict as long as each only denies what it means to.
-- Commands run via `sh -c` (`cmd /C` on Windows) and are fail-open: spawn errors, timeouts and unexpected exit codes allow the action. Full schema: [Local hooks reference](../README.md#local-hooks-reference).
+- Write your own file (or `agent-hooks plugin install <dir> --force`, which is idempotent). You never edit a file other apps share, so there is nothing to race and uninstalling is `rm -r` of your directory. A plugin that fails to parse is skipped on its own and does not affect other apps.
+- Avoid the shared `~/.agent-hooks/hooks.json` for app integrations: it is one file with strict parsing, so a single unknown field in any entry makes the whole file ignored (warning on stderr only), silently disabling every app's hooks in it. It is for the user's own hooks.
+- Plugin commands run as `(cd <plugin-dir> && <command>)` via `sh -c`, so the working directory is your plugin directory, not the agent's cwd; read the cwd from the event's `context.cwd`. `|| true` is POSIX shell; the plugin wrapper and `|| true` have not been tested on Windows (`cmd /C`), where a launcher script that always exits 0 is the safe form.
+- Plugin and user entries, and every project tier, all run in parallel. Verdicts merge deny > ask > allow, so apps do not conflict as long as each only denies what it means to.
+- **Exit codes are verdicts, not fail-open.** Exit `2` is deny and `3` is ask; malformed `allow` JSON and stdout over 1 MiB are deny. Only spawn errors, timeouts and other exit codes are fail-open. CLIs written with clap or argparse exit `2` on a usage error, so a status reporter whose arguments drift would deny every matched gating event (`PreToolUse`, `PermissionRequest`). A reporter that never decides should end with `|| true` (as above), or register only on non-gating events. Full schema: [Local hooks reference](../README.md#local-hooks-reference).
 
 ## 3. Read the event, answer if you want to
 

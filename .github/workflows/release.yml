@@ -1,8 +1,10 @@
 name: release
 
 # Split build. macOS (arm64, x64, universal) and Linux (static musl, x64 + arm64)
-# are built locally by scripts/release-local.sh and uploaded to the release.
-# CI builds Windows only, plus attaches install.sh / install.ps1.
+# are built locally by scripts/release-local.sh. CI builds Windows only and
+# leaves the zips as workflow artifacts; the script downloads them and publishes
+# one complete release atomically (draft -> all assets -> publish), so
+# releases/latest never points at a partial release.
 #
 # Asset names are the contract install.sh, install.ps1 and the package wrappers rely on:
 #   agent-hooks-<target>.tar.gz | .zip   (+ .sha256), containing agent-hooks-<target>/agent-hooks[.exe]
@@ -18,7 +20,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   BIN: agent-hooks
@@ -74,34 +76,3 @@ jobs:
             agent-hooks-${{ matrix.target }}.zip
             agent-hooks-${{ matrix.target }}.zip.sha256
           if-no-files-found: error
-
-  publish:
-    name: publish
-    needs: windows
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-
-      # Tag push → github.ref_name is the tag; manual dispatch → inputs.tag.
-      - name: Resolve tag
-        id: tag
-        run: |
-          if [ -n "${{ inputs.tag }}" ]; then echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT";
-          else echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"; fi
-
-      # Appends to the release if scripts/release-local.sh already created it.
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.value }}
-          files: |
-            agent-hooks-*.zip
-            agent-hooks-*.zip.sha256
-            install.sh
-            install.ps1
-          generate_release_notes: true

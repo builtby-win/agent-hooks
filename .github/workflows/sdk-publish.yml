@@ -64,8 +64,9 @@ jobs:
   pypi:
     name: pypi
     runs-on: ubuntu-22.04
-    # Uses PyPI trusted publishing: register this repo + workflow as a trusted
-    # publisher for `builtby-win-agent-hooks`, then set the repo variable PYPI_PUBLISH=true.
+    # Uses PyPI trusted publishing, bound to this exact workflow filename: register
+    # builtby-win/agent-hooks + `sdk-publish.yml` as the trusted publisher for
+    # `builtby-win-agent-hooks` (no environment), then set the repo variable PYPI_PUBLISH=true.
     if: ${{ vars.PYPI_PUBLISH == 'true' }}
     permissions:
       contents: read

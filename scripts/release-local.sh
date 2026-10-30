@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build and upload the macOS + Linux release assets from this Mac.
+# Build the macOS + Linux release assets on this Mac, add the CI-built Windows
+# zips, and publish one complete release.
 #
 #   scripts/release-local.sh [--tag vX.Y.Z] [--no-upload]
 #
@@ -46,9 +47,15 @@ for t in "${MAC_TARGETS[@]}" "${LINUX_TARGETS[@]}"; do
 done
 if [ "$upload" = 1 ]; then
   command -v gh >/dev/null || { echo "missing tool: gh" >&2; exit 1; }
-  # Never let `gh release create` mint the tag from the default branch.
-  git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null \
-    || { echo "tag $tag is not on origin; push it first (the push also starts the Windows build)" >&2; exit 1; }
+  # Published binaries must come from exactly the tagged commit.
+  sha=$(git rev-parse "$tag^{commit}" 2>/dev/null) || { echo "no local tag $tag" >&2; exit 1; }
+  [ -z "$(git status --porcelain)" ] || { echo "working tree is dirty; commit or stash first" >&2; exit 1; }
+  [ "$(git rev-parse HEAD)" = "$sha" ] || { echo "HEAD is not at $tag ($sha); check out the tag's commit" >&2; exit 1; }
+  # Never let `gh release create` mint the tag from the default branch; the
+  # origin tag must resolve to the same commit as the local one.
+  remote=$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk 'END{print $1}')
+  [ -n "$remote" ] || { echo "tag $tag is not on origin; push it first (the push also starts the Windows build)" >&2; exit 1; }
+  [ "$remote" = "$sha" ] || { echo "origin $tag ($remote) differs from local $tag ($sha)" >&2; exit 1; }
 fi
 
 target_dir=$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
@@ -99,21 +106,32 @@ echo "built and smoke-tested:"; ls dist/*.tar.gz
 
 [ "$upload" = 1 ] || { echo "--no-upload: nothing pushed"; exit 0; }
 
-gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --generate-notes
-gh release upload "$tag" --clobber dist/*.tar.gz dist/*.tar.gz.sha256
+# Windows comes from CI: wait for the run on this commit, then pull its artifacts.
+run=$(gh run list --workflow release.yml --commit "$sha" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+[ -n "$run" ] || { echo "no release.yml run for $sha; did the tag push start it?" >&2; exit 1; }
+[ "$(gh run view "$run" --json status --jq .status)" = completed ] || gh run watch "$run" --exit-status
+[ "$(gh run view "$run" --json conclusion --jq .conclusion)" = success ] \
+  || { echo "release.yml run $run did not succeed; fix it and re-run (gh run rerun $run)" >&2; exit 1; }
+gh run download "$run" --dir dist/win
 
-expected=(
-  "$BIN-aarch64-apple-darwin.tar.gz" "$BIN-x86_64-apple-darwin.tar.gz" "$BIN-$UNIVERSAL.tar.gz"
-  "$BIN-x86_64-unknown-linux-musl.tar.gz" "$BIN-aarch64-unknown-linux-musl.tar.gz"
-  "$BIN-x86_64-pc-windows-msvc.zip" "$BIN-aarch64-pc-windows-msvc.zip"
-)
+# Draft first, publish only when every asset is attached, so releases/latest
+# never points at a partial release. install.sh/.ps1 come from the tagged tree.
+gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --draft --generate-notes
+gh release upload "$tag" --clobber dist/*.tar.gz dist/*.tar.gz.sha256 dist/win/*/agent-hooks-* install.sh install.ps1
+
+expected=(install.sh install.ps1)
+for t in "${MAC_TARGETS[@]}" "$UNIVERSAL" "${LINUX_TARGETS[@]}"; do
+  expected+=("$BIN-$t.tar.gz" "$BIN-$t.tar.gz.sha256")
+done
+for t in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+  expected+=("$BIN-$t.zip" "$BIN-$t.zip.sha256")
+done
 have=$(gh release view "$tag" --json assets --jq '.assets[].name')
 missing=0
 for a in "${expected[@]}"; do
-  grep -qx "$a" <<<"$have" || { echo "not on release yet: $a"; missing=1; }
+  grep -qx "$a" <<<"$have" || { echo "missing on release: $a" >&2; missing=1; }
 done
-if [ "$missing" = 1 ]; then
-  echo "Windows assets come from the release workflow (gh run watch). Re-run this check with: gh release view $tag --json assets --jq '.assets[].name'"
-else
-  echo "all platform assets present. Publish the SDKs: gh workflow run sdk-publish.yml -f tag=$tag"
-fi
+[ "$missing" = 0 ] || { echo "release $tag left as draft" >&2; exit 1; }
+
+gh release edit "$tag" --draft=false
+echo "published $tag with ${#expected[@]} assets. Publish the SDKs: gh workflow run sdk-publish.yml -f tag=$tag"

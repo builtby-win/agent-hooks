@@ -35,7 +35,7 @@
         "resume": {"argv": ["omp", "--resume={session_ref}"], "session_ref": "id_or_path"},
         "start": {"argv": ["omp", "{prompt}"]},
         "exec": {"argv": ["omp", "--print", "{prompt}"]},
-        "models": {"argv": ["omp", "models", "--json"], "id_fields": ["id", "selector"]},
+        "models": {"argv": ["omp", "models", "--json"], "id_fields": ["selector"]},
         "model_args": ["--model={model}"],
         "yolo_args": ["--auto-approve"]
       },

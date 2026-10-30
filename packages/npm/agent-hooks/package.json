@@ -1,0 +1,20 @@
+{
+  "name": "builtby.win-agent-hooks",
+  "version": "0.0.0",
+  "description": "Universal lifecycle hooks for AI coding agents. Ships the native binary; init() installs it and registers hooks.",
+  "license": "MIT OR Apache-2.0",
+  "repository": "github:builtby-win/agent-hooks",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "bin": { "agent-hooks": "bin.js" },
+  "files": ["index.js", "index.d.ts", "bin.js", "README.md"],
+  "engines": { "node": ">=18" },
+  "optionalDependencies": {
+    "builtby.win-agent-hooks-darwin-arm64": "0.0.0",
+    "builtby.win-agent-hooks-darwin-x64": "0.0.0",
+    "builtby.win-agent-hooks-linux-arm64": "0.0.0",
+    "builtby.win-agent-hooks-linux-x64": "0.0.0",
+    "builtby.win-agent-hooks-win32-arm64": "0.0.0",
+    "builtby.win-agent-hooks-win32-x64": "0.0.0"
+  }
+}

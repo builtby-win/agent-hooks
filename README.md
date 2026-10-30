@@ -2,11 +2,11 @@
 
 **Universal lifecycle hooks and observability engine for AI coding agent harnesses.**
 
-One binary, three jobs:
+One binary, two core jobs and one optional extra:
 
-1. **Hook shim (`agent-hooks hook`)** — drops into any harness's hook config, runs in `<2ms`, never blocks the agent.
-2. **Installer (`agent-hooks install`)** — registers the shim in every harness config on your machine, preserving comments and user settings.
-3. **Daemon (`agent-hooks daemon`)** — normalizes every harness event into one lifecycle stream your app/cli/process can subscribe to
+1. **Hook shim (`agent-hooks hook`)** — drops into any harness's hook config, runs in `<2ms`, never blocks the agent. Runs your local hook commands, which are full deciders: they receive the normalized event (including its derived `status`) on stdin and their verdict is translated back into the harness's own dialect.
+2. **Installer (`agent-hooks install` / `self-install`)** — registers the shim in every harness config on your machine, preserving comments and user settings.
+3. **Daemon (`agent-hooks daemon`, optional)** — only needed for a push event stream to subscribers, aggregated cross-process session state, or an answerer that is a separate long-lived process. Nothing else requires it.
 
 ```mermaid
 flowchart LR
@@ -20,16 +20,16 @@ flowchart LR
     class AH core
 ```
 
-You do **not** need the daemon to get value. The fast path is daemonless local hooks (`~/.agent-hooks/hooks.json`) — same file works across all 19 harnesses. Add the daemon when you want live policy, cross-harness session tracking, or app subscriptions.
+**You do not need the daemon.** The shim plus local hooks (`~/.agent-hooks/hooks.json`) is the product: same file across all 19 harnesses, with hold-and-ask, allow/deny, context injection and status all available to a hook command. An app integrates by registering its own command there; see [Embedding agent-hooks in an app](docs/embedding.md). Add the daemon only for the three cases above.
 
 ---
 
 ## Contents
 
 - [Supported harnesses](#supported-harnesses)
-- [Install the binary](#install-the-binary)
+- [Install the binary](#install-the-binary) · [Embedding in an app (Node / Python / Go / any)](docs/embedding.md)
 - [Quickstart: automate your agent in 2 minutes (no daemon)](#quickstart-automate-your-agent-in-2-minutes-no-daemon)
-- [Quickstart: live events for apps (daemon)](#quickstart-live-events-for-apps-daemon)
+- [Quickstart: live events for apps (optional daemon)](#quickstart-live-events-for-apps-optional-daemon)
 - [Command reference](#command-reference)
 - [Conversation history (opt-in)](#conversation-history-opt-in)
 - [Local hooks reference](#local-hooks-reference)
@@ -155,35 +155,36 @@ see [the Vibe Island support audit](docs/vibe-island-support-audit.md).
 
 ## Install the binary
 
-Prebuilt binaries on [GitHub Releases](https://github.com/builtby-win/agent-hooks/releases) (tag `v*`: macOS arm64/x64, Linux x64, Windows x64). Verify checksums with the sibling `.sha256` files.
+One command detects your OS and CPU, downloads the matching release, verifies its sha256, installs it to `~/.agent-hooks/bin/agent-hooks`, and registers hooks in every detected harness:
 
 ```bash
-# macOS arm64 (M1+) — pick the asset matching your platform:
-#   agent-hooks-aarch64-apple-darwin.tar.gz        macOS arm64
-#   agent-hooks-x86_64-apple-darwin.tar.gz         macOS Intel
-#   agent-hooks-x86_64-unknown-linux-gnu.tar.gz    Linux x64
-#   agent-hooks-x86_64-pc-windows-msvc.zip         Windows x64
-tar -xzf agent-hooks-aarch64-apple-darwin.tar.gz
-sudo mv agent-hooks-aarch64-apple-darwin/agent-hooks /usr/local/bin/
+curl -fsSL https://github.com/builtby-win/agent-hooks/releases/latest/download/install.sh | sh
+# Windows (PowerShell)
+irm https://github.com/builtby-win/agent-hooks/releases/latest/download/install.ps1 | iex
 ```
 
-Windows (PowerShell):
+Options: `AGENT_HOOKS_VERSION=vX.Y.Z` pins a release, `AGENT_HOOKS_HOME` moves the install root, `AGENT_HOOKS_BASE_URL` points at a mirror; `--no-hooks` places the binary only, `--harness <id>` limits registration.
 
-```powershell
-Expand-Archive agent-hooks-x86_64-pc-windows-msvc.zip
-Move-Item agent-hooks-x86_64-pc-windows-msvc\agent-hooks.exe "$env:LOCALAPPDATA\Programs\agent-hooks\"
-```
+Release assets (`agent-hooks-<target>.tar.gz`, `.zip` on Windows, each with a `.sha256`; combined `SHA256SUMS`) cover macOS arm64/x64, Linux arm64/x64 (static musl, any distro), and Windows arm64/x64.
 
-Install the CLI directly from the public Git repository with Cargo:
+### Bundling it in an app
+
+Apps do not need users to install anything: ship the binary and call `self-install` on startup. It copies the running binary to the shared path `~/.agent-hooks/bin/agent-hooks` (atomically; **newest version wins**, so several apps can each do this without clobbering one another), then registers hooks pointing at that path. Hooks live in other processes' configs, so the binary must sit at a stable path that outlives your app.
 
 ```bash
-cargo install --git https://github.com/builtby-win/agent-hooks agent-hooks-cli
+./bundled/agent-hooks self-install --min-version 0.12.0 --json
+# {"action":"installed|upgraded|kept|current","version":"0.12.0","path":"…","harnesses":[{"id":"claude-code","status":"installed|current|skipped|failed"}],"on_path":false}
 ```
 
-Or build the checkout you're working in:
+The JSON result is the final stdout line. `--no-hooks` only places the binary; `--dry-run` reports without changing anything. Always invoke the hook shim via the returned `path`.
+
+Ready-made wrappers for this call, so app authors do not shell out by hand: **Node/Electron** `npm i builtby.win-agent-hooks` (`init()`), **Python** `pip install builtby-win-agent-hooks` (`init()`), **Go** `sdk/go` (`agenthooks.Init`). Any other language implements the four-step contract in the [embedding guide](docs/embedding.md#the-contract-any-language). Apps then integrate by registering a hook command, not by running a daemon.
+
+### Other ways
 
 ```bash
-cargo install --path crates/agent-hooks-cli
+cargo install --git https://github.com/builtby-win/agent-hooks agent-hooks-cli   # from source
+cargo install --path crates/agent-hooks-cli                                       # this checkout
 ```
 
 A crates.io install (`cargo install agent-hooks-cli`) will be available after the workspace crates are published, with internal dependencies published before the CLI.
@@ -224,9 +225,9 @@ echo '{"session_id":"abc","tool_name":"Edit","tool_input":{}}' \
 
 ---
 
-## Quickstart: live events for apps (daemon)
+## Quickstart: live events for apps (optional daemon)
 
-Add the daemon when you want cross-harness session tracking, live policy decisions, or app subscriptions (status bars, multiplexers, dashboards — e.g. Back2Vibing, Herdr).
+Most apps do not need this: register a hook command instead ([embedding guide](docs/embedding.md)). Add the daemon only when you want a push event stream to subscribers, aggregated cross-harness session state, or an answerer that is a separate long-lived process (status bars, dashboards).
 
 ```bash
 agent-hooks install --harness all
@@ -418,7 +419,7 @@ Schema (`deny_unknown_fields` — typos are hard errors, check stderr):
 }
 ```
 
-- Entry: `{command, timeout?, when?, respond?}`. Commands run via `sh -c` (unix) / `cmd /C` (windows) with a kill-on-timeout (fail-open). An omitted `timeout` inherits the harness's own hook window for the event (minus a 2s grace margin so our kill — a clean verdict — fires before the harness kill, which would discard the decision mid-write); when the harness declares no window, 10s applies. An explicit `timeout` is capped by the same window. Either way the first timer to fire wins — a hook can never outlast the harness waiting for it, so "hold forever" is not possible offline; long human holds need the daemon (300s).
+- Entry: `{command, timeout?, when?, respond?}`. Commands run via `sh -c` (unix) / `cmd /C` (windows) with a kill-on-timeout (fail-open). An omitted `timeout` inherits the harness's own hook window for the event (minus a 2s grace margin so our kill — a clean verdict — fires before the harness kill, which would discard the decision mid-write); when the harness declares no window, 10s applies. An explicit `timeout` is capped by the same window. The first timer to fire wins, so a hook can never outlast the harness waiting for it. A command is a full decider and can wait on a human (open a UI, prompt in a terminal, call your app) before exiting: the installer writes gate-event windows above the daemon's ~330s hold budget (see [`install`](#install-ordered-ops-that-register-the-shim)), so a local command can hold for minutes without a daemon. The daemon does not extend that window; it only adds the ability for a *separate* process to answer later.
 - `when` filter: `{tool?, prompt_matches?}` — every present field must match (case-insensitive); absent fields impose no constraint. `tool` matches `PreToolUse.tool_name` (or `PermissionRequest` tool name); `prompt_matches` is a substring over prompt description + question texts (tool-input JSON fallback).
 - `respond`: a canonical `PromptDecision`, exactly the same object accepted by daemon `prompt.respond` and exit-0 command stdout. `allow` is required; optional fields are `custom_input`, `answers`, `ask`, `defer`, `allow_always`, `suggestion`, and `additional_context`. Unknown fields are rejected. A plain `{"allow": true}` explicitly approves; `{"allow": false, "defer": true}` leaves native permission checks intact. No process or daemon is required for canned responses.
 - Migration: replace local `{"decision": "allow"}` with `{"allow": true}`, `{"decision": "deny", "reason": "..."}` with `{"allow": false, "custom_input": "..."}`, and `{"decision": "ask", "reason": "..."}` with `{"allow": false, "ask": true, "custom_input": "..."}`. The old config schema is rejected rather than retained as a second contract.

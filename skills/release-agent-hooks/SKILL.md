@@ -1,17 +1,15 @@
 ---
 name: release-agent-hooks
-description: Cut a new agent-hooks release — bump workspace version, build macOS (arm64+Intel) and Linux x64 binaries locally, push the tag so CI builds Windows, and upload all assets to the GitHub release.
+description: Cut a new agent-hooks release — bump workspace version, push the tag so CI builds every platform (macOS, Linux musl, Windows; x64 + arm64) and publishes the assets, then verify them.
 ---
 
 # Release agent-hooks
 
-Split build: macOS + Linux are built **locally** (`dist/` is gitignored);
-**Windows is built by CI** (`.github/workflows/release.yml` runs on tag push
-and publishes `agent-hooks-x86_64-pc-windows-msvc.zip`). Tag format: `v*`.
+CI builds **every** target (`.github/workflows/release.yml`, runs on tag push). Nothing is built locally. Tag format: `v*`.
 
 ```mermaid
 flowchart LR
-    BUMP["bump Cargo.toml"] --> TEST["cargo test"] --> COMMIT["commit + tag"] --> LOCAL["build macOS x2 + Linux locally"] --> PUSH["push tag"] --> CI["CI builds Windows zip"] --> UP["gh release upload mac/linux"] --> VERIFY["verify 8 assets"]
+    BUMP["bump Cargo.toml"] --> TEST["cargo test"] --> COMMIT["commit + tag"] --> PUSH["push tag"] --> CI["CI matrix builds + publishes"] --> VERIFY["verify 15 assets + install.sh"]
 ```
 
 ## 0. Preflight
@@ -24,13 +22,6 @@ grep '^version' Cargo.toml        # current version, e.g. 0.5.6
 
 Pick the next version (semver): patch = fix, minor = feature, major =
 breaking. New version below is `X.Y.Z`.
-
-One-time toolchain setup (skip if present):
-
-```bash
-rustup target add aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu
-cargo install cargo-zigbuild     # Linux cross-link via zig (glibc, no docker)
-```
 
 ### Harness verification check
 
@@ -59,92 +50,54 @@ git add Cargo.toml Cargo.lock README.md crates/agent-hooks-adapters/builtin
 git commit -m "release: agent-hooks X.Y.Z"
 ```
 
-## 2. Build all three local targets
-
-Native macOS builds plus zigbuild cross-compile for Linux (output matches
-the published ABI: `ELF x86-64, dynamically linked, interpreter
-/lib64/ld-linux-x86-64.so` — verify with `file`):
-
-```bash
-rm -rf dist && mkdir -p dist
-cargo build --release --locked -p agent-hooks-cli --target aarch64-apple-darwin
-cargo build --release --locked -p agent-hooks-cli --target x86_64-apple-darwin
-cargo zigbuild --release --locked -p agent-hooks-cli --target x86_64-unknown-linux-gnu
-file target/x86_64-unknown-linux-gnu/release/agent-hooks  # expect ELF 64-bit LSB, x86-64
-```
-
-If `cargo zigbuild` fails, `zig` is missing: `brew install zig`, then
-`cargo install cargo-zigbuild --force`.
-
-## 3. Package + smoke test
-
-Layout per target (mirrors the install docs): a stage dir
-`agent-hooks-<target>/` containing `agent-hooks` + `README.md`, tarred with
-a sibling `.sha256`:
-
-```bash
-BIN=agent-hooks
-for T in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
-  STAGE="dist/$BIN-$T"
-  mkdir -p "$STAGE"
-  cp "target/$T/release/$BIN" "$STAGE/"
-  cp README.md "$STAGE/"
-  tar -czf "dist/$BIN-$T.tar.gz" -C dist "$BIN-$T"
-  (cd dist && shasum -a 256 "$BIN-$T.tar.gz" > "$BIN-$T.tar.gz.sha256")
-done
-ls dist/*.tar.gz dist/*.sha256
-```
-
-Smoke test every binary before tagging (linux binary can't exec on macOS —
-check the ELF header via `file` instead, done in §2):
-
-```bash
-./dist/agent-hooks-aarch64-apple-darwin/agent-hooks --version  # expect X.Y.Z
-arch -x86_64 ./dist/agent-hooks-x86_64-apple-darwin/agent-hooks --version || \
-  file target/x86_64-apple-darwin/release/agent-hooks
-```
-
-Rosetta (`arch -x86_64`) is needed for the Intel binary on Apple Silicon;
-if Rosetta is absent the `file` fallback (Mach-O 64-bit x86_64) suffices.
-
-## 4. Tag, push, let CI build Windows
+## 2. Tag, push, let CI build
 
 ```bash
 git tag vX.Y.Z
 git push origin main vX.Y.Z
-gh run watch   # windows-2022 job: builds + publishes the -pc-windows-msvc.zip
+gh run watch   # 6 build jobs + publish
 ```
 
-Tag push is the CI trigger (`on.push.tags: v*`). Do NOT build Windows
-locally — there is no local Windows step by design.
+Tag push is the trigger (`on.push.tags: v*`); `workflow_dispatch` with an
+existing tag re-runs it. Linux targets are **musl** (static, any distro).
+Each build job smoke-tests (`--version`, `list-adapters --json`) the
+targets it can execute natively.
 
-## 5. Upload macOS/Linux assets + verify
-
-Once CI's `publish` job has created the release, attach the six local files
-(three tarballs + three checksums). If CI hasn't created it yet,
-`gh release create` first — `action-gh-release` appends to an existing
-release either way:
+## 3. Verify the release
 
 ```bash
-gh release view vX.Y.Z >/dev/null 2>&1 || gh release create vX.Y.Z --generate-notes
-gh release upload vX.Y.Z dist/*.tar.gz dist/*.tar.gz.sha256
-gh release view vX.Y.Z --json assets --jq '.assets[].name'
+gh release view vX.Y.Z --json assets --jq '.assets[].name' | sort
 ```
 
-Expected: 8 assets —
+Expected: 15 assets, names are the contract `install.sh` / `install.ps1`
+and package wrappers rely on —
 
 ```text
-agent-hooks-aarch64-apple-darwin.tar.gz(.sha256)
-agent-hooks-x86_64-apple-darwin.tar.gz(.sha256)
-agent-hooks-x86_64-unknown-linux-gnu.tar.gz(.sha256)
-agent-hooks-x86_64-pc-windows-msvc.zip(.sha256)
+agent-hooks-{aarch64,x86_64}-apple-darwin.tar.gz(.sha256)
+agent-hooks-{aarch64,x86_64}-unknown-linux-musl.tar.gz(.sha256)
+agent-hooks-{aarch64,x86_64}-pc-windows-msvc.zip(.sha256)
+SHA256SUMS, install.sh, install.ps1
 ```
 
-If a filename is wrong or an asset missing, the README install table (§
-"Install the binary") breaks — fix the name, re-upload with
-`gh release upload --clobber`.
+Then prove the installer end to end against the real release:
 
-## 6. Done
+```bash
+H=$(mktemp -d); AGENT_HOOKS_HOME=$H/ah HOME=$H AGENT_HOOKS_VERSION=vX.Y.Z \
+  sh <(curl -fsSL https://github.com/builtby-win/agent-hooks/releases/download/vX.Y.Z/install.sh) --no-hooks
+$H/ah/bin/agent-hooks --version   # expect X.Y.Z
+```
 
-`dist/` stays local (gitignored) — nothing to commit after tagging. Leave
-the tree clean: `git status --porcelain` empty apart from nothing.
+Run `self-install` smoke tests from a scratch directory, not the repo root: `HOME`/`AGENT_HOOKS_HOME` isolate user-level configs, but the installer also writes project-level harness configs relative to the cwd (`.github/hooks/hooks.json`, `.muse/hooks.json`, ...) and will rewrite this repo's with temp paths.
+
+If a name is wrong or an asset is missing, fix the workflow and re-run
+with `workflow_dispatch`; never hand-upload.
+
+## 4. SDK channels
+
+The `npm` and `pypi` jobs in `release.yml` publish `builtby.win-agent-hooks` (+ six platform packages) and `builtby-win-agent-hooks` wheels from the release assets. They only run when the repo variables `NPM_PUBLISH` / `PYPI_PUBLISH` are `true` (needs the `NPM_TOKEN` secret and a PyPI trusted publisher for this workflow).
+
+The Go SDK lives in a subdirectory module, so `go get` versions come from a prefixed tag; push it with the release tag:
+
+```bash
+git tag sdk/go/vX.Y.Z && git push origin sdk/go/vX.Y.Z
+```

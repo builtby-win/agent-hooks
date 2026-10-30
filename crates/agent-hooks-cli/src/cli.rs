@@ -28,6 +28,10 @@ pub enum Commands {
     /// Install hooks into agent harnesses
     Install(InstallArgs),
 
+    /// Install this binary at ~/.agent-hooks/bin (newest wins) and register hooks against it
+    #[command(name = "self-install")]
+    SelfInstall(SelfInstallArgs),
+
     /// Remove hooks installed by agent-hooks
     Uninstall(UninstallArgs),
 
@@ -348,6 +352,35 @@ pub struct InstallArgs {
     #[arg(long = "adapter-version", value_name = "VERSION")]
     pub adapter_version: Option<String>,
 }
+
+/// Copy this binary to the shared location and register hooks against it.
+#[derive(Parser, Debug)]
+pub struct SelfInstallArgs {
+    /// Harness to install hooks for (`all` or a specific name)
+    #[arg(long, value_name = "HARNESS", default_value = "all")]
+    pub harness: String,
+
+    /// Fail unless this binary is at least this version (X.Y.Z)
+    #[arg(long, value_name = "VERSION")]
+    pub min_version: Option<String>,
+
+    /// Socket path to embed in installed hook commands
+    #[arg(long, value_name = "PATH")]
+    pub socket: Option<PathBuf>,
+
+    /// Only place the binary; do not touch harness configs
+    #[arg(long)]
+    pub no_hooks: bool,
+
+    /// Report what would happen without changing anything
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Machine-readable result as the final stdout line: {path, action, version, harnesses: [{id, status, error?}], on_path}
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Parser, Debug)]
 pub struct UninstallArgs {
     /// Harness to uninstall from (`all` or a specific name)

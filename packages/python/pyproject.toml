@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "builtby-win-agent-hooks"
+version = "0.0.0"
+description = "Install and run the agent-hooks CLI (bundled binary) from Python"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+requires-python = ">=3.9"
+
+[project.scripts]
+agent-hooks = "builtby_win_agent_hooks.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+builtby_win_agent_hooks = ["py.typed"]

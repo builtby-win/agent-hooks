@@ -9,6 +9,7 @@ pub mod hook;
 pub mod install;
 pub mod list;
 pub mod plugin;
+pub mod self_install;
 pub mod status;
 pub mod uninstall;
 pub mod user_hooks;

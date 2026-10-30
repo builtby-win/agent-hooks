@@ -47,6 +47,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Exec(args) => commands::agent::launch(commands::agent::Mode::Exec, args),
         Commands::Models(args) => commands::agent::models(args),
         Commands::Install(args) => commands::install::run(args),
+        Commands::SelfInstall(args) => commands::self_install::run(args),
         Commands::Uninstall(args) => commands::uninstall::run(args),
         Commands::Status(args) => commands::status::run(args),
         Commands::ListAdapters(args) => commands::list::run(args),

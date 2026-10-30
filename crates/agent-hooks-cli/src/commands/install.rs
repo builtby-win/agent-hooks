@@ -264,7 +264,22 @@ fn entry_is_ours(command: &str, id_norm: &str, alias_norms: &[String]) -> bool {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Per-harness result of an install pass, surfaced by `self-install --json`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HarnessResult {
+    pub id: String,
+    /// `installed` (hooks written), `current` (already up to date),
+    /// `skipped` (no config file found) or `failed`.
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 pub fn run(args: InstallArgs) -> anyhow::Result<()> {
+    run_collect(args).map(|_| ())
+}
+
+pub fn run_collect(args: InstallArgs) -> anyhow::Result<Vec<HarnessResult>> {
     let binary = resolve_binary_path(args.binary_path.as_deref());
     let target = args.harness.to_lowercase();
 
@@ -285,7 +300,7 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
             println!("No detected harnesses found. Use --harness <name> to install for a specific harness.");
             println!("Known harnesses: {}", AdapterRegistry::ids().join(", "));
             println!("Binary path: {}", binary.display());
-            return Ok(());
+            return Ok(Vec::new());
         }
         (detected, true)
     } else {
@@ -296,6 +311,7 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
     let mut installed = 0usize;
     let mut current = 0usize;
     let mut skipped = 0usize;
+    let mut results: Vec<HarnessResult> = Vec::new();
 
     for (manifest, version) in &targets {
         match install_for_manifest(
@@ -319,22 +335,42 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
                         manifest.display_name, outcome.hooks
                     );
                     installed += 1;
+                    results.push(HarnessResult {
+                        id: manifest.id.clone(),
+                        status: "installed",
+                        error: None,
+                    });
                 } else if outcome.up_to_date {
                     println!(
                         "✓ {} — already installed (up to date)",
                         manifest.display_name
                     );
                     current += 1;
+                    results.push(HarnessResult {
+                        id: manifest.id.clone(),
+                        status: "current",
+                        error: None,
+                    });
                 } else {
                     println!(
                         "- {} — no config file found (skipped)",
                         manifest.display_name
                     );
                     skipped += 1;
+                    results.push(HarnessResult {
+                        id: manifest.id.clone(),
+                        status: "skipped",
+                        error: None,
+                    });
                 }
             }
             Err(e) => {
                 eprintln!("✗ {} — failed: {}", manifest.display_name, e);
+                results.push(HarnessResult {
+                    id: manifest.id.clone(),
+                    status: "failed",
+                    error: Some(e.to_string()),
+                });
             }
         }
     }
@@ -362,7 +398,7 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
         println!("Binary: {}", binary.display());
     }
 
-    Ok(())
+    Ok(results)
 }
 
 /// A harness counts as detected only when its CLI binary is on PATH

@@ -1,6 +1,8 @@
 name: release
 
-# Windows-only: macOS/Linux binaries are built + uploaded locally on release day.
+# Builds every platform in CI. Asset names are the contract install.sh,
+# install.ps1 and package wrappers rely on:
+#   agent-hooks-<target>.tar.gz | .zip   (+ .sha256), containing agent-hooks-<target>/agent-hooks[.exe]
 on:
   push:
     tags:
@@ -21,38 +23,85 @@ env:
 
 jobs:
   build:
-    name: x86_64-pc-windows-msvc
-    runs-on: windows-2022
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-14, zig: false }
+          - { target: x86_64-apple-darwin, os: macos-14, zig: false }
+          # musl = static: runs on any Linux distro (glibc, Alpine, old LTS).
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-22.04, zig: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-22.04, zig: true }
+          - { target: x86_64-pc-windows-msvc, os: windows-2022, zig: false }
+          - { target: aarch64-pc-windows-msvc, os: windows-2022, zig: false }
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: x86_64-pc-windows-msvc
+          key: ${{ matrix.target }}
+
+      - name: Install zig + cargo-zigbuild
+        if: matrix.zig
+        run: |
+          pip install ziglang
+          cargo install cargo-zigbuild --locked
 
       - name: Build
-        run: cargo build --release --locked -p ${{ env.PACKAGE }} --target x86_64-pc-windows-msvc
+        if: "!matrix.zig"
+        run: cargo build --release --locked -p ${{ env.PACKAGE }} --target ${{ matrix.target }}
+
+      - name: Build (zig)
+        if: matrix.zig
+        run: cargo zigbuild --release --locked -p ${{ env.PACKAGE }} --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          stage="agent-hooks-${{ matrix.target }}"
+          mkdir "$stage"
+          cp "target/${{ matrix.target }}/release/$BIN" "$stage/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          tar -czf "$stage.tar.gz" "$stage"
+          shasum -a 256 "$stage.tar.gz" > "$stage.tar.gz.sha256"
 
       - name: Package (windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $Stage = "agent-hooks-x86_64-pc-windows-msvc"
+          $Stage = "agent-hooks-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path $Stage | Out-Null
-          Copy-Item "target/x86_64-pc-windows-msvc/release/$env:BIN.exe" "$Stage/"
-          if (Test-Path README.md) { Copy-Item README.md "$Stage/" }
+          Copy-Item "target/${{ matrix.target }}/release/$env:BIN.exe" "$Stage/"
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE "$Stage/"
           Compress-Archive -Path "$Stage/*" -DestinationPath "$Stage.zip"
           (Get-FileHash "$Stage.zip" -Algorithm SHA256).Hash.ToLower() + "  $Stage.zip" | Out-File "$Stage.zip.sha256" -Encoding ascii
 
+      - name: Smoke test (native targets)
+        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        run: |
+          exe="target/${{ matrix.target }}/release/$BIN"
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          "$exe" --version
+          "$exe" list-adapters --json > /dev/null
+
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-hooks-x86_64-pc-windows-msvc
+          name: agent-hooks-${{ matrix.target }}
           path: |
-            agent-hooks-x86_64-pc-windows-msvc.zip
-            agent-hooks-x86_64-pc-windows-msvc.zip.sha256
+            agent-hooks-${{ matrix.target }}.tar.gz
+            agent-hooks-${{ matrix.target }}.tar.gz.sha256
+            agent-hooks-${{ matrix.target }}.zip
+            agent-hooks-${{ matrix.target }}.zip.sha256
           if-no-files-found: error
 
   publish:
@@ -60,6 +109,10 @@ jobs:
     needs: build
     runs-on: ubuntu-22.04
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -71,10 +124,79 @@ jobs:
           if [ -n "${{ inputs.tag }}" ]; then echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT";
           else echo "value=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"; fi
 
+      - name: Combined checksums
+        run: cat agent-hooks-*.sha256 > SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.value }}
           files: |
+            agent-hooks-*.tar.gz
             agent-hooks-*.zip
-            agent-hooks-*.zip.sha256
+            agent-hooks-*.sha256
+            SHA256SUMS
+            install.sh
+            install.ps1
           generate_release_notes: true
+
+  npm:
+    name: npm
+    needs: publish
+    runs-on: ubuntu-22.04
+    # Needs an NPM_TOKEN repo secret with publish rights to the builtby.win-agent-hooks* package names.
+    if: ${{ vars.NPM_PUBLISH == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: assets
+
+      - name: Pack
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          node scripts/npm-pack.mjs "${tag#v}" assets npm-out
+
+      # Platform packages first so the wrapper's optionalDependencies resolve.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for d in npm-out/agent-hooks-*; do (cd "$d" && npm publish --access public); done
+          (cd npm-out/agent-hooks && npm publish --access public)
+
+  pypi:
+    name: pypi
+    needs: publish
+    runs-on: ubuntu-22.04
+    # Uses PyPI trusted publishing: register this repo + workflow as a trusted
+    # publisher for `builtby-win-agent-hooks`, then set the repo variable PYPI_PUBLISH=true.
+    if: ${{ vars.PYPI_PUBLISH == 'true' }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: assets
+
+      - name: Build wheels
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          python3 scripts/pypi-pack.py "${tag#v}" assets dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

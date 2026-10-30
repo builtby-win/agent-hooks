@@ -276,10 +276,14 @@ pub struct HarnessResult {
 }
 
 pub fn run(args: InstallArgs) -> anyhow::Result<()> {
-    run_collect(args).map(|_| ())
+    run_collect(args, false).map(|_| ())
 }
 
-pub fn run_collect(args: InstallArgs) -> anyhow::Result<Vec<HarnessResult>> {
+/// `user_only` restricts every op to user-scoped paths (`~`, `$XDG_*`, absolute) and
+/// ignores cwd-relative project configs such as `.github/hooks/hooks.json`. Embedders
+/// that run `self-install` from an arbitrary cwd rely on this so a user's repo is never
+/// rewritten; the explicit `install` command keeps project scope.
+pub fn run_collect(args: InstallArgs, user_only: bool) -> anyhow::Result<Vec<HarnessResult>> {
     let binary = resolve_binary_path(args.binary_path.as_deref());
     let target = args.harness.to_lowercase();
 
@@ -321,6 +325,7 @@ pub fn run_collect(args: InstallArgs) -> anyhow::Result<Vec<HarnessResult>> {
             args.socket.as_deref(),
             args.adapter_version.as_deref(),
             !is_all,
+            user_only,
             StageVars {
                 bin: args.binary_path.as_deref(),
                 socket: args.socket.as_deref(),
@@ -485,6 +490,7 @@ fn install_for_manifest(
     socket: Option<&Path>,
     adapter_version: Option<&str>,
     explicit: bool,
+    user_only: bool,
     vars: StageVars,
 ) -> anyhow::Result<InstallOutcome> {
     let vs = manifest
@@ -516,6 +522,7 @@ fn install_for_manifest(
                 dedupe,
                 entry_overrides,
             } => {
+                let paths = &scope_paths(paths, user_only);
                 let (n, touched) = op_json_hooks(
                     manifest,
                     version,
@@ -541,6 +548,7 @@ fn install_for_manifest(
                 entry_shape,
                 entry,
             } => {
+                let paths = &scope_paths(paths, user_only);
                 let (n, touched) = op_toml_hooks(
                     manifest,
                     version,
@@ -562,6 +570,7 @@ fn install_for_manifest(
                 entry,
                 entry_overrides,
             } => {
+                let paths = &scope_paths(paths, user_only);
                 let (n, touched) = op_toml_list_hooks(
                     manifest,
                     version,
@@ -612,6 +621,7 @@ fn install_for_manifest(
                 restore_on_uninstall,
                 only_if_sole_json,
             } => {
+                let paths = &scope_paths(paths, user_only);
                 if let Some(sole) = only_if_sole_json.as_deref() {
                     if dir_has_other_json(&expand_op_path(sole)) {
                         println!(
@@ -649,6 +659,18 @@ fn install_for_manifest(
         hooks: total,
         up_to_date,
     })
+}
+
+/// Drop cwd-relative (project-scope) paths when `user_only`.
+fn scope_paths(paths: &[String], user_only: bool) -> Vec<String> {
+    if !user_only {
+        return paths.to_vec();
+    }
+    paths
+        .iter()
+        .filter(|p| expand_op_path(p).is_absolute())
+        .cloned()
+        .collect()
 }
 
 /// First existing path, else the first listed path when `create` (or the
@@ -1957,6 +1979,19 @@ fn version_events(manifest: &AdapterManifest, version: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn user_only_scope_drops_cwd_relative_project_paths() {
+        let paths = vec![
+            "~/.copilot/settings.json".to_string(),
+            ".github/hooks/hooks.json".to_string(),
+            "/etc/agent/hooks.json".to_string(),
+        ];
+        assert_eq!(super::scope_paths(&paths, false), paths);
+        let scoped = super::scope_paths(&paths, true);
+        assert_eq!(scoped.len(), 2);
+        assert!(!scoped.iter().any(|p| p.starts_with(".github")));
+    }
+
     use super::*;
 
     #[test]
@@ -2825,6 +2860,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
             None,
             None,
             true,
+            false,
             StageVars::default(),
         )
         .expect("install");

@@ -20,13 +20,15 @@ if ($env:AGENT_HOOKS_JSON) { $siArgs += '--json' }
 $existing = Join-Path $home_dir 'bin\agent-hooks.exe'
 if ($env:AGENT_HOOKS_MIN_VERSION -and (Test-Path $existing)) {
   $have = ((& $existing --version) -split '\s+')[-1] -replace '-.*$', ''
+  $satisfied = $false
   try {
-    if ([version]$have -ge [version]($env:AGENT_HOOKS_MIN_VERSION -replace '-.*$', '')) {
-      & $existing @siArgs
-      if ($LASTEXITCODE -ne 0) { throw "self-install failed" }
-      return
-    }
-  } catch [System.Management.Automation.RuntimeException] { }
+    $satisfied = [version]$have -ge [version]($env:AGENT_HOOKS_MIN_VERSION -replace '-.*$', '')
+  } catch { }
+  if ($satisfied) {
+    & $existing @siArgs
+    if ($LASTEXITCODE -ne 0) { throw "self-install failed" }
+    return
+  }
 }
 
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }

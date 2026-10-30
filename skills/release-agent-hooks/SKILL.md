@@ -87,7 +87,7 @@ H=$(mktemp -d); AGENT_HOOKS_HOME=$H/ah HOME=$H AGENT_HOOKS_VERSION=vX.Y.Z \
 $H/ah/bin/agent-hooks --version   # expect X.Y.Z
 ```
 
-Run `self-install` smoke tests from a scratch directory, not the repo root: `HOME`/`AGENT_HOOKS_HOME` isolate user-level configs, but the installer also writes project-level harness configs relative to the cwd (`.github/hooks/hooks.json`, `.muse/hooks.json`, ...) and will rewrite this repo's with temp paths.
+Run these smoke tests from a scratch directory, not the repo root. `self-install` only writes user-level configs (isolated by `HOME`/`AGENT_HOOKS_HOME`), but plain `agent-hooks install` also writes cwd-relative project configs (`.github/hooks/hooks.json`, `.muse/hooks.json`, ...) and will rewrite this repo's with temp paths.
 
 If a name is wrong or an asset is missing, fix the workflow and re-run
 with `workflow_dispatch`; never hand-upload.

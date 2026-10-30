@@ -124,14 +124,18 @@ pub fn run(args: SelfInstallArgs) -> anyhow::Result<()> {
 
     // Hooks always point at the shared path, even when an equal/newer copy was kept.
     let harnesses = if !args.no_hooks && !args.dry_run {
-        crate::commands::install::run_collect(InstallArgs {
-            harness: args.harness.clone(),
-            binary_path: Some(dest.clone()),
-            socket: args.socket.clone(),
-            context_cmd: None,
-            origin: None,
-            adapter_version: None,
-        })?
+        crate::commands::install::run_collect(
+            InstallArgs {
+                harness: args.harness.clone(),
+                binary_path: Some(dest.clone()),
+                socket: args.socket.clone(),
+                context_cmd: None,
+                origin: None,
+                adapter_version: None,
+            },
+            // User-scoped configs only: this runs from the host app's arbitrary cwd.
+            true,
+        )?
     } else {
         Vec::new()
     };

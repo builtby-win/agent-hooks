@@ -29,18 +29,25 @@ Three steps:
 
 > Package names: `agent-hooks` is taken on both npm and PyPI by unrelated projects. npm: `builtby.win-agent-hooks`; PyPI: `builtby-win-agent-hooks` (PyPI normalizes `.` and `-`, so `builtby.win-agent-hooks` is the same project); Python import name `builtby_win_agent_hooks`.
 
-### Bootstrap one-liner (any language)
+### Bootstrap (any language)
 
-No SDK needed: spawn this and parse the last stdout line. It downloads nothing when a new-enough copy is already installed, so it is safe on every launch.
+No SDK needed. Check first, install only if missing or too old, so a launch with no network still works:
 
 ```sh
-# macOS / Linux
-curl -fsSL https://github.com/builtby-win/agent-hooks/releases/latest/download/install.sh | sh -s -- --min-version 0.13.0 --json
-# Windows (PowerShell)
-$env:AGENT_HOOKS_MIN_VERSION='0.13.0'; $env:AGENT_HOOKS_JSON=1; irm https://github.com/builtby-win/agent-hooks/releases/latest/download/install.ps1 | iex
+# 1. Present and new enough? Use it directly (no network). Fails if absent or too old.
+ah="${AGENT_HOOKS_HOME:-$HOME/.agent-hooks}/bin/agent-hooks"
+{ [ -x "$ah" ] && "$ah" self-install --min-version 0.13.0 --json; } ||
+# 2. Otherwise bootstrap (fetches install.sh, then the release asset):
+  curl -fsSL https://github.com/builtby-win/agent-hooks/releases/latest/download/install.sh | sh -s -- --min-version 0.13.0 --json
 ```
 
-Flags: `--min-version X.Y.Z` (reuse the installed copy if it is at least this), `--json`, `--harness <id|all>`, `--no-hooks`. Env: `AGENT_HOOKS_VERSION` to pin, `AGENT_HOOKS_HOME` to relocate, `AGENT_HOOKS_BASE_URL` for a mirror. To check without installing, look for `~/.agent-hooks/bin/agent-hooks` (or `$AGENT_HOOKS_HOME/bin`) and run `--version`.
+Step 2 alone is also idempotent: `install.sh` reuses an installed copy that meets `--min-version` without downloading the binary, but it still fetches `install.sh` itself, so do not make it the only path on launches that may be offline. Windows (PowerShell): `$env:AGENT_HOOKS_MIN_VERSION='0.13.0'; $env:AGENT_HOOKS_JSON=1; irm https://github.com/builtby-win/agent-hooks/releases/latest/download/install.ps1 | iex`.
+
+Flags: `--min-version X.Y.Z`, `--json`, `--harness <id|all>`, `--no-hooks`. Env: `AGENT_HOOKS_VERSION` to pin, `AGENT_HOOKS_HOME` to relocate, `AGENT_HOOKS_BASE_URL` for a mirror.
+
+**Scope.** `self-install` only touches user-level harness configs (under `~`, `$XDG_*`). It never writes cwd-relative project configs such as `.github/hooks/hooks.json`, so it is safe to run from any cwd. The separate `agent-hooks install` command does include project configs.
+
+**GUI hosts and `PATH`.** A harness counts as detected only when its CLI is on `PATH`. Apps launched from Finder, launchd or a dock inherit a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), so the result will have `harnesses: []` even with Claude or Codex installed. Run the bootstrap through the user's login shell (`$SHELL -lc '…'`) or pass `--harness <id>` for the harnesses you care about.
 
 ### The contract (what the one-liner does)
 

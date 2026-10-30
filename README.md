@@ -165,7 +165,7 @@ irm https://github.com/builtby-win/agent-hooks/releases/latest/download/install.
 
 Options: `AGENT_HOOKS_VERSION=vX.Y.Z` pins a release, `AGENT_HOOKS_HOME` moves the install root, `AGENT_HOOKS_BASE_URL` points at a mirror; `--no-hooks` places the binary only, `--harness <id>` limits registration.
 
-Release assets (`agent-hooks-<target>.tar.gz`, `.zip` on Windows, each with a `.sha256`; combined `SHA256SUMS`) cover macOS arm64/x64, Linux arm64/x64 (static musl, any distro), and Windows arm64/x64.
+Release assets (`agent-hooks-<target>.tar.gz`, `.zip` on Windows, each with a `.sha256`) cover macOS arm64/x64 plus a `universal-apple-darwin` build (one file for a Mac app's `Contents/Helpers`), Linux arm64/x64 (static musl, any distro), and Windows arm64/x64. macOS and Linux are built locally by `scripts/release-local.sh`; Windows is built by CI.
 
 ### Bundling it in an app
 

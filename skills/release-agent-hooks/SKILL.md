@@ -1,15 +1,15 @@
 ---
 name: release-agent-hooks
-description: Cut a new agent-hooks release — bump workspace version, push the tag so CI builds every platform (macOS, Linux musl, Windows; x64 + arm64) and publishes the assets, then verify them.
+description: Cut a new agent-hooks release — bump workspace version, tag, build macOS (arm64, x64, universal) and Linux (musl x64 + arm64) locally with scripts/release-local.sh, let CI build Windows, then verify the assets and publish the SDKs.
 ---
 
 # Release agent-hooks
 
-CI builds **every** target (`.github/workflows/release.yml`, runs on tag push). Nothing is built locally. Tag format: `v*`.
+Split build. **macOS + Linux are built locally on this Mac** by `scripts/release-local.sh`; **Windows is built by CI** (`.github/workflows/release.yml`, runs on tag push). npm/PyPI are published by `sdk-publish.yml` once every asset exists. Tag format: `v*`.
 
 ```mermaid
 flowchart LR
-    BUMP["bump Cargo.toml"] --> TEST["cargo test"] --> COMMIT["commit + tag"] --> PUSH["push tag"] --> CI["CI matrix builds + publishes"] --> VERIFY["verify 15 assets + install.sh"]
+    BUMP["bump Cargo.toml"] --> TEST["cargo test"] --> COMMIT["commit + tag"] --> PUSH["push tag → CI builds Windows"] --> LOCAL["scripts/release-local.sh: mac x3 + linux x2 → upload"] --> VERIFY["verify 16 assets + install.sh"] --> SDK["sdk-publish.yml"]
 ```
 
 ## 0. Preflight
@@ -50,33 +50,38 @@ git add Cargo.toml Cargo.lock README.md crates/agent-hooks-adapters/builtin
 git commit -m "release: agent-hooks X.Y.Z"
 ```
 
-## 2. Tag, push, let CI build
+## 2. Tag and push (starts the Windows build)
 
 ```bash
 git tag vX.Y.Z
 git push origin main vX.Y.Z
-gh run watch   # 6 build jobs + publish
 ```
 
-Tag push is the trigger (`on.push.tags: v*`); `workflow_dispatch` with an
-existing tag re-runs it. Linux targets are **musl** (static, any distro).
-Each build job smoke-tests (`--version`, `list-adapters --json`) the
-targets it can execute natively.
+Tag push triggers `release.yml`, which builds **only Windows** (x64 + arm64) and attaches the zips, `.sha256` files, `install.sh` and `install.ps1`. It creates the release if the local upload hasn't yet.
 
-## 3. Verify the release
+## 3. Build + upload macOS and Linux locally, always on this Mac
+
+```bash
+scripts/release-local.sh
+```
+
+Builds aarch64 + x86_64 macOS natively, the universal binary via `lipo`, and static musl Linux x64 + arm64 via `cargo zigbuild`; packages into `dist/` (gitignored), smoke-tests every binary from its package (versions, `lipo -archs`, Rosetta, ELF headers), then `gh release upload --clobber`. It refuses to run if the tag is not on origin, so it never mints a tag from the default branch. `--no-upload` builds and tests only. Toolchain, one time: `brew install zig`, `cargo install cargo-zigbuild`, `rustup target add` the four macOS/Linux targets (the script names any that are missing).
+
+## 4. Verify the release
 
 ```bash
 gh release view vX.Y.Z --json assets --jq '.assets[].name' | sort
 ```
 
-Expected: 15 assets, names are the contract `install.sh` / `install.ps1`
+Expected: 16 assets, names are the contract `install.sh` / `install.ps1`
 and package wrappers rely on —
 
 ```text
 agent-hooks-{aarch64,x86_64}-apple-darwin.tar.gz(.sha256)
+agent-hooks-universal-apple-darwin.tar.gz(.sha256)
 agent-hooks-{aarch64,x86_64}-unknown-linux-musl.tar.gz(.sha256)
 agent-hooks-{aarch64,x86_64}-pc-windows-msvc.zip(.sha256)
-SHA256SUMS, install.sh, install.ps1
+install.sh, install.ps1
 ```
 
 Then prove the installer end to end against the real release:
@@ -89,12 +94,13 @@ $H/ah/bin/agent-hooks --version   # expect X.Y.Z
 
 Run these smoke tests from a scratch directory, not the repo root. `self-install` only writes user-level configs (isolated by `HOME`/`AGENT_HOOKS_HOME`), but plain `agent-hooks install` also writes cwd-relative project configs (`.github/hooks/hooks.json`, `.muse/hooks.json`, ...) and will rewrite this repo's with temp paths.
 
-If a name is wrong or an asset is missing, fix the workflow and re-run
-with `workflow_dispatch`; never hand-upload.
+If a name is wrong or an asset is missing, fix it and re-run
+`scripts/release-local.sh` (it uploads with `--clobber`) for macOS/Linux, or
+`workflow_dispatch` the `release` workflow with the tag for Windows.
 
 ## 4. SDK channels
 
-The `npm` and `pypi` jobs in `release.yml` publish `builtby.win-agent-hooks` (+ six platform packages) and `builtby-win-agent-hooks` wheels from the release assets. They only run when the repo variables `NPM_PUBLISH` / `PYPI_PUBLISH` are `true` (needs the `NPM_TOKEN` secret and a PyPI trusted publisher for this workflow).
+Once all 16 assets are on the release, run `gh workflow run sdk-publish.yml -f tag=vX.Y.Z` (the script prints it). The workflow downloads the six archives the packers read and publishes `builtby.win-agent-hooks` (+ six platform packages) and `builtby-win-agent-hooks` wheels. Each job only runs when the repo variable `NPM_PUBLISH` / `PYPI_PUBLISH` is `true` (needs the `NPM_TOKEN` secret and a PyPI trusted publisher for `sdk-publish.yml`).
 
 The Go SDK lives in a subdirectory module, so `go get` versions come from a prefixed tag; push it with the release tag:
 

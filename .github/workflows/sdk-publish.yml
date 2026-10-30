@@ -1,0 +1,92 @@
+name: sdk-publish
+
+# Publishes the npm and PyPI wrappers from the assets already attached to a
+# release. Run it by hand (scripts/release-local.sh prints the command) once
+# every platform asset is on the release: macOS/Linux come from the local
+# build, Windows from the `release` workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag with all platform assets attached (e.g. v0.13.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # Every archive npm-pack.mjs / pypi-pack.py read.
+  ASSETS: >-
+    agent-hooks-aarch64-apple-darwin.tar.gz
+    agent-hooks-x86_64-apple-darwin.tar.gz
+    agent-hooks-aarch64-unknown-linux-musl.tar.gz
+    agent-hooks-x86_64-unknown-linux-musl.tar.gz
+    agent-hooks-aarch64-pc-windows-msvc.zip
+    agent-hooks-x86_64-pc-windows-msvc.zip
+
+jobs:
+  npm:
+    name: npm
+    runs-on: ubuntu-22.04
+    # Needs an NPM_TOKEN repo secret with publish rights to the builtby.win-agent-hooks* package names.
+    if: ${{ vars.NPM_PUBLISH == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir assets
+          for a in $ASSETS; do gh release download "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --pattern "$a" --dir assets; done
+
+      - name: Pack
+        run: |
+          tag="${{ inputs.tag }}"
+          node scripts/npm-pack.mjs "${tag#v}" assets npm-out
+
+      # Platform packages first so the wrapper's optionalDependencies resolve.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for d in npm-out/agent-hooks-*; do (cd "$d" && npm publish --access public); done
+          (cd npm-out/agent-hooks && npm publish --access public)
+
+  pypi:
+    name: pypi
+    runs-on: ubuntu-22.04
+    # Uses PyPI trusted publishing: register this repo + workflow as a trusted
+    # publisher for `builtby-win-agent-hooks`, then set the repo variable PYPI_PUBLISH=true.
+    if: ${{ vars.PYPI_PUBLISH == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir assets
+          for a in $ASSETS; do gh release download "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --pattern "$a" --dir assets; done
+
+      - name: Build wheels
+        run: |
+          tag="${{ inputs.tag }}"
+          python3 scripts/pypi-pack.py "${tag#v}" assets dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

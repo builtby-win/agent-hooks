@@ -301,7 +301,7 @@ fn run_undo(command: &str, display_name: &str) {
 /// normalized via `normalize_hint`, with a raw-lowercase fallback so `_` /
 /// space / `-` separator variants match nothing foreign and miss nothing
 /// of ours).
-fn command_is_ours(cmd: &str, harness_id: &str, aliases: &[String]) -> bool {
+pub(crate) fn command_is_ours(cmd: &str, harness_id: &str, aliases: &[String]) -> bool {
     let lower = cmd.to_ascii_lowercase();
     if !lower.contains("agent-hooks") {
         return false;

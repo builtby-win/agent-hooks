@@ -1002,6 +1002,42 @@ fn op_json_hooks(
 
 // --- toml_hooks ---
 
+/// Reconcile our TOML hook rows with the commands this install would write.
+/// `None`: the file already holds exactly `commands` (idempotent no-op).
+/// `Some(text)`: the file content with every row of ours removed (stale
+/// binary, socket, or context from an earlier install, including quoted
+/// paths with spaces), ready for a fresh block to be appended.
+fn reconcile_toml_commands(
+    target: &Path,
+    existing: String,
+    manifest: &AdapterManifest,
+    commands: &[String],
+    remove_ours: impl FnOnce(&PathBuf) -> anyhow::Result<usize>,
+) -> anyhow::Result<Option<String>> {
+    let ours = existing
+        .lines()
+        .filter(|l| {
+            !l.trim_start().starts_with('#')
+                && l.contains("--event")
+                && crate::commands::uninstall::command_is_ours(l, &manifest.id, &manifest.aliases)
+        })
+        .count();
+    // Quote-delimited so a command that is a prefix of a stale one
+    // (e.g. one that gained `--socket`) does not read as current.
+    if ours == commands.len()
+        && commands
+            .iter()
+            .all(|c| existing.contains(&format!("\"{}\"", toml_escape(c))))
+    {
+        return Ok(None);
+    }
+    if ours == 0 {
+        return Ok(Some(existing));
+    }
+    remove_ours(&target.to_path_buf())?;
+    Ok(Some(std::fs::read_to_string(target)?))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn op_toml_hooks(
     manifest: &AdapterManifest,
@@ -1026,17 +1062,27 @@ fn op_toml_hooks(
     } else {
         String::new()
     };
-    // Idempotent: our harness entries already present (id or any alias, so
-    // reinstalls under a renamed id don't duplicate entries).
-    let ours_present = std::iter::once(&manifest.id)
-        .chain(manifest.aliases.iter())
-        .any(|id| existing.contains(&format!("agent-hooks hook {}", id)));
-    if ours_present {
-        return Ok((0, true));
-    }
-
     let host_events = version_events(manifest, version);
-    let mut out = existing;
+    let commands: Vec<String> = host_events
+        .iter()
+        .map(|host_event| {
+            hook_command(
+                ctx.binary,
+                &manifest.id,
+                host_event,
+                ctx.socket,
+                ctx.context_cmd,
+                ctx.origin,
+                ctx.adapter_version,
+            )
+        })
+        .collect();
+    let Some(mut out) = reconcile_toml_commands(&target, existing, manifest, &commands, |p| {
+        crate::commands::uninstall::remove_toml_hooks(p, &manifest.id, &manifest.aliases)
+    })?
+    else {
+        return Ok((0, true));
+    };
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
@@ -1044,17 +1090,8 @@ fn op_toml_hooks(
         "\n# Added by agent-hooks for harness '{}'\n",
         manifest.id
     ));
-    for host_event in &host_events {
-        let command = hook_command(
-            ctx.binary,
-            &manifest.id,
-            host_event,
-            ctx.socket,
-            ctx.context_cmd,
-            ctx.origin,
-            ctx.adapter_version,
-        );
-        let handler = render_entry_toml(entry, host_event, &command);
+    for (host_event, command) in host_events.iter().zip(&commands) {
+        let handler = render_entry_toml(entry, host_event, command);
         let dotted = root.replace("{event}", host_event);
         let event_shape = event_entry_shape(manifest, version, entry_shape, host_event);
         match event_shape {
@@ -1109,15 +1146,32 @@ fn op_toml_list_hooks(
     } else {
         String::new()
     };
-    let ours_present = std::iter::once(&manifest.id)
-        .chain(manifest.aliases.iter())
-        .any(|id| existing.contains(&format!("agent-hooks hook {}", id)));
-    if ours_present {
-        return Ok((0, true));
-    }
-
     let host_events = version_events(manifest, version);
-    let mut out = existing;
+    let commands: Vec<String> = host_events
+        .iter()
+        .map(|host_event| {
+            hook_command(
+                ctx.binary,
+                &manifest.id,
+                host_event,
+                ctx.socket,
+                ctx.context_cmd,
+                ctx.origin,
+                ctx.adapter_version,
+            )
+        })
+        .collect();
+    let Some(mut out) = reconcile_toml_commands(&target, existing, manifest, &commands, |p| {
+        crate::commands::uninstall::remove_toml_list_hooks(
+            p,
+            list_key,
+            &manifest.id,
+            &manifest.aliases,
+        )
+    })?
+    else {
+        return Ok((0, true));
+    };
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
@@ -1125,17 +1179,8 @@ fn op_toml_list_hooks(
         "\n# Added by agent-hooks for harness '{}'\n",
         manifest.id
     ));
-    for host_event in &host_events {
-        let command = hook_command(
-            ctx.binary,
-            &manifest.id,
-            host_event,
-            ctx.socket,
-            ctx.context_cmd,
-            ctx.origin,
-            ctx.adapter_version,
-        );
-        let handler = render_entry(entry, entry_overrides.get(host_event), host_event, &command);
+    for (host_event, command) in host_events.iter().zip(&commands) {
+        let handler = render_entry(entry, entry_overrides.get(host_event), host_event, command);
         let Some(obj) = handler.as_object() else {
             continue;
         };
@@ -2470,6 +2515,39 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
             Some("notify-send done")
         );
         assert!(!raw.contains("agent-hooks hook"), "{raw}");
+    }
+
+    /// Reinstall under a spaced (quoted) binary path is a no-op, and a changed
+    /// binary replaces our stale rows instead of appending beside them.
+    #[test]
+    fn toml_list_hooks_reinstall_replaces_stale_binary_rows() {
+        let (manifest, version) = builtin("mistral-vibe");
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("hooks.toml");
+        std::fs::write(
+            &target,
+            "[[hooks]]\nname = \"mine\"\ntype = \"pre_tool\"\ncommand = \"echo hi\"\n",
+        )
+        .unwrap();
+        let spaced = Ctx {
+            binary: Path::new("/Users/me/Library/Application Support/b2v/resources/agent-hooks"),
+            ..test_ctx(None)
+        };
+        let added = install_list_toml(&manifest, &version, &target, &spaced);
+        assert!(added > 0);
+        assert_eq!(install_list_toml(&manifest, &version, &target, &spaced), 0);
+
+        let current = test_ctx(None);
+        assert_eq!(
+            install_list_toml(&manifest, &version, &target, &current),
+            added
+        );
+        let raw = std::fs::read_to_string(&target).unwrap();
+        assert!(!raw.contains("Application Support"), "{raw}");
+        assert!(raw.contains("echo hi"), "foreign row survives:\n{raw}");
+        let doc: toml_edit::Document = raw.parse().expect("valid TOML");
+        assert_eq!(doc["hooks"].as_array_of_tables().unwrap().len(), added + 1);
+        assert_eq!(install_list_toml(&manifest, &version, &target, &current), 0);
     }
 
     /// Mistral rows carry unique names and per-event hook types.

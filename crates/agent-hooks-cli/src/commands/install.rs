@@ -1014,14 +1014,20 @@ fn reconcile_toml_commands(
     commands: &[String],
     remove_ours: impl FnOnce(&PathBuf) -> anyhow::Result<usize>,
 ) -> anyhow::Result<Option<String>> {
-    let ours = existing
-        .lines()
-        .filter(|l| {
-            !l.trim_start().starts_with('#')
-                && l.contains("--event")
-                && crate::commands::uninstall::command_is_ours(l, &manifest.id, &manifest.aliases)
-        })
-        .count();
+    let count_ours = |text: &str| {
+        text.lines()
+            .filter(|l| {
+                !l.trim_start().starts_with('#')
+                    && l.contains("--event")
+                    && crate::commands::uninstall::command_is_ours(
+                        l,
+                        &manifest.id,
+                        &manifest.aliases,
+                    )
+            })
+            .count()
+    };
+    let ours = count_ours(&existing);
     // Quote-delimited so a command that is a prefix of a stale one
     // (e.g. one that gained `--socket`) does not read as current.
     if ours == commands.len()
@@ -1035,7 +1041,15 @@ fn reconcile_toml_commands(
         return Ok(Some(existing));
     }
     remove_ours(&target.to_path_buf())?;
-    Ok(Some(std::fs::read_to_string(target)?))
+    let remaining = std::fs::read_to_string(target)?;
+    // Appending beside rows we failed to remove is the duplicate bug; refuse.
+    anyhow::ensure!(
+        count_ours(&remaining) == 0,
+        "{}: could not remove stale agent-hooks rows for '{}'; fix or delete them and retry",
+        target.display(),
+        manifest.id
+    );
+    Ok(Some(remaining))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2548,6 +2562,26 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
         let doc: toml_edit::Document = raw.parse().expect("valid TOML");
         assert_eq!(doc["hooks"].as_array_of_tables().unwrap().len(), added + 1);
         assert_eq!(install_list_toml(&manifest, &version, &target, &current), 0);
+    }
+
+    /// Hand-edited stale rows with comments/blank lines inside the row are
+    /// still replaced, not left beside the new block.
+    #[test]
+    fn toml_list_hooks_reinstall_removes_rows_with_inner_comments() {
+        let (manifest, version) = builtin("mistral-vibe");
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("hooks.toml");
+        std::fs::write(
+            &target,
+            "[[hooks]]\n# note\nname = \"agent-hooks-Stop\"\n\ntype = \"post_agent\"\n# why\ncommand = \"/gone/agent-hooks hook mistral-vibe --event Stop\"\n\n[[hooks]]\nname = \"mine\"\ntype = \"pre_tool\"\ncommand = \"echo hi\"\n",
+        )
+        .unwrap();
+        let added = install_list_toml(&manifest, &version, &target, &test_ctx(None));
+        let raw = std::fs::read_to_string(&target).unwrap();
+        assert!(!raw.contains("/gone/"), "{raw}");
+        assert!(raw.contains("echo hi"), "{raw}");
+        let doc: toml_edit::Document = raw.parse().expect("valid TOML");
+        assert_eq!(doc["hooks"].as_array_of_tables().unwrap().len(), added + 1);
     }
 
     /// Mistral rows carry unique names and per-event hook types.

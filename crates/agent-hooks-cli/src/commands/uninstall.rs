@@ -620,11 +620,11 @@ pub(crate) fn remove_toml_hooks(
 }
 
 /// Remove flat `[[<list_key>]]` rows (e.g. Kimi Code / Mistral Vibe
-/// `[[hooks]]`) whose command lines match the installer contract.
-/// Only the enclosing row is dropped: scan back to its `[[<list_key>]]`
-/// header (plus a directly-preceding `Added by agent-hooks` marker),
-/// then skip its remaining key lines forward. Unrelated rows, tables,
-/// and comments survive. The config file itself is never deleted.
+/// `[[hooks]]`) whose `command` matches the installer contract. Rows are
+/// dropped structurally (`toml_edit`), so comments or blank lines inside a
+/// row, key order, and unrelated rows, tables, and comments are all
+/// handled and preserved. Invalid TOML is an error, never a silent no-op.
+/// The config file itself is never deleted.
 pub(crate) fn remove_toml_list_hooks(
     path: &PathBuf,
     list_key: &str,
@@ -635,80 +635,35 @@ pub(crate) fn remove_toml_list_hooks(
     if !data.contains("agent-hooks") {
         return Ok(0);
     }
-    let header = format!("[[{}]]", list_key);
-    let lines: Vec<&str> = data.lines().collect();
-    let mut out_lines: Vec<String> = Vec::new();
-    let mut removed = 0usize;
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        if !line.trim_start().starts_with('#') && command_is_ours(line, harness_id, aliases) {
-            // Pop back to the enclosing [[list_key]] header without
-            // crossing a blank line or another section header.
-            let mut popped_header = false;
-            let mut popped: Vec<String> = Vec::new();
-            while let Some(prev) = out_lines.pop() {
-                let t = prev.trim();
-                if t == header {
-                    popped_header = true;
-                    break;
-                }
-                if t.is_empty() || t.starts_with('[') || t.starts_with('#') {
-                    popped.push(prev);
-                    break;
-                }
-                popped.push(prev);
-            }
-            if popped_header {
-                if out_lines
-                    .last()
-                    .is_some_and(|l| l.contains("Added by agent-hooks"))
-                {
-                    out_lines.pop();
-                }
-                removed += 1;
-                i += 1;
-                // Skip the row's remaining key lines forward.
-                while i < lines.len() {
-                    let next = lines[i].trim();
-                    if next.is_empty() || next.starts_with('[') || next.starts_with('#') {
-                        break;
-                    }
-                    if next.contains('=') {
-                        i += 1;
-                    } else {
-                        break;
-                    }
-                }
-                continue;
-            }
-            // No enclosing list header: not one of our rows. Restore the
-            // popped lines in order and keep the current line.
-            popped.reverse();
-            out_lines.extend(popped);
-            out_lines.push(line.to_string());
-            i += 1;
-            continue;
+    let mut doc: toml_edit::Document = data
+        .parse()
+        .map_err(|e| anyhow::anyhow!("{}: invalid TOML: {e}", path.display()))?;
+    let Some(rows) = doc
+        .get_mut(list_key)
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+    else {
+        return Ok(0);
+    };
+    let ours: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            row.get("command")
+                .and_then(toml_edit::Item::as_str)
+                .is_some_and(|c| command_is_ours(c, harness_id, aliases))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    for &i in ours.iter().rev() {
+        rows.remove(i);
+    }
+    if !ours.is_empty() {
+        if rows.is_empty() {
+            doc.remove(list_key);
         }
-        out_lines.push(line.to_string());
-        i += 1;
+        atomic_write(path, &doc.to_string())?;
     }
-
-    if removed > 0 {
-        let out = out_lines.join("\n");
-        let cleaned = out
-            .lines()
-            .filter(|l| !l.contains("Added by agent-hooks"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let final_out = if cleaned.trim().is_empty() {
-            String::new()
-        } else {
-            cleaned + "\n"
-        };
-        atomic_write(path, &final_out)?;
-    }
-    Ok(removed)
+    Ok(ours.len())
 }
 
 // ---------------------------------------------------------------------------

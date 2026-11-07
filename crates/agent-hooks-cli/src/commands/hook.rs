@@ -1117,6 +1117,7 @@ fn forward_with_retries(
     socket_path: &Path,
     line: &str,
     wait: Duration,
+    on_sent: &dyn Fn(),
     attempts: u32,
 ) -> Option<String> {
     let start = Instant::now();
@@ -1134,7 +1135,7 @@ fn forward_with_retries(
             }
         }
         let per = wait.saturating_sub(start.elapsed());
-        match try_forward_inner(socket_path, line, per) {
+        match try_forward_inner(socket_path, line, per, on_sent) {
             Ok(Some(response)) => {
                 let trimmed = response.trim();
                 if trimmed.is_empty() {
@@ -1189,24 +1190,49 @@ fn forward_to_all(
         live
     };
     if let [only] = targets.as_slice() {
-        return forward_with_retries(only, line, wait, attempts);
+        return forward_with_retries(only, line, wait, &|| {}, attempts);
     }
-    let (tx, rx) = std::sync::mpsc::channel::<(usize, Option<String>)>();
+    enum Progress {
+        /// The payload is fully written: the daemon will see the event even if
+        /// this process exits now.
+        Sent,
+        Reply(Option<String>),
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, Progress)>();
     for (index, socket) in targets.iter().enumerate() {
         let (tx, socket, line) = (tx.clone(), (*socket).clone(), line.to_string());
         std::thread::spawn(move || {
-            let _ = tx.send((index, forward_with_retries(&socket, &line, wait, attempts)));
+            let on_sent = || {
+                let _ = tx.send((index, Progress::Sent));
+            };
+            let reply = forward_with_retries(&socket, &line, wait, &on_sent, attempts);
+            let _ = tx.send((index, Progress::Reply(reply)));
         });
     }
     drop(tx);
+    // A gate event returns on the first verdict, but only once every other
+    // socket has its payload written (or has given up): the caller may exit
+    // right after, which would otherwise kill an unfinished delivery.
+    let mut settled = vec![false; targets.len()];
+    let mut unsettled = targets.len();
     let mut replies: Vec<Option<String>> = vec![None; targets.len()];
-    for (index, reply) in rx {
-        if gate && reply.is_some() {
-            return reply;
+    let mut verdict = None;
+    for (index, progress) in rx {
+        if !std::mem::replace(&mut settled[index], true) {
+            unsettled -= 1;
         }
-        replies[index] = reply;
+        if let Progress::Reply(reply) = progress {
+            if gate && verdict.is_none() && reply.is_some() {
+                verdict = reply;
+            } else {
+                replies[index] = reply;
+            }
+        }
+        if verdict.is_some() && unsettled == 0 {
+            break;
+        }
     }
-    replies.into_iter().flatten().next()
+    verdict.or_else(|| replies.into_iter().flatten().next())
 }
 
 #[cfg(unix)]
@@ -1214,8 +1240,9 @@ fn try_forward_inner(
     socket_path: &Path,
     payload: &str,
     wait: Duration,
+    on_sent: &dyn Fn(),
 ) -> anyhow::Result<Option<String>> {
-    try_forward_unix(socket_path, payload, wait)
+    try_forward_unix(socket_path, payload, wait, on_sent)
 }
 
 #[cfg(windows)]
@@ -1223,8 +1250,9 @@ fn try_forward_inner(
     socket_path: &Path,
     payload: &str,
     wait: Duration,
+    on_sent: &dyn Fn(),
 ) -> anyhow::Result<Option<String>> {
-    try_forward_windows(socket_path, payload, wait)
+    try_forward_windows(socket_path, payload, wait, on_sent)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1232,6 +1260,7 @@ fn try_forward_inner(
     _socket_path: &Path,
     _payload: &str,
     _wait: Duration,
+    _on_sent: &dyn Fn(),
 ) -> anyhow::Result<Option<String>> {
     anyhow::bail!("unsupported platform")
 }
@@ -1241,6 +1270,7 @@ fn try_forward_unix(
     socket_path: &Path,
     payload: &str,
     wait: Duration,
+    on_sent: &dyn Fn(),
 ) -> anyhow::Result<Option<String>> {
     use std::os::unix::net::UnixStream;
 
@@ -1257,6 +1287,7 @@ fn try_forward_unix(
     }
     stream.write_all(to_send.as_bytes())?;
     stream.flush()?;
+    on_sent();
 
     // Single read with timeout; first line is the decision. On timeout the
     // daemon is still deciding (or gone) — caller falls back, harness waits
@@ -1280,6 +1311,7 @@ fn try_forward_unix(
     _socket_path: &Path,
     _payload: &str,
     _wait: Duration,
+    _on_sent: &dyn Fn(),
 ) -> anyhow::Result<Option<String>> {
     anyhow::bail!("unix socket not supported on this platform")
 }
@@ -1302,6 +1334,7 @@ fn try_forward_windows(
     socket_path: &Path,
     payload: &str,
     wait: Duration,
+    on_sent: &dyn Fn(),
 ) -> anyhow::Result<Option<String>> {
     use interprocess::local_socket::prelude::*;
     use interprocess::local_socket::{GenericFilePath, ToFsName};
@@ -1321,6 +1354,7 @@ fn try_forward_windows(
     }
     stream.write_all(to_send.as_bytes())?;
     stream.flush()?;
+    on_sent();
 
     // Named pipes here have no read timeout; bound the wait on a reader
     // thread instead. A timed-out thread lingers only until the daemon's

@@ -57,7 +57,18 @@ function resolveBinary(): string {
 }
 
 const BINARY = installSetting(INSTALL_BIN) || resolveBinary();
-const SOCKET = installSetting(INSTALL_SOCKET);
+// Bare path (single socket / older installs) or a JSON array of paths.
+const SOCKETS: string[] = (() => {
+  const v = installSetting(INSTALL_SOCKET);
+  if (!v) return [];
+  if (!v.startsWith("[")) return [v];
+  try {
+    const parsed: unknown = JSON.parse(v);
+    return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string" && s !== "") : [];
+  } catch {
+    return [v];
+  }
+})();
 const CONTEXT_CMD = installSetting(INSTALL_CONTEXT_CMD);
 // Install-time origin label (e.g. the ssh target this host was set up from);
 // forwarded so a consumer with several remotes knows which one sent the event.
@@ -68,7 +79,7 @@ const GATE_TIMEOUT_MS = 290_000;
 
 export function hookArgs(event: string): string[] {
   const args = ["hook", "amp", "--event", event];
-  if (SOCKET) args.push("--socket", SOCKET);
+  for (const socket of SOCKETS) args.push("--socket", socket);
   if (CONTEXT_CMD) args.push("--context-cmd", CONTEXT_CMD);
   if (ORIGIN) args.push("--origin", ORIGIN);
   return args;

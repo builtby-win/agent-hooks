@@ -75,6 +75,18 @@ class HermesPluginTest(unittest.TestCase):
             ["/opt/agent-hooks", "hook", "hermes", "--event", "pre_llm_call", "--socket", "/tmp/ah.sock", "--context-cmd", "/opt/b2v"],
         )
 
+    def test_every_staged_socket_is_passed(self):
+        staged = load(
+            {
+                "__AGENT_HOOKS_BIN__": "/opt/agent-hooks",
+                "__AGENT_HOOKS_SOCKET__": json.dumps(["/tmp/a.sock", "/tmp/b.sock"]),
+            }
+        )
+        self.assertEqual(
+            staged.hook_args("on_session_end"),
+            ["/opt/agent-hooks", "hook", "hermes", "--event", "on_session_end", "--socket", "/tmp/a.sock", "--socket", "/tmp/b.sock"],
+        )
+
     def test_kill_switch(self):
         mod = load()
         self.assertFalse(mod.hooks_disabled({}))

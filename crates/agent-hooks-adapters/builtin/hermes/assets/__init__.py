@@ -47,7 +47,25 @@ def _resolve_binary():
 
 
 BINARY = _install_setting(INSTALL_BIN) or _resolve_binary()
-SOCKET = _install_setting(INSTALL_SOCKET)
+
+
+def _install_sockets():
+    # Bare path (single socket / older installs) or a JSON array of paths.
+    v = _install_setting(INSTALL_SOCKET)
+    if not v:
+        return []
+    if not v.startswith("["):
+        return [v]
+    try:
+        parsed = json.loads(v)
+    except ValueError:
+        return [v]
+    if not isinstance(parsed, list):
+        return []
+    return [p for p in parsed if isinstance(p, str) and p]
+
+
+SOCKETS = _install_sockets()
 CONTEXT_CMD = _install_setting(INSTALL_CONTEXT_CMD)
 # Install-time origin label, forwarded so a consumer can tell remotes apart.
 ORIGIN = _install_setting(INSTALL_ORIGIN)
@@ -55,8 +73,8 @@ ORIGIN = _install_setting(INSTALL_ORIGIN)
 
 def hook_args(event):
     args = [BINARY, "hook", "hermes", "--event", event]
-    if SOCKET:
-        args += ["--socket", SOCKET]
+    for socket in SOCKETS:
+        args += ["--socket", socket]
     if CONTEXT_CMD:
         args += ["--context-cmd", CONTEXT_CMD]
     if ORIGIN:

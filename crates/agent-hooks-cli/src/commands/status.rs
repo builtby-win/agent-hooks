@@ -275,6 +275,7 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
         let mut hook_count = 0usize;
         let mut found_path: Option<PathBuf> = None;
         let mut existing_files: Vec<PathBuf> = Vec::new();
+        let mut staged_sockets: Vec<Vec<String>> = Vec::new();
 
         for p in &file_paths {
             if p.exists() {
@@ -293,6 +294,7 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
                 exists = true;
                 found_path.get_or_insert_with(|| d.clone());
                 let count = count_staged_assets(d);
+                staged_sockets.extend(staged_asset_sockets(d));
                 if count > 0 {
                     installed = true;
                     hook_count += count;
@@ -318,8 +320,26 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
             exists,
             installed,
             hook_count,
-            embedded_sockets: embedded_sockets(&existing_files),
-            warnings: detect_drift(&existing_files, checked_socket),
+            embedded_sockets: {
+                let mut all = embedded_sockets(&existing_files);
+                for sockets in &staged_sockets {
+                    for socket in sockets {
+                        if !all.contains(socket) {
+                            all.push(socket.clone());
+                        }
+                    }
+                }
+                all
+            },
+            warnings: {
+                let mut warnings = detect_drift(&existing_files, checked_socket);
+                for sockets in &staged_sockets {
+                    if let Some(w) = socket_mismatch_warning(sockets, checked_socket) {
+                        push_unique(&mut warnings, w);
+                    }
+                }
+                warnings
+            },
         });
     }
     out
@@ -441,28 +461,86 @@ fn detect_drift(existing_files: &[PathBuf], checked_socket: &Path) -> Vec<String
                 ),
             }
         }
-        // Socket mismatch: none of the embedded --socket values is the checked one.
-        let expanded: Vec<PathBuf> = sockets
-            .iter()
-            .map(|sock| expand_tilde(&expand_env_vars(sock)))
-            .collect();
-        if let Some(first) = expanded.first() {
-            let delivers = expanded
-                .iter()
-                .any(|sock| sock == checked_socket || same_path_canon(sock, checked_socket));
-            if !delivers {
-                push_unique(
-                    &mut warnings,
-                    format!(
-                        "socket-mismatch: embedded socket '{}' != checked socket '{}'",
-                        first.display(),
-                        checked_socket.display()
-                    ),
-                );
-            }
+        if let Some(w) = socket_mismatch_warning(sockets, checked_socket) {
+            push_unique(&mut warnings, w);
         }
     }
     warnings
+}
+
+/// Socket mismatch: none of the embedded `--socket` values is the checked
+/// one. No embedded socket means nothing to compare, so no warning.
+fn socket_mismatch_warning(sockets: &[String], checked_socket: &Path) -> Option<String> {
+    let expanded: Vec<PathBuf> = sockets
+        .iter()
+        .map(|sock| expand_tilde(&expand_env_vars(sock)))
+        .collect();
+    let first = expanded.first()?;
+    let delivers = expanded
+        .iter()
+        .any(|sock| sock == checked_socket || same_path_canon(sock, checked_socket));
+    (!delivers).then(|| {
+        format!(
+            "socket-mismatch: embedded socket '{}' != checked socket '{}'",
+            first.display(),
+            checked_socket.display()
+        )
+    })
+}
+
+/// Sockets baked into each managed plugin asset under `dir`, one entry per
+/// asset that names any. Reads the `INSTALL_SOCKET` constant written by
+/// `install`: empty, a bare path (older installs), or a JSON array of paths.
+fn staged_asset_sockets(dir: &Path) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                if !content.contains("managed by agent-hooks") {
+                    continue;
+                }
+                let sockets = parse_install_socket(&content);
+                if !sockets.is_empty() {
+                    out.push(sockets);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Extract the sockets from an asset's `INSTALL_SOCKET = "<literal>"` line.
+fn parse_install_socket(content: &str) -> Vec<String> {
+    let Some(rhs) = content.lines().find_map(|line| {
+        let line = line.trim();
+        let line = line.strip_prefix("const ").unwrap_or(line);
+        line.strip_prefix("INSTALL_SOCKET")?
+            .trim_start()
+            .strip_prefix('=')
+    }) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<String>(rhs.trim().trim_end_matches(';')) else {
+        return Vec::new();
+    };
+    let value = value.trim();
+    if value.is_empty() || value.starts_with("__AGENT_HOOKS_") {
+        return Vec::new();
+    }
+    if value.starts_with('[') {
+        if let Ok(list) = serde_json::from_str::<Vec<String>>(value) {
+            return list.into_iter().filter(|s| !s.is_empty()).collect();
+        }
+    }
+    vec![value.to_string()]
 }
 
 /// Each distinct agent-hooks hook command in the harness's config files,
@@ -808,5 +886,51 @@ mod tests {
             .iter()
             .any(|w| w.starts_with("socket-mismatch")));
         assert_eq!(embedded_sockets(&files), ["/tmp/a.sock", "/tmp/b.sock"]);
+    }
+
+    #[test]
+    fn staged_plugin_sockets_parse_both_forms() {
+        let ts = |lit: &str| format!("// managed by agent-hooks\nconst INSTALL_SOCKET = {lit};\n");
+        assert_eq!(
+            parse_install_socket(&ts(r#""/tmp/a.sock""#)),
+            ["/tmp/a.sock"]
+        );
+        assert_eq!(
+            parse_install_socket(&ts(r#""[\"/tmp/a.sock\",\"/tmp/b.sock\"]""#)),
+            ["/tmp/a.sock", "/tmp/b.sock"]
+        );
+        assert!(parse_install_socket(&ts(r#""""#)).is_empty());
+        assert!(parse_install_socket(&ts(r#""__AGENT_HOOKS_SOCKET__""#)).is_empty());
+        assert_eq!(
+            parse_install_socket("INSTALL_SOCKET = \"/tmp/p.sock\"\n"),
+            ["/tmp/p.sock"]
+        );
+    }
+
+    #[test]
+    fn staged_plugin_socket_drift_follows_config_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("index.ts"),
+            "// managed by agent-hooks\nconst INSTALL_SOCKET = \"[\\\"/tmp/a.sock\\\",\\\"/tmp/b.sock\\\"]\";\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("foreign.ts"),
+            "const INSTALL_SOCKET = \"/tmp/x.sock\";\n",
+        )
+        .unwrap();
+        let staged = staged_asset_sockets(dir.path());
+        assert_eq!(
+            staged,
+            vec![vec!["/tmp/a.sock".to_string(), "/tmp/b.sock".to_string()]]
+        );
+        assert!(socket_mismatch_warning(&staged[0], Path::new("/tmp/b.sock")).is_none());
+        assert!(
+            socket_mismatch_warning(&staged[0], Path::new("/tmp/c.sock"))
+                .unwrap()
+                .starts_with("socket-mismatch")
+        );
+        assert!(socket_mismatch_warning(&[], Path::new("/tmp/c.sock")).is_none());
     }
 }

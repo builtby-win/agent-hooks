@@ -85,12 +85,12 @@ function events(c: Call[]): string[] {
 
 // Load a private copy so module state (per-session sets) is isolated and the
 // install-time tokens can be substituted exactly like the Rust stager does.
-async function load(asset: keyof typeof ASSETS, stage?: { bin?: string; socket?: string; ctx?: string }): Promise<any> {
+async function load(asset: keyof typeof ASSETS, stage?: { bin?: string; socket?: string; sockets?: string[]; ctx?: string }): Promise<any> {
   let src = readFileSync(ASSETS[asset], "utf8");
   if (stage) {
     src = src
       .replace('"__AGENT_HOOKS_BIN__"', JSON.stringify(stage.bin ?? ""))
-      .replace('"__AGENT_HOOKS_SOCKET__"', JSON.stringify(stage.socket ?? ""))
+      .replace('"__AGENT_HOOKS_SOCKET__"', JSON.stringify(stage.sockets ? JSON.stringify(stage.sockets) : (stage.socket ?? "")))
       .replace('"__AGENT_HOOKS_CONTEXT_CMD__"', JSON.stringify(stage.ctx ?? ""));
   }
   const out = join(dir, `mod-${asset}-${loadSeq++}.ts`);
@@ -616,6 +616,17 @@ describe("opencode asset", () => {
     expect((await load("opencode")).hookArgs("session.idle")).toEqual(["hook", "opencode", "--event", "session.idle"]);
   });
 
+  test("every staged socket becomes its own --socket (array and legacy forms)", async () => {
+    const many = await load("opencode", { bin: fakeBin, sockets: ["/tmp/a.sock", "/tmp/b.sock"] });
+    expect(many.hookArgs("session.idle")).toEqual([
+      "hook", "opencode", "--event", "session.idle", "--socket", "/tmp/a.sock", "--socket", "/tmp/b.sock",
+    ]);
+    const one = await load("opencode", { bin: fakeBin, sockets: ["/tmp/a.sock"] });
+    expect(one.hookArgs("session.idle")).toEqual(["hook", "opencode", "--event", "session.idle", "--socket", "/tmp/a.sock"]);
+    const legacy = await load("opencode", { bin: fakeBin, socket: "/tmp/old.sock" });
+    expect(legacy.hookArgs("session.idle")).toEqual(["hook", "opencode", "--event", "session.idle", "--socket", "/tmp/old.sock"]);
+  });
+
   test("OpenCode forwards a per-event directory as cwd", async () => {
     reset();
     const mod = await load("opencode");
@@ -790,6 +801,10 @@ describe("amp asset", () => {
   test("placeholders, payload shape and gate", async () => {
     const mod = await load("amp", { bin: fakeBin, socket: "/tmp/ah.sock" });
     expect(mod.hookArgs("agent.end")).toEqual(["hook", "amp", "--event", "agent.end", "--socket", "/tmp/ah.sock"]);
+    const many = await load("amp", { bin: fakeBin, sockets: ["/tmp/a.sock", "/tmp/b.sock"] });
+    expect(many.hookArgs("agent.end")).toEqual([
+      "hook", "amp", "--event", "agent.end", "--socket", "/tmp/a.sock", "--socket", "/tmp/b.sock",
+    ]);
     // b2v-amp.ts sessionIdFrom: thread id first, then ctx thread.
     expect(mod.buildPayload({ thread: { id: "T-1" }, toolUseID: "tu", tool: "Bash", input: { cmd: "ls" } })).toMatchObject({
       session_id: "T-1",

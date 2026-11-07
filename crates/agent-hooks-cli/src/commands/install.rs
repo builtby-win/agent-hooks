@@ -328,7 +328,7 @@ pub fn run_collect(args: InstallArgs, user_only: bool) -> anyhow::Result<Vec<Har
             user_only,
             StageVars {
                 bin: args.binary_path.as_deref(),
-                socket: args.socket.first().map(PathBuf::as_path),
+                sockets: &args.socket,
                 context_cmd: args.context_cmd.as_deref(),
                 origin: args.origin.as_deref(),
             },
@@ -468,7 +468,8 @@ struct Ctx<'a> {
 #[derive(Clone, Copy, Default)]
 struct StageVars<'a> {
     bin: Option<&'a Path>,
-    socket: Option<&'a Path>,
+    /// Every `--socket`; the asset receives all of them (see `socket_setting`).
+    sockets: &'a [PathBuf],
     context_cmd: Option<&'a Path>,
     origin: Option<&'a str>,
 }
@@ -1546,6 +1547,19 @@ fn is_code_asset(path: &str) -> bool {
 /// string literal — valid in JS/TS and Python alike, and escape-safe for
 /// quotes/backslashes in paths. Unset settings become `""` so the asset's
 /// own fallback applies.
+/// JSON string literal for the socket setting: empty for none, the bare path
+/// for one (the form older installs wrote), otherwise a JSON array of paths
+/// carried inside the string. Assets and `status` accept both.
+fn socket_setting(sockets: &[PathBuf]) -> String {
+    let paths: Vec<String> = sockets.iter().map(|p| p.display().to_string()).collect();
+    let value = match paths.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        many => serde_json::to_string(many).expect("paths serialize"),
+    };
+    serde_json::to_string(&value).expect("string serializes")
+}
+
 fn substitute_install_placeholders(content: &str, vars: StageVars) -> String {
     let literal = |p: Option<&Path>| {
         serde_json::to_string(&p.map(|p| p.display().to_string()).unwrap_or_default())
@@ -1554,7 +1568,7 @@ fn substitute_install_placeholders(content: &str, vars: StageVars) -> String {
     let mut out = content.to_string();
     for (token, value) in [
         ("__AGENT_HOOKS_BIN__", literal(vars.bin)),
-        ("__AGENT_HOOKS_SOCKET__", literal(vars.socket)),
+        ("__AGENT_HOOKS_SOCKET__", socket_setting(vars.sockets)),
         ("__AGENT_HOOKS_CONTEXT_CMD__", literal(vars.context_cmd)),
         (
             "__AGENT_HOOKS_ORIGIN__",
@@ -2224,7 +2238,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
             PLACEHOLDER_ASSET,
             StageVars {
                 bin: Some(Path::new("/opt/agent-hooks")),
-                socket: Some(Path::new("/tmp/a.sock")),
+                sockets: &[PathBuf::from("/tmp/a.sock")],
                 context_cmd: Some(Path::new("/opt/b2v")),
                 origin: None,
             },
@@ -2241,12 +2255,36 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
     }
 
     #[test]
+    fn substitution_stages_every_socket_as_json_array() {
+        let socks = [PathBuf::from("/tmp/a.sock"), PathBuf::from("/tmp/b.sock")];
+        let out = substitute_install_placeholders(
+            PLACEHOLDER_ASSET,
+            StageVars {
+                sockets: &socks,
+                ..Default::default()
+            },
+        );
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("const INSTALL_SOCKET"))
+            .unwrap();
+        let lit = line
+            .trim_start_matches("const INSTALL_SOCKET = ")
+            .trim_end_matches(';');
+        let inner: String = serde_json::from_str(lit).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&inner).unwrap(),
+            ["/tmp/a.sock", "/tmp/b.sock"]
+        );
+    }
+
+    #[test]
     fn substitution_escapes_quotes_and_backslashes() {
         let out = substitute_install_placeholders(
             PLACEHOLDER_ASSET,
             StageVars {
                 bin: Some(Path::new(r"C:\Program Files\agent-hooks.exe")),
-                socket: Some(Path::new(r#"/tmp/we"ird.sock"#)),
+                sockets: &[PathBuf::from(r#"/tmp/we"ird.sock"#)],
                 context_cmd: None,
                 origin: None,
             },
@@ -2300,7 +2338,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
         let tmp = tempfile::tempdir().unwrap();
         let first = StageVars {
             bin: Some(Path::new("/opt/one/agent-hooks")),
-            socket: None,
+            sockets: &[],
             context_cmd: Some(Path::new("/opt/one/b2v")),
             origin: None,
         };
@@ -2324,7 +2362,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
         // New settings: rendered fresh from the template, no stale values.
         let second = StageVars {
             bin: None,
-            socket: Some(Path::new("/tmp/two.sock")),
+            sockets: &[PathBuf::from("/tmp/two.sock")],
             context_cmd: Some(Path::new("/opt/two/b2v")),
             origin: None,
         };
@@ -2362,7 +2400,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
     fn embedded_plugin_assets_leave_no_placeholders() {
         let vars = StageVars {
             bin: Some(Path::new("/opt/agent-hooks")),
-            socket: Some(Path::new("/tmp/a.sock")),
+            sockets: &[PathBuf::from("/tmp/a.sock")],
             context_cmd: Some(Path::new("/opt/b2v")),
             origin: None,
         };

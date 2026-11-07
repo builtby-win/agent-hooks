@@ -102,13 +102,13 @@ fn hook_command(
     binary: &Path,
     harness: &str,
     event: &str,
-    socket: Option<&Path>,
+    sockets: &[PathBuf],
     context_cmd: Option<&Path>,
     origin: Option<&str>,
     adapter_version: Option<&str>,
 ) -> String {
     let mut command = format!("{} hook {} --event {}", shell_path(binary), harness, event);
-    if let Some(path) = socket {
+    for path in sockets {
         command = format!("{} --socket {}", command, shell_path(path));
     }
     if let Some(path) = context_cmd {
@@ -322,13 +322,13 @@ pub fn run_collect(args: InstallArgs, user_only: bool) -> anyhow::Result<Vec<Har
             manifest,
             version,
             &binary,
-            args.socket.as_deref(),
+            &args.socket,
             args.adapter_version.as_deref(),
             !is_all,
             user_only,
             StageVars {
                 bin: args.binary_path.as_deref(),
-                socket: args.socket.as_deref(),
+                socket: args.socket.first().map(PathBuf::as_path),
                 context_cmd: args.context_cmd.as_deref(),
                 origin: args.origin.as_deref(),
             },
@@ -454,7 +454,7 @@ fn is_binary_on_path(name: &str) -> bool {
 
 struct Ctx<'a> {
     binary: &'a Path,
-    socket: Option<&'a Path>,
+    sockets: &'a [PathBuf],
     context_cmd: Option<&'a Path>,
     origin: Option<&'a str>,
     adapter_version: Option<&'a str>,
@@ -487,7 +487,7 @@ fn install_for_manifest(
     manifest: &AdapterManifest,
     version: &str,
     binary: &Path,
-    socket: Option<&Path>,
+    sockets: &[PathBuf],
     adapter_version: Option<&str>,
     explicit: bool,
     user_only: bool,
@@ -499,7 +499,7 @@ fn install_for_manifest(
         .ok_or_else(|| anyhow::anyhow!("version '{}' not found", version))?;
     let mut ctx = Ctx {
         binary,
-        socket,
+        sockets,
         context_cmd: vars.context_cmd,
         origin: vars.origin,
         adapter_version,
@@ -982,7 +982,7 @@ fn op_json_hooks(
             ctx.binary,
             &manifest.id,
             host_event,
-            ctx.socket,
+            ctx.sockets,
             ctx.context_cmd,
             ctx.origin,
             ctx.adapter_version,
@@ -1142,7 +1142,7 @@ fn op_toml_hooks(
                 ctx.binary,
                 &manifest.id,
                 host_event,
-                ctx.socket,
+                ctx.sockets,
                 ctx.context_cmd,
                 ctx.origin,
                 ctx.adapter_version,
@@ -1226,7 +1226,7 @@ fn op_toml_list_hooks(
                 ctx.binary,
                 &manifest.id,
                 host_event,
-                ctx.socket,
+                ctx.sockets,
                 ctx.context_cmd,
                 ctx.origin,
                 ctx.adapter_version,
@@ -1302,7 +1302,7 @@ fn toml_command_hooks(
             ctx.binary,
             &manifest.id,
             &host_event,
-            ctx.socket,
+            ctx.sockets,
             ctx.context_cmd,
             ctx.origin,
             ctx.adapter_version,
@@ -2000,7 +2000,7 @@ mod tests {
             Path::new("/usr/local/bin/agent-hooks"),
             "claude-code",
             "Stop",
-            None,
+            &[],
             None,
             None,
             None,
@@ -2017,7 +2017,7 @@ mod tests {
             Path::new(r"C:\Program Files\agent-hooks\agent-hooks.exe"),
             "claude-code",
             "Stop",
-            None,
+            &[],
             None,
             None,
             None,
@@ -2034,7 +2034,7 @@ mod tests {
             Path::new("/usr/local/bin/agent-hooks"),
             "cursor",
             "Stop",
-            None,
+            &[],
             None,
             None,
             Some("v1"),
@@ -2048,7 +2048,7 @@ mod tests {
             Path::new("/usr/local/bin/agent-hooks"),
             "claude-code",
             "PreToolUse",
-            Some(Path::new("/tmp/agent-hooks.sock")),
+            &[PathBuf::from("/tmp/agent-hooks.sock")],
             None,
             None,
             Some("v2"),
@@ -2065,7 +2065,7 @@ mod tests {
             Path::new("/b/agent-hooks"),
             "claude-code",
             "Stop",
-            Some(Path::new("/tmp/agent-hooks.sock")),
+            &[PathBuf::from("/tmp/agent-hooks.sock")],
             None,
             Some("maintainer@example.invalid"),
             None,
@@ -2079,7 +2079,7 @@ mod tests {
             Path::new("/b/agent-hooks"),
             "x",
             "Stop",
-            None,
+            &[],
             None,
             Some("  "),
             None,
@@ -2099,12 +2099,32 @@ mod tests {
     }
 
     #[test]
+    fn hook_command_embeds_every_socket_in_order() {
+        let cmd = hook_command(
+            Path::new("/b/agent-hooks"),
+            "claude-code",
+            "Stop",
+            &[
+                PathBuf::from("/tmp/agent-hooks.sock"),
+                PathBuf::from("/tmp/agent-hooks-mac.sock"),
+            ],
+            None,
+            Some("linux-box"),
+            None,
+        );
+        assert_eq!(
+            cmd,
+            "/b/agent-hooks hook claude-code --event Stop --socket /tmp/agent-hooks.sock --socket /tmp/agent-hooks-mac.sock --origin linux-box"
+        );
+    }
+
+    #[test]
     fn hook_command_stamps_context_cmd_like_socket() {
         let cmd = hook_command(
             Path::new("/usr/local/bin/agent-hooks"),
             "claude-code",
             "Stop",
-            Some(Path::new("/tmp/agent-hooks.sock")),
+            &[PathBuf::from("/tmp/agent-hooks.sock")],
             Some(Path::new("/Applications/B2V.app/Contents/MacOS/b2v")),
             None,
             Some("v1"),
@@ -2120,7 +2140,7 @@ mod tests {
             Path::new("/bin/agent-hooks"),
             "codex",
             "Stop",
-            None,
+            &[],
             Some(Path::new("/opt/b2v")),
             None,
             None,
@@ -2137,7 +2157,7 @@ mod tests {
             Path::new("/Users/me/My Tools/agent-hooks"),
             "claude-code",
             "Stop",
-            Some(Path::new("/tmp/my sock.sock")),
+            &[PathBuf::from("/tmp/my sock.sock")],
             Some(Path::new(
                 "/Applications/Back 2 Vibing.app/Contents/MacOS/b2v",
             )),
@@ -2397,7 +2417,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
     fn test_ctx<'a>(context_cmd: Option<&'a Path>) -> Ctx<'a> {
         Ctx {
             binary: Path::new("/usr/local/bin/agent-hooks"),
-            socket: None,
+            sockets: &[],
             context_cmd,
             origin: None,
             adapter_version: None,
@@ -2857,7 +2877,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
             &manifest,
             &version,
             Path::new("/usr/local/bin/agent-hooks"),
-            None,
+            &[],
             None,
             true,
             false,
@@ -3039,7 +3059,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
         let paths = vec![target.to_string_lossy().into_owned()];
         let ctx = Ctx {
             binary: Path::new("/usr/local/bin/agent-hooks"),
-            socket: None,
+            sockets: &[],
             context_cmd: None,
             origin: None,
             adapter_version: None,
@@ -3141,7 +3161,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
                 Path::new("/usr/local/bin/agent-hooks"),
                 "antigravity",
                 ev,
-                None,
+                &[],
                 None,
                 None,
                 None,
@@ -3186,7 +3206,7 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
         let paths = vec![target.to_string_lossy().into_owned()];
         let ctx = Ctx {
             binary: Path::new("/usr/local/bin/agent-hooks"),
-            socket: None,
+            sockets: &[],
             context_cmd: None,
             origin: None,
             adapter_version: None,

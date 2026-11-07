@@ -35,7 +35,7 @@ pub async fn run(args: DevArgs) -> anyhow::Result<()> {
         crate::commands::install::run(InstallArgs {
             harness: args.harness,
             binary_path: Some(binary),
-            socket: Some(socket.clone()),
+            socket: vec![socket.clone()],
             context_cmd: None,
             origin: None,
             adapter_version: None,

@@ -34,6 +34,9 @@ struct HarnessStatus {
     exists: bool,
     installed: bool,
     hook_count: usize,
+    /// Every distinct `--socket` the installed hook commands deliver to, in
+    /// install order. A reinstall that must keep them passes each back.
+    embedded_sockets: Vec<String>,
     warnings: Vec<String>,
 }
 pub fn run(args: StatusArgs) -> anyhow::Result<()> {
@@ -315,6 +318,7 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
             exists,
             installed,
             hook_count,
+            embedded_sockets: embedded_sockets(&existing_files),
             warnings: detect_drift(&existing_files, checked_socket),
         });
     }
@@ -401,19 +405,10 @@ fn count_commands(value: &serde_json::Value, count: &mut usize) {
 /// `dangling-command`); empty when the install matches this binary/socket.
 fn detect_drift(existing_files: &[PathBuf], checked_socket: &Path) -> Vec<String> {
     let current_exe = std::env::current_exe().ok();
-    let mut commands: Vec<String> = Vec::new();
-    for path in existing_files {
-        for cmd in collect_hook_commands_from_file(path) {
-            if !commands.contains(&cmd) {
-                commands.push(cmd);
-            }
-        }
-    }
+    let commands = embedded_commands(existing_files);
     let mut warnings: Vec<String> = Vec::new();
-    for cmd in &commands {
-        let Some((binary, socket)) = parse_hook_command(cmd) else {
-            continue;
-        };
+    for (binary, sockets) in &commands {
+        let binary = binary.clone();
         let expanded_bin = expand_tilde(&expand_env_vars(&binary))
             .display()
             .to_string();
@@ -446,17 +441,21 @@ fn detect_drift(existing_files: &[PathBuf], checked_socket: &Path) -> Vec<String
                 ),
             }
         }
-        // Socket mismatch: embedded --socket differs from the checked socket.
-        if let Some(sock) = socket {
-            let expanded_sock = expand_tilde(&expand_env_vars(&sock));
-            if expanded_sock != checked_socket.to_path_buf()
-                && !same_path_canon(&expanded_sock, checked_socket)
-            {
+        // Socket mismatch: none of the embedded --socket values is the checked one.
+        let expanded: Vec<PathBuf> = sockets
+            .iter()
+            .map(|sock| expand_tilde(&expand_env_vars(sock)))
+            .collect();
+        if let Some(first) = expanded.first() {
+            let delivers = expanded
+                .iter()
+                .any(|sock| sock == checked_socket || same_path_canon(sock, checked_socket));
+            if !delivers {
                 push_unique(
                     &mut warnings,
                     format!(
                         "socket-mismatch: embedded socket '{}' != checked socket '{}'",
-                        expanded_sock.display(),
+                        first.display(),
                         checked_socket.display()
                     ),
                 );
@@ -464,6 +463,35 @@ fn detect_drift(existing_files: &[PathBuf], checked_socket: &Path) -> Vec<String
         }
     }
     warnings
+}
+
+/// Each distinct agent-hooks hook command in the harness's config files,
+/// as (embedded binary, embedded `--socket` values).
+fn embedded_commands(existing_files: &[PathBuf]) -> Vec<(String, Vec<String>)> {
+    let mut commands: Vec<String> = Vec::new();
+    for path in existing_files {
+        for cmd in collect_hook_commands_from_file(path) {
+            if !commands.contains(&cmd) {
+                commands.push(cmd);
+            }
+        }
+    }
+    commands
+        .iter()
+        .filter_map(|cmd| parse_hook_command(cmd))
+        .collect()
+}
+
+fn embedded_sockets(existing_files: &[PathBuf]) -> Vec<String> {
+    let mut sockets: Vec<String> = Vec::new();
+    for (_, command_sockets) in embedded_commands(existing_files) {
+        for socket in command_sockets {
+            if !sockets.contains(&socket) {
+                sockets.push(socket);
+            }
+        }
+    }
+    sockets
 }
 
 fn push_unique(warnings: &mut Vec<String>, warning: String) {
@@ -562,7 +590,7 @@ fn extract_quoted_commands(text: &str, out: &mut Vec<String>) {
 /// The binary token is validated by invocation shape (not by name) so a
 /// hand-edited bogus binary still yields a `dangling-command` warning.
 /// Returns the raw (still quoted/expanded-later) binary token and socket.
-fn parse_hook_command(cmd: &str) -> Option<(String, Option<String>)> {
+fn parse_hook_command(cmd: &str) -> Option<(String, Vec<String>)> {
     let tokens = shell_split(cmd);
     if tokens.is_empty() {
         return None;
@@ -578,17 +606,17 @@ fn parse_hook_command(cmd: &str) -> Option<(String, Option<String>)> {
         return None;
     }
     let binary = tokens[hook_idx - 1].clone();
-    let mut socket: Option<String> = None;
+    let mut sockets: Vec<String> = Vec::new();
     let mut k = 0;
     while k < tokens.len() {
         if tokens[k] == "--socket" && k + 1 < tokens.len() {
-            socket = Some(tokens[k + 1].clone());
+            sockets.push(tokens[k + 1].clone());
         } else if let Some(rest) = tokens[k].strip_prefix("--socket=") {
-            socket = Some(rest.to_string());
+            sockets.push(rest.to_string());
         }
         k += 1;
     }
-    Some((binary, socket))
+    Some((binary, sockets))
 }
 
 /// Minimal shell-word split honoring single/double quotes. Backslashes only
@@ -743,5 +771,42 @@ fn same_path_canon(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_with_two_sockets_reports_both() {
+        let (binary, sockets) = parse_hook_command(
+            "/b/agent-hooks hook claude-code --event Stop --socket /tmp/a.sock --socket=/tmp/b.sock --origin box",
+        )
+        .unwrap();
+        assert_eq!(binary, "/b/agent-hooks");
+        assert_eq!(sockets, ["/tmp/a.sock", "/tmp/b.sock"]);
+    }
+
+    #[test]
+    fn a_checked_socket_among_the_embedded_ones_is_no_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let exe = std::env::current_exe().unwrap();
+        let command = format!(
+            "{} hook claude-code --event Stop --socket /tmp/a.sock --socket /tmp/b.sock",
+            exe.display()
+        );
+        std::fs::write(
+            &config,
+            serde_json::json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": command}]}]}}).to_string(),
+        )
+        .unwrap();
+        let files = [config];
+        assert!(detect_drift(&files, Path::new("/tmp/b.sock")).is_empty());
+        assert!(detect_drift(&files, Path::new("/tmp/c.sock"))
+            .iter()
+            .any(|w| w.starts_with("socket-mismatch")));
+        assert_eq!(embedded_sockets(&files), ["/tmp/a.sock", "/tmp/b.sock"]);
     }
 }

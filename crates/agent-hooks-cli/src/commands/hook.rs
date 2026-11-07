@@ -95,7 +95,8 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
     let mut env_policy = super::user_hooks::EnvCapturePolicy::default();
     let (mut merged_cfg, mut cfg_warnings) =
         super::user_hooks::load_merged(&mut env_policy, None);
-    let requested = requested_env_names(args.socket.as_deref());
+    let sockets = hook_sockets(&args.socket);
+    let requested = requested_env_names(&sockets);
     let context = capture_context();
     let mut passthrough_env = capture_passthrough_env();
     // Subscription is consent: a connected subscriber's `passthrough_env`
@@ -182,16 +183,12 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
     //    everything else gets exactly 1 attempt (fail fast). A received
     //    verdict is final, never re-requested. Exhaustion fails open to the
     //    local decision with one stderr warning — never block the agent.
-    let socket_path = args.socket.clone().unwrap_or_else(default_socket_path);
-    let attempts = if is_gate_event(adapter.as_ref(), event.as_ref()) {
-        GATE_MAX_ATTEMPTS
-    } else {
-        1
-    };
+    let gate = is_gate_event(adapter.as_ref(), event.as_ref());
+    let attempts = if gate { GATE_MAX_ATTEMPTS } else { 1 };
     // Consumer context (`--context-cmd`) only matters when a daemon send will
     // happen: skipped once the budget is gone or no daemon socket exists.
     let mut extensions = match args.context_cmd.as_deref() {
-        Some(cmd) if !budget.spent() && daemon_socket_present(&socket_path) => {
+        Some(cmd) if !budget.spent() && sockets.iter().any(|s| daemon_socket_present(s)) => {
             let harness_id = adapter
                 .as_ref()
                 .map(|a| a.id().to_string())
@@ -243,7 +240,7 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
         None
     } else {
         match agent_hooks_protocol::hook_line_with_extensions(&input, &extensions) {
-            Ok(line) => forward_with_retries(&socket_path, &line, wait, attempts),
+            Ok(line) => forward_to_all(&sockets, &line, wait, attempts, gate),
             Err(e) => {
                 eprintln!("agent-hooks: cannot serialize hook input: {e}; skipping daemon forward");
                 None
@@ -773,24 +770,39 @@ fn capture_passthrough_env() -> std::collections::HashMap<String, String> {
 /// Bound the entire lookup, including connect and any client transport retries.
 /// Subscription is consent: whatever the daemon reports as requested is
 /// captured (plus always-capture names). No allow-list gate.
-fn requested_env_names(socket: Option<&Path>) -> Vec<String> {
+fn requested_env_names(sockets: &[PathBuf]) -> Vec<String> {
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     else {
         return Vec::new();
     };
-    let path = socket
-        .map(Path::to_path_buf)
-        .unwrap_or_else(default_socket_path);
-    let client = agent_hooks_client::AgentHooksClient::new(path.to_string_lossy().into_owned());
-    runtime.block_on(async {
-        tokio::time::timeout(Duration::from_millis(100), client.requested_env_names())
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default()
-    })
+    let mut names: Vec<String> = Vec::new();
+    for path in sockets.iter().filter(|s| daemon_socket_present(s)) {
+        let client = agent_hooks_client::AgentHooksClient::new(path.to_string_lossy().into_owned());
+        let requested = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(100), client.requested_env_names())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default()
+        });
+        for name in requested {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// The sockets a hook delivers to: each `--socket` given, else the default.
+fn hook_sockets(given: &[PathBuf]) -> Vec<PathBuf> {
+    if given.is_empty() {
+        vec![default_socket_path()]
+    } else {
+        given.to_vec()
+    }
 }
 
 fn detect_tty() -> Option<String> {
@@ -1155,6 +1167,48 @@ fn forward_with_retries(
     None
 }
 
+/// Deliver `line` to every socket that could have a daemon behind it (all of
+/// them when none does, so the usual unreachable warning still fires), each on
+/// its own thread. Replies are taken in socket order: a gate event returns
+/// the first daemon that answers, so a held prompt on one socket is never
+/// queued behind another; any other event waits for all deliveries to land.
+fn forward_to_all(
+    sockets: &[PathBuf],
+    line: &str,
+    wait: Duration,
+    attempts: u32,
+    gate: bool,
+) -> Option<String> {
+    let live: Vec<&PathBuf> = sockets
+        .iter()
+        .filter(|s| daemon_socket_present(s))
+        .collect();
+    let targets: Vec<&PathBuf> = if live.is_empty() {
+        sockets.iter().take(1).collect()
+    } else {
+        live
+    };
+    if let [only] = targets.as_slice() {
+        return forward_with_retries(only, line, wait, attempts);
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, Option<String>)>();
+    for (index, socket) in targets.iter().enumerate() {
+        let (tx, socket, line) = (tx.clone(), (*socket).clone(), line.to_string());
+        std::thread::spawn(move || {
+            let _ = tx.send((index, forward_with_retries(&socket, &line, wait, attempts)));
+        });
+    }
+    drop(tx);
+    let mut replies: Vec<Option<String>> = vec![None; targets.len()];
+    for (index, reply) in rx {
+        if gate && reply.is_some() {
+            return reply;
+        }
+        replies[index] = reply;
+    }
+    replies.into_iter().flatten().next()
+}
+
 #[cfg(unix)]
 fn try_forward_inner(
     socket_path: &Path,
@@ -1303,6 +1357,79 @@ fn _connect_with_timeout(
 }
 #[cfg(test)]
 mod tests {
+
+    /// A one-connection daemon on `path` that records the line it got and
+    /// answers `reply` after `delay`.
+    #[cfg(unix)]
+    fn fake_daemon(
+        path: &Path,
+        reply: &'static str,
+        delay: Duration,
+    ) -> std::thread::JoinHandle<String> {
+        use std::io::{BufRead, BufReader};
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            std::thread::sleep(delay);
+            (&stream).write_all(format!("{reply}\n").as_bytes()).unwrap();
+            line
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_event_reaches_every_socket_and_the_first_reply_in_order_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, forwarded) = (dir.path().join("local.sock"), dir.path().join("fwd.sock"));
+        let a = fake_daemon(&local, r#"{"from":"local"}"#, Duration::from_millis(80));
+        let b = fake_daemon(&forwarded, r#"{"from":"forwarded"}"#, Duration::ZERO);
+        let reply = forward_to_all(
+            &[local, forwarded],
+            r#"{"event":1}"#,
+            Duration::from_secs(2),
+            1,
+            false,
+        );
+        assert_eq!(reply.as_deref(), Some(r#"{"from":"local"}"#));
+        assert_eq!(a.join().unwrap().trim(), r#"{"event":1}"#);
+        assert_eq!(b.join().unwrap().trim(), r#"{"event":1}"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_gate_event_takes_whichever_daemon_answers_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, forwarded) = (dir.path().join("local.sock"), dir.path().join("fwd.sock"));
+        let _a = fake_daemon(&local, r#"{"from":"local"}"#, Duration::from_millis(600));
+        let _b = fake_daemon(&forwarded, r#"{"from":"forwarded"}"#, Duration::ZERO);
+        let reply = forward_to_all(
+            &[local, forwarded],
+            r#"{"event":1}"#,
+            Duration::from_secs(2),
+            1,
+            true,
+        );
+        assert_eq!(reply.as_deref(), Some(r#"{"from":"forwarded"}"#));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_socket_is_skipped_while_another_is_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.sock");
+        let d = fake_daemon(&live, r#"{"ok":true}"#, Duration::ZERO);
+        let reply = forward_to_all(
+            &[dir.path().join("gone.sock"), live],
+            "{}",
+            Duration::from_secs(2),
+            1,
+            false,
+        );
+        assert_eq!(reply.as_deref(), Some(r#"{"ok":true}"#));
+        d.join().unwrap();
+    }
     use super::*;
     use crate::cli::HookArgs;
     use std::path::PathBuf;
@@ -1318,7 +1445,7 @@ mod tests {
             harness_override: harness_override.map(|s| s.to_string()),
             event: event.map(|s| s.to_string()),
             request_id: None,
-            socket: None::<PathBuf>,
+            socket: Vec::new(),
             adapter_version: None,
             capture_fixtures: None,
             context_cmd: None,

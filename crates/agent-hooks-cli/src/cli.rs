@@ -147,9 +147,10 @@ pub struct HookArgs {
     #[arg(long = "request-id", value_name = "ID")]
     pub request_id: Option<String>,
 
-    /// Daemon socket path (default: /tmp/agent-hooks.sock)
+    /// Daemon socket path (default: /tmp/agent-hooks.sock). Repeatable: every
+    /// event goes to each socket, and the first daemon that answers decides.
     #[arg(long, value_name = "PATH")]
-    pub socket: Option<PathBuf>,
+    pub socket: Vec<PathBuf>,
 
     /// Pinned manifest version, e.g. v1
     #[arg(long = "adapter-version", value_name = "VERSION")]
@@ -334,9 +335,10 @@ pub struct InstallArgs {
     #[arg(long = "binary-path", visible_alias = "bin", value_name = "PATH")]
     pub binary_path: Option<PathBuf>,
 
-    /// Socket path to embed in installed hook commands
+    /// Socket path to embed in installed hook commands. Repeatable: the hooks
+    /// deliver to every socket given (plugin assets use the first).
     #[arg(long, value_name = "PATH")]
-    pub socket: Option<PathBuf>,
+    pub socket: Vec<PathBuf>,
 
     /// Context command to embed in installed hook commands and plugin
     /// assets (see `hook --context-cmd`)
@@ -364,9 +366,9 @@ pub struct SelfInstallArgs {
     #[arg(long, value_name = "VERSION")]
     pub min_version: Option<String>,
 
-    /// Socket path to embed in installed hook commands
+    /// Socket path to embed in installed hook commands (repeatable)
     #[arg(long, value_name = "PATH")]
-    pub socket: Option<PathBuf>,
+    pub socket: Vec<PathBuf>,
 
     /// Only place the binary; do not touch harness configs
     #[arg(long)]

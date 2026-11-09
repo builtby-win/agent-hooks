@@ -79,3 +79,32 @@ fn omp_registry_resolves_aliases() {
     let pi = AdapterRegistry::get_versioned("pi", None).expect("pi resolves from registry");
     assert_eq!(pi.id(), "pi");
 }
+
+#[test]
+fn omp_permission_request_surfaces_tool_input_and_resolution_clears_waiting() {
+    let adapter = manifest_adapter();
+    let input = make_input(
+        "tool_approval_requested",
+        r#"{"session_id": "ses_omp_1", "toolName": "edit", "toolCallId": "call-1",
+            "tool_input": {"file_path": "/repo/src/lib.rs"}}"#,
+    );
+    let event = adapter.parse_event(&input).expect("parse approval request");
+    match event.lifecycle {
+        AgentLifecycle::PermissionRequest { prompt } => {
+            assert_eq!(prompt.prompt_id, "req-omp-1");
+            assert_eq!(prompt.tool_name.as_deref(), Some("edit"));
+            assert_eq!(prompt.file_path.as_deref(), Some("/repo/src/lib.rs"));
+        }
+        other => panic!("expected PermissionRequest, got {other:?}"),
+    }
+
+    let input = make_input(
+        "ToolApprovalResolved",
+        r#"{"session_id": "ses_omp_1", "toolName": "edit", "toolCallId": "call-1", "approved": true}"#,
+    );
+    let event = adapter.parse_event(&input).expect("parse approval resolved");
+    assert!(
+        matches!(event.lifecycle, AgentLifecycle::ToolUseStart),
+        "resolution must leave WaitingForInput"
+    );
+}

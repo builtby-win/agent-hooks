@@ -81,6 +81,7 @@
         "PermissionRequest": {"lifecycle": "PermissionRequest", "capability": "gate"},
         "toolapprovalrequested": {"lifecycle": "PermissionRequest", "capability": "gate"},
         "approvalrequested": {"lifecycle": "PermissionRequest", "capability": "gate"},
+        "toolapprovalresolved": {"lifecycle": "ToolUseStart", "capability": "observe"},
         "Notification": {"lifecycle": "Notification", "capability": "observe"},
         "plan_approval_requested": {"lifecycle": "Notification", "capability": "observe"},
         "Stop": {"lifecycle": "Stop", "capability": "continue", "demote_when": {"willContinue": true}},

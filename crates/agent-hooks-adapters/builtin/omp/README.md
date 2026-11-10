@@ -38,7 +38,8 @@ agent-hooks install --harness omp
 | `turn_start` / `turn_end` | `TurnStart` / `TurnEnd` (busy signals: assert `Running`, never terminal) |
 | `tool_call` | `PreToolUse` |
 | `tool_result` | `PostToolUse` |
-| `tool_approval_requested` | `PermissionRequest` |
+| `tool_approval_requested` | `PermissionRequest` (carries `tool_input`) |
+| `tool_approval_resolved` | `ToolUseStart`; also settles the matching daemon hold, so an answer given in omp's own client (ACP) clears it immediately |
 | `agent_end` / `session_stop` | `Stop` (omp v18.1.x renamed `agent_settled`; both forwarded, `session_stop` carries `session_id` + settle semantics) |
 | `session_shutdown` | `SessionEnd` |
 

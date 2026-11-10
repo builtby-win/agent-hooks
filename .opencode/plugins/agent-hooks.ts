@@ -861,6 +861,19 @@ export async function AgentHooksPlugin(plugin: any = {}) {
         return;
       }
 
+      // session.idle / session.status idle carry no reply text; attach it so
+      // the daemon can record the assistant half of history. Only the first
+      // idle of a turn matters (forwardSessionEvent drops the duplicate).
+      const sid = getSessionId(props);
+      const isIdle =
+        name === "session.idle" || (name === "session.status" && sessionStatusType(props) === "idle");
+      if (isIdle && sid && props?.summary == null && lastSignal.get(sid)?.signal !== "idle") {
+        const summary = await lookupAssistantSummary(sid);
+        if (summary) {
+          forwardSessionEvent(name, { ...props, summary });
+          return;
+        }
+      }
       forwardSessionEvent(name, props);
     },
   };
@@ -897,20 +910,21 @@ function forwardSessionEvent(name: string, props: any, now: number = Date.now())
     return sent;
   }
 
+  const { execution, ...payload } = fields(props);
   if (sid) {
     const last = lastSignal.get(sid);
     if (event === "session.busy") {
-      if (last?.signal === "idle" && now - last.at < BUSY_AFTER_IDLE_GUARD_MS) return sent;
+      if (!execution && last?.signal === "idle" && now - last.at < BUSY_AFTER_IDLE_GUARD_MS) return sent;
       remember(lastSignal, sid, { signal: "busy", at: now });
     } else if (event === "session.idle") {
       // session.status idle and session.idle both announce the same idle.
-      if (last?.signal === "idle") return sent;
+      if (!execution && last?.signal === "idle") return sent;
       remember(lastSignal, sid, { signal: "idle", at: now });
     } else if (event === "session.created" && !last) {
       remember(lastSignal, sid, { signal: "busy", at: 0 });
     }
   }
-  send(event, props);
+  send(event, execution === true ? payload : props);
   if (sid && name === "session.deleted") forgetSession(sid);
   return sent;
 }
@@ -947,14 +961,20 @@ function mapV2EventToV1(event: Fields): Fields[] {
   const props = v2Payload(event);
   const sessionID = str(props.sessionID, props.session_id, props.sessionId);
   switch (type) {
+    // `execution: true` marks these as authoritative (one started and one
+    // terminal event per execution): forwardSessionEvent skips its V1
+    // busy/idle heuristics for them, which would otherwise swallow a turn that
+    // starts right after an interrupted one.
     case "session.execution.started":
-      return sessionID ? [{ type: "session.status", properties: { sessionID, status: { type: "busy" } } }] : [];
+      return sessionID
+        ? [{ type: "session.status", properties: { sessionID, execution: true, status: { type: "busy" } } }]
+        : [];
     case "session.execution.succeeded":
     case "session.execution.failed":
     case "session.execution.interrupted":
       return sessionID
         ? [
-            { type: "session.status", properties: { sessionID, status: { type: "idle" } } },
+            { type: "session.status", properties: { sessionID, execution: true, status: { type: "idle" } } },
             { type: "session.idle", properties: { sessionID } },
           ]
         : [];
@@ -1025,15 +1045,74 @@ function textParts(value: unknown): string | undefined {
 
 function latestAssistantText(value: unknown): string | undefined {
   if (!Array.isArray(value)) return undefined;
-  for (let index = value.length - 1; index >= 0; index -= 1) {
+  // V2 writes an `idle` row once per execution end. A queued prompt can land
+  // its user row before this read runs, so anchor on the latest idle row
+  // rather than the tail. V1 rows have none and start at the tail.
+  let end = value.length - 1;
+  for (let index = end; index >= 0; index -= 1) {
+    if (fields(value[index]).type === "idle") {
+      end = index - 1;
+      break;
+    }
+  }
+  for (let index = end; index >= 0; index -= 1) {
     const row = fields(value[index]);
     const message = fields(row.info ?? row);
-    if (message.type !== "assistant") continue;
+    // V2 context rows say `type: "assistant"`; V1/SDK message rows say
+    // `info.role: "assistant"`. Stop at the latest user row: a turn that
+    // produced no reply must not inherit the previous turn's text.
+    if (message.type === "user" || message.role === "user") return undefined;
+    if (message.type !== "assistant" && message.role !== "assistant") continue;
     const text = textParts(message.content ?? row.parts);
     if (text) return text;
   }
   return undefined;
 }
+
+const SUMMARY_LOOKUP_TIMEOUT_MS = 2000;
+
+/// session.idle carries only the session id, so the finished reply text has to
+/// be read back through the SDK. Tries the provided client's `session.messages`
+/// (V1 SDK shape, then V2 shape) and `session.context`, then the adapted SDK
+/// client. Best effort: undefined when nothing yields assistant text.
+async function lookupAssistantSummary(sid: string): Promise<string | undefined> {
+  const unwrap = (res: unknown): unknown => {
+    const r = fields(res);
+    return Array.isArray(res) ? res : (r.data ?? res);
+  };
+  const attempts = (c: any): Array<() => Promise<unknown>> => {
+    const session = c?.session;
+    const out: Array<() => Promise<unknown>> = [];
+    if (typeof session?.messages === "function") {
+      out.push(() => session.messages({ path: { id: sid }, query: { directory: promptDirectory } }));
+      out.push(() => session.messages({ sessionID: sid, directory: promptDirectory }));
+    }
+    if (typeof session?.context === "function") out.push(() => session.context({ sessionID: sid }));
+    return out;
+  };
+  const lookups = async (): Promise<string | undefined> => {
+    for (const getClient of [async () => promptClient, sdkPromptClient]) {
+      const c = await getClient();
+      for (const attempt of attempts(c)) {
+        try {
+          const text = latestAssistantText(unwrap(await attempt()));
+          if (text) return text;
+        } catch (err) {
+          debug(`session summary lookup failed: ${err}`);
+        }
+      }
+    }
+    return undefined;
+  };
+  const { promise: timeout, resolve } = Promise.withResolvers<undefined>();
+  const timer = setTimeout(() => resolve(undefined), SUMMARY_LOOKUP_TIMEOUT_MS);
+  try {
+    return await Promise.race([lookups(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Process-wide (globalThis) so every location instance and every hot-reloaded
 // copy of this module share it. Bounded; events without an id pass through.
 const SEEN_EVENT_IDS = Symbol.for("agent-hooks.opencode.seen-event-ids");

@@ -115,8 +115,9 @@ const ORIGIN = installSetting(INSTALL_ORIGIN);
 
 // argv for `agent-hooks hook <harness> --event <E>` plus the install-time
 // daemon socket / context command, so every spawn reaches the same daemon.
-export function hookArgs(agentEvent: string): string[] {
+export function hookArgs(agentEvent: string, requestId?: string): string[] {
   const args = ["hook", HARNESS, "--event", agentEvent];
+  if (requestId) args.push("--request-id", requestId);
   for (const socket of SOCKETS) args.push("--socket", socket);
   if (CONTEXT_CMD) args.push("--context-cmd", CONTEXT_CMD);
   if (ORIGIN) args.push("--origin", ORIGIN);
@@ -553,7 +554,13 @@ function emit(agentEvent: string, payload: any, context: any): void {
 // Awaited forward for gate hooks. Resolves the binary's verdict JSON;
 // falls back to allow on any failure so the agent is never blocked by
 // hook infra.
-function query(agentEvent: string, payload: unknown, context: unknown, timeoutMs: number = GATE_TIMEOUT_MS): Promise<unknown> {
+function query(
+  agentEvent: string,
+  payload: unknown,
+  context: unknown,
+  timeoutMs: number = GATE_TIMEOUT_MS,
+  requestId?: string,
+): Promise<unknown> {
   const { promise, resolve } = Promise.withResolvers<unknown>();
   if (hooksDisabled()) {
     resolve({ decision: "allow" });
@@ -561,7 +568,7 @@ function query(agentEvent: string, payload: unknown, context: unknown, timeoutMs
   }
   let child;
   try {
-    child = spawn(BINARY, hookArgs(agentEvent), {
+    child = spawn(BINARY, hookArgs(agentEvent, requestId), {
       stdio: ["pipe", "pipe", "ignore"],
     });
   } catch {
@@ -598,6 +605,28 @@ function query(agentEvent: string, payload: unknown, context: unknown, timeoutMs
     // ignore
   }
   return promise;
+}
+
+// Approval holds this plugin opened, by toolCallId. The hold's prompt id is
+// the toolCallId (passed as --request-id), so a native answer can settle it.
+const openApprovalHolds = new Set<string>();
+
+// omp resolved the approval itself (e.g. an ACP client answered the
+// permission card), so no daemon decider will: settle the hold now instead of
+// leaving it pending until its timeout. Fire-and-forget; a hold that is
+// already gone just makes `answer` exit non-zero, which is ignored.
+function settleApprovalHold(toolCallId: string, approved: boolean, reason: unknown): void {
+  if (!openApprovalHolds.delete(toolCallId) || hooksDisabled()) return;
+  const args = ["answer", "--prompt-id", toolCallId];
+  if (SOCKET) args.push("--socket", SOCKET);
+  if (approved) args.push("--allow");
+  else args.push("--deny", typeof reason === "string" && reason.trim() ? reason.trim() : "resolved by harness");
+  try {
+    const child = spawn(BINARY, args, { stdio: "ignore" });
+    child.on("error", () => {});
+  } catch {
+    // binary missing — nothing to settle
+  }
 }
 
 function denyReason(decision: unknown): string | null {
@@ -1154,6 +1183,16 @@ export default function agentHooks(pi: any): void {
       // Older harness may not know a newer event name — skip it.
     }
   }
+  try {
+    pi.on("tool_approval_resolved", (payload: any, context: any) => {
+      const p = payload ?? {};
+      emit("ToolApprovalResolved", p, context);
+      const toolCallId = fields(p).toolCallId;
+      if (typeof toolCallId === "string") settleApprovalHold(toolCallId, fields(p).approved === true, fields(p).reason);
+    });
+  } catch {
+    // Older harness without tool_approval_resolved — holds time out on their own.
+  }
   for (const [nativeEvent, agentEvent] of Object.entries(GATE_MAP)) {
     try {
       pi.on(nativeEvent, async (payload: unknown, context: unknown) => {
@@ -1167,7 +1206,17 @@ export default function agentHooks(pi: any): void {
           emit(agentEvent, p, context);
           return;
         }
-        const decision = await query(agentEvent, p, context);
+        // omp's approval event names the call's arguments `input`; the manifest
+        // reads `tool_input` for the prompt's command / file path.
+        const approvalId = nativeEvent === "tool_approval_requested" ? fields(p).toolCallId : undefined;
+        const holdId = typeof approvalId === "string" && approvalId ? approvalId : undefined;
+        const forwarded =
+          nativeEvent === "tool_approval_requested" && fields(p).tool_input === undefined && fields(p).input !== undefined
+            ? { ...fields(p), tool_input: fields(p).input }
+            : p;
+        if (holdId) openApprovalHolds.add(holdId);
+        const decision = await query(agentEvent, forwarded, context, GATE_TIMEOUT_MS, holdId);
+        if (holdId) openApprovalHolds.delete(holdId);
         rememberAllowAlways(key, tool, decision);
         const reason = denyReason(decision);
         if (reason) return { block: true, reason };

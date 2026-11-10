@@ -644,6 +644,61 @@ describe("opencode asset", () => {
     expect(out.cwd).toBeUndefined();
   });
 
+  test("V1 session.idle carries the assistant text read back via session.messages", async () => {
+    reset();
+    const mod = await load("opencode");
+    const seen: unknown[] = [];
+    const hooks = await mod.AgentHooksPlugin({
+      directory: "/workspace/project",
+      client: {
+        session: {
+          messages: async (input: unknown) => {
+            seen.push(input);
+            return {
+              data: [
+                { info: { role: "user" }, parts: [{ type: "text", text: "hi" }] },
+                {
+                  info: { role: "assistant" },
+                  parts: [
+                    { type: "text", text: "Done." },
+                    { type: "tool", text: "not stored" },
+                  ],
+                },
+              ],
+            };
+          },
+        },
+      },
+    });
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "v1-idle" } } });
+    const c = await settle(1);
+    expect(events(c)).toEqual(["session.idle"]);
+    expect(c[0].input.summary).toBe("Done.");
+    expect(seen[0]).toMatchObject({ path: { id: "v1-idle" } });
+  });
+
+  test("idle after a turn with no assistant text does not reuse the previous reply", async () => {
+    reset();
+    const mod = await load("opencode");
+    const hooks = await mod.AgentHooksPlugin({
+      client: {
+        session: {
+          messages: async () => ({
+            data: [
+              { info: { role: "user" }, parts: [{ type: "text", text: "one" }] },
+              { info: { role: "assistant" }, parts: [{ type: "text", text: "old reply" }] },
+              { info: { role: "user" }, parts: [{ type: "text", text: "two" }] },
+              { info: { role: "assistant" }, parts: [{ type: "tool", text: "x" }] },
+            ],
+          }),
+        },
+      },
+    });
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "v1-stale" } } });
+    const c = await settle(1);
+    expect(c[0].input.summary).toBeUndefined();
+  });
+
   test("OpenCode reuses a directory learned from that session's lifecycle event", async () => {
     const mod = await load("opencode");
     mod.forwardSessionEvent("session.created", { sessionID: "s1", directory: "/cell/project" });
@@ -716,11 +771,11 @@ describe("opencode asset", () => {
   test("V2 execution events reconstruct busy/idle", async () => {
     const mod = await load("opencode");
     expect(mod.mapV2EventToV1({ type: "session.execution.started", data: { sessionID: "v" } })).toEqual([
-      { type: "session.status", properties: { sessionID: "v", status: { type: "busy" } } },
+      { type: "session.status", properties: { sessionID: "v", execution: true, status: { type: "busy" } } },
     ]);
     for (const t of ["succeeded", "failed", "interrupted"]) {
       expect(mod.mapV2EventToV1({ type: `session.execution.${t}`, data: { sessionID: "v" } })).toEqual([
-        { type: "session.status", properties: { sessionID: "v", status: { type: "idle" } } },
+        { type: "session.status", properties: { sessionID: "v", execution: true, status: { type: "idle" } } },
         { type: "session.idle", properties: { sessionID: "v" } },
       ]);
     }
@@ -735,6 +790,19 @@ describe("opencode asset", () => {
     expect(form.properties.questions[0]).toMatchObject({ question: "Pick", multiple: true });
     // Global forms are not session prompts.
     expect(mod.mapV2EventToV1({ type: "form.created", data: { form: { id: "f", sessionID: "global" } } })).toEqual([]);
+  });
+
+  test("a V2 turn starting right after an interrupted one still reports its Stop", async () => {
+    const mod = await load("opencode");
+    const run = (type: string, now: number) =>
+      mod
+        .mapV2EventToV1({ type, data: { sessionID: "rapid" } })
+        .flatMap((e: { type: string; properties: unknown }) => mod.forwardSessionEvent(e.type === "session.status" ? "session.status" : e.type, e.properties, now));
+    expect(run("session.execution.started", 0)).toEqual(["session.busy"]);
+    expect(run("session.execution.interrupted", 100)).toEqual(["session.idle"]);
+    // Inside the 3s busy-after-idle guard: the V1 heuristic would drop both.
+    expect(run("session.execution.started", 200)).toEqual(["session.busy"]);
+    expect(run("session.execution.succeeded", 300)).toEqual(["session.idle"]);
   });
 
   test("V2 setup drives the V1 event path; V1 export stays a function", async () => {
@@ -794,6 +862,29 @@ describe("opencode asset", () => {
     );
     const idle = c.find((call) => events([call])[0] === "session.idle");
     expect(idle?.input.summary).toBe("It fixes history capture.");
+  });
+
+  test("V2 Stop keeps its reply when the next queued prompt's user row already landed", async () => {
+    reset();
+    const mod = await load("opencode");
+    async function* stream() {
+      yield { type: "session.execution.succeeded", data: { sessionID: "v2-race" } };
+    }
+    const stop = await mod.default.setup({
+      location: { directory: "/workspace/race" },
+      session: {
+        context: async () => [
+          { type: "user", content: [{ type: "text", text: "one" }] },
+          { type: "assistant", content: [{ type: "text", text: "reply one" }] },
+          { type: "idle", outcome: "succeeded" },
+          { type: "user", content: [{ type: "text", text: "two" }] },
+        ],
+      },
+      event: { subscribe: () => stream() },
+    });
+    const c = await settle(1);
+    stop();
+    expect(c.find((call) => events([call])[0] === "session.idle")?.input.summary).toBe("reply one");
   });
 
 });

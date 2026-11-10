@@ -1044,7 +1044,17 @@ function textParts(value: unknown): string | undefined {
 
 function latestAssistantText(value: unknown): string | undefined {
   if (!Array.isArray(value)) return undefined;
-  for (let index = value.length - 1; index >= 0; index -= 1) {
+  // V2 writes an `idle` row once per execution end. A queued prompt can land
+  // its user row before this read runs, so anchor on the latest idle row
+  // rather than the tail. V1 rows have none and start at the tail.
+  let end = value.length - 1;
+  for (let index = end; index >= 0; index -= 1) {
+    if (fields(value[index]).type === "idle") {
+      end = index - 1;
+      break;
+    }
+  }
+  for (let index = end; index >= 0; index -= 1) {
     const row = fields(value[index]);
     const message = fields(row.info ?? row);
     // V2 context rows say `type: "assistant"`; V1/SDK message rows say

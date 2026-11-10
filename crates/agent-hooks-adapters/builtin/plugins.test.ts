@@ -864,6 +864,29 @@ describe("opencode asset", () => {
     expect(idle?.input.summary).toBe("It fixes history capture.");
   });
 
+  test("V2 Stop keeps its reply when the next queued prompt's user row already landed", async () => {
+    reset();
+    const mod = await load("opencode");
+    async function* stream() {
+      yield { type: "session.execution.succeeded", data: { sessionID: "v2-race" } };
+    }
+    const stop = await mod.default.setup({
+      location: { directory: "/workspace/race" },
+      session: {
+        context: async () => [
+          { type: "user", content: [{ type: "text", text: "one" }] },
+          { type: "assistant", content: [{ type: "text", text: "reply one" }] },
+          { type: "idle", outcome: "succeeded" },
+          { type: "user", content: [{ type: "text", text: "two" }] },
+        ],
+      },
+      event: { subscribe: () => stream() },
+    });
+    const c = await settle(1);
+    stop();
+    expect(c.find((call) => events([call])[0] === "session.idle")?.input.summary).toBe("reply one");
+  });
+
 });
 describe("amp asset", () => {
   test("placeholders, payload shape and gate", async () => {

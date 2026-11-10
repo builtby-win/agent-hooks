@@ -771,11 +771,11 @@ describe("opencode asset", () => {
   test("V2 execution events reconstruct busy/idle", async () => {
     const mod = await load("opencode");
     expect(mod.mapV2EventToV1({ type: "session.execution.started", data: { sessionID: "v" } })).toEqual([
-      { type: "session.status", properties: { sessionID: "v", status: { type: "busy" } } },
+      { type: "session.status", properties: { sessionID: "v", execution: true, status: { type: "busy" } } },
     ]);
     for (const t of ["succeeded", "failed", "interrupted"]) {
       expect(mod.mapV2EventToV1({ type: `session.execution.${t}`, data: { sessionID: "v" } })).toEqual([
-        { type: "session.status", properties: { sessionID: "v", status: { type: "idle" } } },
+        { type: "session.status", properties: { sessionID: "v", execution: true, status: { type: "idle" } } },
         { type: "session.idle", properties: { sessionID: "v" } },
       ]);
     }
@@ -790,6 +790,19 @@ describe("opencode asset", () => {
     expect(form.properties.questions[0]).toMatchObject({ question: "Pick", multiple: true });
     // Global forms are not session prompts.
     expect(mod.mapV2EventToV1({ type: "form.created", data: { form: { id: "f", sessionID: "global" } } })).toEqual([]);
+  });
+
+  test("a V2 turn starting right after an interrupted one still reports its Stop", async () => {
+    const mod = await load("opencode");
+    const run = (type: string, now: number) =>
+      mod
+        .mapV2EventToV1({ type, data: { sessionID: "rapid" } })
+        .flatMap((e: { type: string; properties: unknown }) => mod.forwardSessionEvent(e.type === "session.status" ? "session.status" : e.type, e.properties, now));
+    expect(run("session.execution.started", 0)).toEqual(["session.busy"]);
+    expect(run("session.execution.interrupted", 100)).toEqual(["session.idle"]);
+    // Inside the 3s busy-after-idle guard: the V1 heuristic would drop both.
+    expect(run("session.execution.started", 200)).toEqual(["session.busy"]);
+    expect(run("session.execution.succeeded", 300)).toEqual(["session.idle"]);
   });
 
   test("V2 setup drives the V1 event path; V1 export stays a function", async () => {

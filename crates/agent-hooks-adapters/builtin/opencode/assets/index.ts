@@ -909,20 +909,21 @@ function forwardSessionEvent(name: string, props: any, now: number = Date.now())
     return sent;
   }
 
+  const { execution, ...payload } = fields(props);
   if (sid) {
     const last = lastSignal.get(sid);
     if (event === "session.busy") {
-      if (last?.signal === "idle" && now - last.at < BUSY_AFTER_IDLE_GUARD_MS) return sent;
+      if (!execution && last?.signal === "idle" && now - last.at < BUSY_AFTER_IDLE_GUARD_MS) return sent;
       remember(lastSignal, sid, { signal: "busy", at: now });
     } else if (event === "session.idle") {
       // session.status idle and session.idle both announce the same idle.
-      if (last?.signal === "idle") return sent;
+      if (!execution && last?.signal === "idle") return sent;
       remember(lastSignal, sid, { signal: "idle", at: now });
     } else if (event === "session.created" && !last) {
       remember(lastSignal, sid, { signal: "busy", at: 0 });
     }
   }
-  send(event, props);
+  send(event, execution === true ? payload : props);
   if (sid && name === "session.deleted") forgetSession(sid);
   return sent;
 }
@@ -959,14 +960,20 @@ function mapV2EventToV1(event: Fields): Fields[] {
   const props = v2Payload(event);
   const sessionID = str(props.sessionID, props.session_id, props.sessionId);
   switch (type) {
+    // `execution: true` marks these as authoritative (one started and one
+    // terminal event per execution): forwardSessionEvent skips its V1
+    // busy/idle heuristics for them, which would otherwise swallow a turn that
+    // starts right after an interrupted one.
     case "session.execution.started":
-      return sessionID ? [{ type: "session.status", properties: { sessionID, status: { type: "busy" } } }] : [];
+      return sessionID
+        ? [{ type: "session.status", properties: { sessionID, execution: true, status: { type: "busy" } } }]
+        : [];
     case "session.execution.succeeded":
     case "session.execution.failed":
     case "session.execution.interrupted":
       return sessionID
         ? [
-            { type: "session.status", properties: { sessionID, status: { type: "idle" } } },
+            { type: "session.status", properties: { sessionID, execution: true, status: { type: "idle" } } },
             { type: "session.idle", properties: { sessionID } },
           ]
         : [];

@@ -861,6 +861,19 @@ export async function AgentHooksPlugin(plugin: any = {}) {
         return;
       }
 
+      // session.idle / session.status idle carry no reply text; attach it so
+      // the daemon can record the assistant half of history. Only the first
+      // idle of a turn matters (forwardSessionEvent drops the duplicate).
+      const sid = getSessionId(props);
+      const isIdle =
+        name === "session.idle" || (name === "session.status" && sessionStatusType(props) === "idle");
+      if (isIdle && sid && props?.summary == null && lastSignal.get(sid)?.signal !== "idle") {
+        const summary = await lookupAssistantSummary(sid);
+        if (summary) {
+          forwardSessionEvent(name, { ...props, summary });
+          return;
+        }
+      }
       forwardSessionEvent(name, props);
     },
   };
@@ -1028,12 +1041,59 @@ function latestAssistantText(value: unknown): string | undefined {
   for (let index = value.length - 1; index >= 0; index -= 1) {
     const row = fields(value[index]);
     const message = fields(row.info ?? row);
-    if (message.type !== "assistant") continue;
+    // V2 context rows say `type: "assistant"`; V1/SDK message rows say
+    // `info.role: "assistant"`.
+    if (message.type !== "assistant" && message.role !== "assistant") continue;
     const text = textParts(message.content ?? row.parts);
     if (text) return text;
   }
   return undefined;
 }
+
+const SUMMARY_LOOKUP_TIMEOUT_MS = 2000;
+
+/// session.idle carries only the session id, so the finished reply text has to
+/// be read back through the SDK. Tries the provided client's `session.messages`
+/// (V1 SDK shape, then V2 shape) and `session.context`, then the adapted SDK
+/// client. Best effort: undefined when nothing yields assistant text.
+async function lookupAssistantSummary(sid: string): Promise<string | undefined> {
+  const unwrap = (res: unknown): unknown => {
+    const r = fields(res);
+    return Array.isArray(res) ? res : (r.data ?? res);
+  };
+  const attempts = (c: any): Array<() => Promise<unknown>> => {
+    const session = c?.session;
+    const out: Array<() => Promise<unknown>> = [];
+    if (typeof session?.messages === "function") {
+      out.push(() => session.messages({ path: { id: sid }, query: { directory: promptDirectory } }));
+      out.push(() => session.messages({ sessionID: sid, directory: promptDirectory }));
+    }
+    if (typeof session?.context === "function") out.push(() => session.context({ sessionID: sid }));
+    return out;
+  };
+  const lookups = async (): Promise<string | undefined> => {
+    for (const getClient of [async () => promptClient, sdkPromptClient]) {
+      const c = await getClient();
+      for (const attempt of attempts(c)) {
+        try {
+          const text = latestAssistantText(unwrap(await attempt()));
+          if (text) return text;
+        } catch (err) {
+          debug(`session summary lookup failed: ${err}`);
+        }
+      }
+    }
+    return undefined;
+  };
+  const { promise: timeout, resolve } = Promise.withResolvers<undefined>();
+  const timer = setTimeout(() => resolve(undefined), SUMMARY_LOOKUP_TIMEOUT_MS);
+  try {
+    return await Promise.race([lookups(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Process-wide (globalThis) so every location instance and every hot-reloaded
 // copy of this module share it. Bounded; events without an id pass through.
 const SEEN_EVENT_IDS = Symbol.for("agent-hooks.opencode.seen-event-ids");

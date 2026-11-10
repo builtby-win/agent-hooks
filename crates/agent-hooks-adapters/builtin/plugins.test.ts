@@ -644,6 +644,39 @@ describe("opencode asset", () => {
     expect(out.cwd).toBeUndefined();
   });
 
+  test("V1 session.idle carries the assistant text read back via session.messages", async () => {
+    reset();
+    const mod = await load("opencode");
+    const seen: unknown[] = [];
+    const hooks = await mod.AgentHooksPlugin({
+      directory: "/workspace/project",
+      client: {
+        session: {
+          messages: async (input: unknown) => {
+            seen.push(input);
+            return {
+              data: [
+                { info: { role: "user" }, parts: [{ type: "text", text: "hi" }] },
+                {
+                  info: { role: "assistant" },
+                  parts: [
+                    { type: "text", text: "Done." },
+                    { type: "tool", text: "not stored" },
+                  ],
+                },
+              ],
+            };
+          },
+        },
+      },
+    });
+    await hooks.event({ event: { type: "session.idle", properties: { sessionID: "v1-idle" } } });
+    const c = await settle(1);
+    expect(events(c)).toEqual(["session.idle"]);
+    expect(c[0].input.summary).toBe("Done.");
+    expect(seen[0]).toMatchObject({ path: { id: "v1-idle" } });
+  });
+
   test("OpenCode reuses a directory learned from that session's lifecycle event", async () => {
     const mod = await load("opencode");
     mod.forwardSessionEvent("session.created", { sessionID: "s1", directory: "/cell/project" });

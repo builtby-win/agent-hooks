@@ -1042,7 +1042,9 @@ function latestAssistantText(value: unknown): string | undefined {
     const row = fields(value[index]);
     const message = fields(row.info ?? row);
     // V2 context rows say `type: "assistant"`; V1/SDK message rows say
-    // `info.role: "assistant"`.
+    // `info.role: "assistant"`. Stop at the latest user row: a turn that
+    // produced no reply must not inherit the previous turn's text.
+    if (message.type === "user" || message.role === "user") return undefined;
     if (message.type !== "assistant" && message.role !== "assistant") continue;
     const text = textParts(message.content ?? row.parts);
     if (text) return text;

@@ -649,6 +649,17 @@ export function isTerminalAgentEnd(payload: unknown): boolean {
   return fields(payload).willContinue !== true;
 }
 
+// An advisor's own tool calls reach the main session's handlers tagged
+// `ctx.agent.id === "advisor"` (omp docs, extensions.md). They are not the
+// primary run: forwarding them re-asserts Running after the run's Stop and no
+// terminal event follows, leaving the session stuck "running". Only the
+// advisor is matched: `ctx.agent.parentId` is an agent id (omp `parentAgentId`,
+// e.g. "Main"), not a session id, so it cannot identify a foreign actor, and
+// task subagents have their own session id and own their row.
+export function isAdvisorContext(context: unknown): boolean {
+  return fields(fields(context).agent).id === "advisor";
+}
+
 // Current omp dispatches plan approval as a `write` to the `xd://propose`
 // device URL; a successful one is the proposal, whatever its result text says.
 // Older builds used a `resolve` call with action "apply", which is also used
@@ -1061,6 +1072,7 @@ export default function agentHooks(pi: any): void {
   for (const [nativeEvent, agentEvent] of Object.entries(EVENT_MAP)) {
     try {
       pi.on(nativeEvent, (payload: any, context: any) => {
+        if (isAdvisorContext(context)) return;
         const p = payload ?? {};
         const key = sessionKey(p, context);
         if (nativeEvent === "turn_start") stopEmitted.delete(key);
@@ -1185,6 +1197,7 @@ export default function agentHooks(pi: any): void {
   }
   try {
     pi.on("tool_approval_resolved", (payload: any, context: any) => {
+      if (isAdvisorContext(context)) return;
       const p = payload ?? {};
       emit("ToolApprovalResolved", p, context);
       const toolCallId = fields(p).toolCallId;
@@ -1196,6 +1209,9 @@ export default function agentHooks(pi: any): void {
   for (const [nativeEvent, agentEvent] of Object.entries(GATE_MAP)) {
     try {
       pi.on(nativeEvent, async (payload: unknown, context: unknown) => {
+        // Advisor approvals stay on omp's native prompt: forwarding them would park
+        // the primary session on a request whose resolution must not touch its status.
+        if (isAdvisorContext(context)) return;
         const p = payload ?? {};
         const tool = toolNameOf(p);
         // The ask bridge owns `ask` tool calls; the gate must not re-handle them.

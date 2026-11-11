@@ -545,6 +545,31 @@ for (const harness of ["pi", "omp"] as const) {
 
 describe("omp asset", () => {
   // b2v-pi.ts isTerminalAgentEnd (e9043f2d7): willContinue hops are not the end.
+  test("advisor tool activity after Stop is not forwarded", async () => {
+    reset();
+    const mod = await load("omp");
+    const { api, on } = fakePi();
+    mod.default(api);
+    const advisor = { sessionManager: new SessionManager("s-adv"), agent: { kind: "sub", id: "advisor" } };
+    on.get("tool_call")?.({ toolName: "read", input: {} }, advisor);
+    on.get("tool_result")?.({ toolName: "read", input: {} }, advisor);
+    on.get("turn_start")?.({}, advisor);
+    const verdict = await on.get("tool_approval_requested")?.({ toolCallId: "adv-1", toolName: "bash", input: {} }, advisor);
+    on.get("tool_approval_resolved")?.({ toolCallId: "adv-1", approved: true }, advisor);
+    expect(verdict).toBeUndefined();
+    expect(await settle(1, 300)).toEqual([]);
+  });
+
+  test("a subagent with its own session id is not dropped", async () => {
+    reset();
+    const mod = await load("omp");
+    const { api, on } = fakePi();
+    mod.default(api);
+    const own = { sessionManager: new SessionManager("s-child"), agent: { kind: "sub", id: "0-Explore", parentId: "Main" } };
+    on.get("turn_start")?.({}, own);
+    expect(events(await settle(1))).toEqual(["TurnStart"]);
+  });
+
   test("agent_end with willContinue is not a Stop", async () => {
     reset();
     const mod = await load("omp");

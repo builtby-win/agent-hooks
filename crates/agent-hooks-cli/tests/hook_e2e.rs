@@ -890,6 +890,124 @@ async fn codex_request_user_input_answer_roundtrip_rides_block_reason() {
     );
 }
 
+/// Multi-socket regression probe: the installed Claude hook carries two
+/// `--socket` values (app daemon + dev daemon); the decider lives on one.
+async fn held_roundtrip_two_sockets(decider_on_first: bool) -> String {
+    let home = tempfile::TempDir::new().unwrap();
+    let cwd = tempfile::TempDir::new().unwrap();
+    let sockets: Vec<PathBuf> = (0..2)
+        .map(|i| home.path().join(format!("e2e{i}.sock")))
+        .collect();
+    let mut handles = Vec::new();
+    for sock in &sockets {
+        let daemon = AgentHooksDaemon::new();
+        let sock = sock.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = daemon.run(Some(sock)).await;
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let answer_sock = sockets[usize::from(!decider_on_first)].clone();
+    let decider = tokio::spawn(async move {
+        let c = AgentHooksClient::connect_to(answer_sock.to_str().unwrap().to_string())
+            .await
+            .unwrap();
+        let mut stream = c.subscribe_decider();
+        let held = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("interactive event is held for the decider")
+            .expect("item");
+        let hold = held.hold.as_ref().expect("held event carries its hold");
+        let prompt = held.prompt_request().expect("question prompt");
+        let qid = prompt.questions[0].id.clone();
+        c.respond_prompt(
+            &hold.prompt_id.clone(),
+            PromptDecision {
+                allow: true,
+                custom_input: None,
+                answers: vec![agent_hooks_protocol::PromptAnswer {
+                    question_id: qid,
+                    selected_options: vec!["SQLite".into()],
+                    custom_input: None,
+                }],
+                ask: false,
+                allow_always: false,
+                suggestion: None,
+                defer: false,
+                additional_context: None,
+            },
+        )
+        .await
+        .unwrap();
+        held
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    const PAYLOAD: &str = r#"{"session_id":"c-sess","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which database?","header":"DB","multiSelect":false,"options":[{"label":"Postgres","description":"Relational"},{"label":"SQLite","description":"Embedded"}]}]}}"#;
+    let out = tokio::task::spawn_blocking({
+        let home = home.path().to_path_buf();
+        let cwd = cwd.path().to_path_buf();
+        let sockets = sockets.clone();
+        move || {
+            use std::io::Write;
+            let mut child = Command::new(bin())
+                .args(["hook", "claude", "--event", "PermissionRequest"])
+                .args(
+                    sockets
+                        .iter()
+                        .flat_map(|s| [std::ffi::OsStr::new("--socket"), s.as_os_str()]),
+                )
+                .env("HOME", &home)
+                .env("AGENT_HOOKS_NO_LOCAL", "")
+                .current_dir(&cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn shim");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(PAYLOAD.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().expect("shim exits");
+            HookOutcome {
+                code: out.status.code().unwrap_or(-1),
+                stdout: out.stdout,
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            }
+        }
+    })
+    .await
+    .expect("shim finishes");
+    let _ = decider.await;
+    for h in handles {
+        h.abort();
+    }
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[tokio::test]
+async fn claude_question_two_sockets_decider_on_second() {
+    let stdout = held_roundtrip_two_sockets(false).await;
+    assert_eq!(
+        stdout,
+        r#"{"hookSpecificOutput":{"decision":{"behavior":"allow","updatedInput":{"answers":{"Which database?":"SQLite"},"questions":[{"header":"DB","options":[{"description":"Relational","label":"Postgres"},{"description":"Embedded","label":"SQLite"}],"question":"Which database?"}]}},"hookEventName":"PermissionRequest"}}"#
+    );
+}
+
+#[tokio::test]
+async fn claude_question_two_sockets_decider_on_first() {
+    let stdout = held_roundtrip_two_sockets(true).await;
+    assert_eq!(
+        stdout,
+        r#"{"hookSpecificOutput":{"decision":{"behavior":"allow","updatedInput":{"answers":{"Which database?":"SQLite"},"questions":[{"header":"DB","options":[{"description":"Relational","label":"Postgres"},{"description":"Embedded","label":"SQLite"}],"question":"Which database?"}]}},"hookEventName":"PermissionRequest"}}"#
+    );
+}
+
 /// Legacy prompt.rs test_build_claude_permission_response_allow_always_uses_suggestions,
 /// through the daemon: AllowAlways must survive mediator → verdict line → shim.
 #[tokio::test]

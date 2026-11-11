@@ -1171,8 +1171,9 @@ fn forward_with_retries(
 /// Deliver `line` to every socket that could have a daemon behind it (all of
 /// them when none does, so the usual unreachable warning still fires), each on
 /// its own thread. Replies are taken in socket order: a gate event returns
-/// the first daemon that answers, so a held prompt on one socket is never
-/// queued behind another; any other event waits for all deliveries to land.
+/// the first daemon that answers with a real verdict (`defer` is no verdict
+/// and never wins), so a held prompt on one socket is never queued behind
+/// another; any other event waits for all deliveries to land.
 fn forward_to_all(
     sockets: &[PathBuf],
     line: &str,
@@ -1222,7 +1223,13 @@ fn forward_to_all(
             unsettled -= 1;
         }
         if let Progress::Reply(reply) = progress {
-            if gate && verdict.is_none() && reply.is_some() {
+            // A `defer` reply is no verdict: a daemon with no decider answers
+            // it instantly, so letting it win would discard a held answer
+            // still coming from another socket's decider.
+            if gate
+                && verdict.is_none()
+                && reply.as_deref().is_some_and(|r| !parse_decision(r).defer)
+            {
                 verdict = reply;
             } else {
                 replies[index] = reply;
@@ -1436,8 +1443,8 @@ mod tests {
     fn a_gate_event_takes_whichever_daemon_answers_first() {
         let dir = tempfile::tempdir().unwrap();
         let (local, forwarded) = (dir.path().join("local.sock"), dir.path().join("fwd.sock"));
-        let _a = fake_daemon(&local, r#"{"from":"local"}"#, Duration::from_millis(600));
-        let _b = fake_daemon(&forwarded, r#"{"from":"forwarded"}"#, Duration::ZERO);
+        let _a = fake_daemon(&local, r#"{"allow":true}"#, Duration::from_millis(600));
+        let _b = fake_daemon(&forwarded, r#"{"allow":false}"#, Duration::ZERO);
         let reply = forward_to_all(
             &[local, forwarded],
             r#"{"event":1}"#,
@@ -1445,7 +1452,41 @@ mod tests {
             1,
             true,
         );
-        assert_eq!(reply.as_deref(), Some(r#"{"from":"forwarded"}"#));
+        assert_eq!(reply.as_deref(), Some(r#"{"allow":false}"#));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_gate_defer_does_not_beat_a_held_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, forwarded) = (dir.path().join("local.sock"), dir.path().join("fwd.sock"));
+        let _a = fake_daemon(&local, r#"{"decision":"defer"}"#, Duration::ZERO);
+        let _b = fake_daemon(&forwarded, r#"{"allow":true}"#, Duration::from_millis(200));
+        let reply = forward_to_all(
+            &[local, forwarded],
+            r#"{"event":1}"#,
+            Duration::from_secs(2),
+            1,
+            true,
+        );
+        assert_eq!(reply.as_deref(), Some(r#"{"allow":true}"#));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_gate_with_only_defers_still_defers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, forwarded) = (dir.path().join("local.sock"), dir.path().join("fwd.sock"));
+        let _a = fake_daemon(&local, r#"{"decision":"defer"}"#, Duration::ZERO);
+        let _b = fake_daemon(&forwarded, r#"{"decision":"defer"}"#, Duration::ZERO);
+        let reply = forward_to_all(
+            &[local, forwarded],
+            r#"{"event":1}"#,
+            Duration::from_secs(2),
+            1,
+            true,
+        );
+        assert_eq!(reply.as_deref(), Some(r#"{"decision":"defer"}"#));
     }
 
     #[cfg(unix)]

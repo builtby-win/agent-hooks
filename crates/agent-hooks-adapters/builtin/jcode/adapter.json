@@ -20,6 +20,7 @@
   },
   "versions": {
     "v1": {
+      "verified_against": "0.99.1",
       "agent_cli": {
         "executables": ["jcode"],
         "documentation": ["https://jcode.sh/docs", "https://github.com/1jehuang/jcode"],

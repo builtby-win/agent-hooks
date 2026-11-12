@@ -33,7 +33,7 @@
         "model_args": ["--model", "{model}"],
         "yolo_args": ["--dangerously-skip-permissions"]
       },
-      "verified_against": "2.1.296",
+      "verified_against": "2.1.322",
       "install": [
         {
           "op": "json_hooks",

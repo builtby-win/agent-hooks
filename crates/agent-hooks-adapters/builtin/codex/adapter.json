@@ -34,6 +34,7 @@
         "model_args": ["--model", "{model}"],
         "yolo_args": ["--yolo"]
       },
+      "verified_against": "0.166.0",
       "install": [
         {
           "op": "json_hooks",

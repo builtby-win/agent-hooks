@@ -20,7 +20,7 @@
         "model_args": ["--model", "{model}"],
         "yolo_args": ["--dangerously-skip-permissions"]
       },
-      "verified_against": "1.4.2",
+      "verified_against": "1.5.7",
       "install": [
         {
           "op": "json_hooks",

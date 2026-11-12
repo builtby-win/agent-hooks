@@ -39,6 +39,7 @@
         "models": {"argv": ["pi", "--list-models"], "id_column": 1, "provider_column": 0, "skip_lines": 1},
         "model_args": ["--model", "{model}"]
       },
+      "verified_against": "1.2.0",
       "install": [
         {
           "op": "stage_assets",

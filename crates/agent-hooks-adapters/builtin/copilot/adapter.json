@@ -35,6 +35,7 @@
   },
   "versions": {
     "v1": {
+      "verified_against": "1.0.17",
       "agent_cli": {
         "executables": ["copilot"],
         "documentation": ["https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference"],

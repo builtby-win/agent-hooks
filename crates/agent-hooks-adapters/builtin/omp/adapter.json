@@ -39,7 +39,7 @@
         "model_args": ["--model={model}"],
         "yolo_args": ["--auto-approve"]
       },
-      "verified_against": "18.12.3",
+      "verified_against": "18.19.0",
       "install": [
         {
           "op": "stage_assets",

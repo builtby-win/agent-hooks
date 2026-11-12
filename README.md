@@ -51,23 +51,23 @@ Source of truth: `crates/agent-hooks-adapters/builtin/*/adapter.json`. `agent-ho
 <!-- adapters:start -->
 | Harness | Adapter ID | Hook config written by installer | Install mechanism | Status |
 | :-- | :-- | :-- | :-- | :-- |
-| Amp | `amp` (`ampcode`, `sourcegraph-amp`, `sourcegraph_amp`) | `~/.config/amp/plugins` | `stage_assets` | Verified |
-| Claude Code | `claude-code` (`claude`, `anthropic`, `claude_code`) | `~/.claude/settings.json`, `.claude/settings.json` | `json_hooks, matcher_group` | Verified (2.1.296) |
-| Codex | `codex` (`openai-codex`, `codex-cli`) | `~/.codex/hooks.json`, `.codex/hooks.json` | `json_hooks, matcher_group` | Verified |
-| Cursor | `cursor` (`cursor-agent`, `cursor-cli`) | `~/.cursor/hooks.json`, `.cursor/hooks.json` | `json_hooks, flat` | Verified |
+| Amp | `amp` (`ampcode`, `sourcegraph-amp`, `sourcegraph_amp`) | `~/.config/amp/plugins` | `stage_assets` | Verified (0.0.1792772906-g2aa9bd) |
+| Claude Code | `claude-code` (`claude`, `anthropic`, `claude_code`) | `~/.claude/settings.json`, `.claude/settings.json` | `json_hooks, matcher_group` | Verified (2.1.322) |
+| Codex | `codex` (`openai-codex`, `codex-cli`) | `~/.codex/hooks.json`, `.codex/hooks.json` | `json_hooks, matcher_group` | Verified (0.166.0) |
+| Cursor | `cursor` (`cursor-agent`, `cursor-cli`) | `~/.cursor/hooks.json`, `.cursor/hooks.json` | `json_hooks, flat` | Verified (2026.09.02) |
 | Factory Droid | `droid` (`factory-droid`, `factory_droid`, `factory`) | `~/.factory/hooks.json`, `.factory/hooks.json` | `json_hooks, matcher_group` | Docs-only |
-| Gemini CLI | `gemini-cli` (`gemini`, `google-gemini`, `gemini_cli`) | `~/.gemini/settings.json` | `json_hooks, matcher_group` | Verified |
-| GitHub Copilot | `copilot` (`github-copilot`, `github_copilot`, `copilot-cli`, `copilot_cli`) | `~/.copilot/settings.json`, `.github/hooks/hooks.json` | `json_hooks, flat` | Verified |
-| Google Antigravity | `antigravity` (`google-antigravity`, `antigravity-cli`) | `~/.gemini/config/hooks.json`, `.agents/hooks.json` | `json_hooks, named` | Verified (1.4.2) |
-| Hermes | `hermes` (`hermes-agent`, `hermes_agent`) | `~/.hermes/plugins/agent-hooks` | `stage_assets` | Verified |
-| JCode | `jcode` (`jcode-cli`, `jcode_cli`) | `~/.jcode/config.toml` | `toml_hooks, command` | Verified |
+| Gemini CLI | `gemini-cli` (`gemini`, `google-gemini`, `gemini_cli`) | `~/.gemini/settings.json` | `json_hooks, matcher_group` | Verified (0.50.0) |
+| GitHub Copilot | `copilot` (`github-copilot`, `github_copilot`, `copilot-cli`, `copilot_cli`) | `~/.copilot/settings.json`, `.github/hooks/hooks.json` | `json_hooks, flat` | Verified (1.0.17) |
+| Google Antigravity | `antigravity` (`google-antigravity`, `antigravity-cli`) | `~/.gemini/config/hooks.json`, `.agents/hooks.json` | `json_hooks, named` | Verified (1.5.7) |
+| Hermes | `hermes` (`hermes-agent`, `hermes_agent`) | `~/.hermes/plugins/agent-hooks` | `stage_assets` | Verified (0.21.3) |
+| JCode | `jcode` (`jcode-cli`, `jcode_cli`) | `~/.jcode/config.toml` | `toml_hooks, command` | Verified (0.99.1) |
 | Kimi Code | `kimi-code` (`kimi`, `kimi_code`, `kimi-cli`, `kimi_cli`) | `~/.kimi-code/config.toml` | `toml_list_hooks` | Docs-only |
 | Kiro | `kiro` (`kiro-cli`, `kiro_cli`) | `~/.kiro/agents/agent-hooks.json`, `~/.kiro/settings/cli.json` | `json_hooks, flat`; `json_edit` | Verified |
 | Mistral Vibe | `mistral-vibe` (`mistral`, `vibe`, `mistral-vibe-cli`, `vibe-code`) | `~/.vibe/hooks.toml`, `.vibe/hooks.toml` | `toml_list_hooks` | Docs-only |
-| Muse | `muse` (`muse-code`, `muse-cli`) | `~/.config/muse/settings.json`, `.muse/hooks.json` | `json_hooks, matcher_group` | Verified (1.4.7) |
-| Oh My Pi | `omp` (`oh-my-pi`, `oh_my_pi`) | `$XDG_DATA_HOME/agent-hooks/plugins/oh-my-pi` | `stage_assets`; `run_command` | Verified (18.12.3) |
-| OpenCode | `opencode` (`opencode-ai`) | `~/.config/opencode/plugins` | `stage_assets` | Verified |
-| Pi | `pi` (`pi-agent`, `pi_agent`) | `~/.pi/agent/extensions` | `stage_assets` | Verified |
+| Muse | `muse` (`muse-code`, `muse-cli`) | `~/.config/muse/settings.json`, `.muse/hooks.json` | `json_hooks, matcher_group` | Verified (1.4.15) |
+| Oh My Pi | `omp` (`oh-my-pi`, `oh_my_pi`) | `$XDG_DATA_HOME/agent-hooks/plugins/oh-my-pi` | `stage_assets`; `run_command` | Verified (18.19.0) |
+| OpenCode | `opencode` (`opencode-ai`) | `~/.config/opencode/plugins` | `stage_assets` | Verified (2.1.4) |
+| Pi | `pi` (`pi-agent`, `pi_agent`) | `~/.pi/agent/extensions` | `stage_assets` | Verified (1.2.0) |
 | Qoder | `qoder` (`qoder-cli`, `qoder_cli`) | `~/.qoder/settings.json`, `.qoder/settings.json`, `.qoder/settings.local.json` | `json_hooks, matcher_group` | Docs-only |
 | Qwen Code | `qwen-code` (`qwen`, `qwen_code`, `qwen-cli`, `qwen_cli`) | `~/.qwen/settings.json`, `.qwen/settings.json` | `json_hooks, matcher_group` | Docs-only |
 

@@ -25,6 +25,7 @@
   },
   "versions": {
     "v1": {
+      "verified_against": "0.50.0",
       "install": [
         {
           "op": "json_hooks",

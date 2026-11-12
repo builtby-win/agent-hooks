@@ -32,6 +32,7 @@
   },
   "versions": {
     "v1": {
+      "verified_against": "0.0.1792772906-g2aa9bd",
       "agent_cli": {
         "executables": ["amp"],
         "documentation": ["https://ampcode.com/manual"],

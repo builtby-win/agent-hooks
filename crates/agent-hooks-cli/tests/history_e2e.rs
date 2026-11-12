@@ -1025,7 +1025,8 @@ fn backfill_skips_live_sessions_and_fills_missing_ones() {
     std::fs::write(&new_path, grown).unwrap();
     let again = backfill(home.path(), &dir, &[]);
     let claude = harness_report(&again, "claude-code");
-    assert_eq!((claude["new"].as_u64(), claude["live_sessions_skipped"].as_u64()), (Some(1), Some(1)), "{again}");
+    // The live session's transcript is unchanged, so it is not revisited or recounted.
+    assert_eq!((claude["new"].as_u64(), claude["live_sessions_skipped"].as_u64()), (Some(1), Some(0)), "{again}");
     assert_eq!(messages(home.path(), &dir, "new-1").len(), 2);
 }
 

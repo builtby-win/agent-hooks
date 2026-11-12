@@ -4,10 +4,10 @@
 use std::path::{Path, PathBuf};
 
 use agent_hooks_history::{
-    init_store, Capture, CaptureEntry, HistoryError, HistoryReader, HistoryWriter, MessagesQuery,
-    RecordOutcome, SessionsQuery, DB_FILE, SCHEMA_VERSION,
+    init_store, HistoryError, HistoryReader, HistoryWriter, MessagesQuery, RecordOutcome,
+    SessionsQuery, DB_FILE, SCHEMA_VERSION,
 };
-use agent_hooks_protocol::{HistoryEntryKind, HistoryToolStatus, LOCAL_ORIGIN};
+use agent_hooks_protocol::{Capture, CaptureEntry, HistoryEntryKind, HistoryToolStatus, LOCAL_ORIGIN};
 use rusqlite::Connection;
 use tempfile::TempDir;
 
@@ -343,7 +343,7 @@ fn migration_carries_version_counter_and_index_id_and_leaves_no_v1_tables() {
     assert_eq!(user_version(&dir), i64::from(SCHEMA_VERSION));
     assert_eq!(user_version(&fresh), i64::from(SCHEMA_VERSION));
 
-    // Only the v2 tables remain: nothing parked or retired by the upgrade.
+    // Only the current tables remain: nothing parked or retired by the upgrade.
     let tables: Vec<String> = rows(
         &open_raw(&dir),
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -355,7 +355,10 @@ fn migration_carries_version_counter_and_index_id_and_leaves_no_v1_tables() {
         other => panic!("unexpected table name {other:?}"),
     })
     .collect();
-    assert_eq!(tables, ["deliveries", "entries", "index_meta", "sessions"]);
+    assert_eq!(
+        tables,
+        ["deliveries", "entries", "index_meta", "sessions"]
+    );
 
     // Fresh counter starts at zero; migrated counter and id carry over.
     let fresh_meta = rows(
@@ -810,4 +813,31 @@ fn receipts_and_cursors_continue_across_the_migration() {
     assert_eq!(fresh.items.len(), 5);
     assert_eq!(fresh.items[4].text.as_deref(), Some("after upgrade"));
     assert_eq!(fresh.items[4].seq, max_entry);
+}
+
+#[test]
+fn backfill_tables_are_lazy_and_never_bump_user_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = private_dir(&tmp);
+    init_store(&dir).unwrap();
+    let tables = |dir: &Path| -> usize {
+        rows(
+            &open_raw(dir),
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'backfill_%'",
+        )
+        .len()
+    };
+    assert_eq!(tables(&dir), 0);
+
+    let writer = HistoryWriter::open(&dir).unwrap();
+    assert_eq!(writer.backfill_cursor("local", "opencode").unwrap(), None);
+    writer.save_backfill_cursor("local", "opencode", "c1", 5).unwrap();
+    writer.save_backfill_cursor("local", "opencode", "c2", 6).unwrap();
+    assert_eq!(
+        writer.backfill_cursor("local", "opencode").unwrap().as_deref(),
+        Some("c2")
+    );
+    assert_eq!(writer.backfill_cursor("local", "other").unwrap(), None);
+    assert_eq!(user_version(&dir), 2);
+    assert_eq!(tables(&dir), 1);
 }

@@ -29,6 +29,12 @@ pub enum AdapterError {
     #[error("Hook install failed: {0}")]
     HookInstall(String),
 
+    #[error("History backfill failed: {0}")]
+    Backfill(String),
+
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
     #[error("Missing field: {0}")]
     MissingField(&'static str),
 }

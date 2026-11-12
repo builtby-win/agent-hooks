@@ -155,6 +155,17 @@ pub trait HarnessAdapter: Send + Sync {
     fn entry_timeout_for(&self, _event: &AgentEvent) -> Option<std::time::Duration> {
         None
     }
+    /// Optional transcript importer backing `agent-hooks history backfill`.
+    /// Default `None`: the adapter has no importer and is reported as such.
+    fn transcript_importer(&self) -> Option<&dyn crate::importer::TranscriptImporter> {
+        None
+    }
+    /// Cursor-based backfill source: the manifest's `history_backfill`
+    /// commands, else a builtin native source. Wins over
+    /// [`Self::transcript_importer`]. `None`: the adapter has neither.
+    fn record_source(&self) -> Option<Box<dyn crate::backfill::RecordSource>> {
+        None
+    }
     /// Whether this adapter considers the given input a match (for registry detection)
     fn matches_input(&self, input: &RawHookInput) -> bool {
         let hint = normalize_hint(&input.harness_hint);

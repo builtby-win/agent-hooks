@@ -1075,6 +1075,26 @@ impl VersionSpec {
 }
 
 // ---------------------------------------------------------------------------
+// History backfill command
+// ---------------------------------------------------------------------------
+
+/// External command that emits normalized history records for
+/// `agent-hooks history backfill`; see the README for the process contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryBackfillSpec {
+    /// argv, run without a shell.
+    pub command: Vec<String>,
+    /// Kill the command after this many seconds (default 3600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    #[serde(skip)]
+    /// The folder holding an external manifest file; `{dir}` and a relative
+    /// executable in `command` resolve against it.
+    pub dir: Option<PathBuf>,
+}
+
+// ---------------------------------------------------------------------------
 // AdapterManifest
 // ---------------------------------------------------------------------------
 
@@ -1102,6 +1122,10 @@ pub struct AdapterManifest {
     pub unverified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detect: Option<DetectSpec>,
+    /// Per-OS (`std::env::consts::OS`: `macos`, `linux`, `windows`) command
+    /// that backfills history. Wins over a builtin Rust importer.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub history_backfill: BTreeMap<String, HistoryBackfillSpec>,
     #[serde(default)]
     pub versions: BTreeMap<String, VersionSpec>,
 }
@@ -1128,6 +1152,13 @@ impl AdapterManifest {
 
     /// Semantic validation of manifest structure.
     pub fn validate(&self) -> Result<(), AdapterError> {
+        for (os, spec) in &self.history_backfill {
+            if spec.command.first().is_none_or(|a| a.is_empty()) {
+                return Err(AdapterError::InvalidConfig(format!(
+                    "history_backfill.{os}.command must start with an executable"
+                )));
+            }
+        }
         for (ver_name, vs) in &self.versions {
             if let Some(agent_cli) = &vs.agent_cli {
                 self.validate_agent_cli(ver_name, agent_cli)?;
@@ -1213,7 +1244,7 @@ impl AdapterManifest {
 
     pub fn load_embedded() -> Vec<AdapterManifest> {
         let mut out = Vec::new();
-        for (_dir, raw) in super::builtin_manifests::BUILTIN_MANIFESTS.iter() {
+        for (_, raw) in super::builtin_manifests::BUILTIN_MANIFESTS.iter() {
             if let Ok(m) = Self::parse(raw) {
                 out.push(m);
             } else {
@@ -1245,13 +1276,17 @@ impl AdapterManifest {
     /// (`start`/`exec`/`models`): user config only. The project tier lives in
     /// the cwd, so a cloned repo must not pick the executable that runs.
     pub fn trusted_tier_dirs() -> Vec<PathBuf> {
-        let project = std::env::current_dir()
-            .ok()
-            .map(|cwd| cwd.join(".agent-hooks/adapters"));
+        let project = Self::project_tier_dir();
         Self::tier_dirs()
             .into_iter()
             .filter(|d| Some(d) != project.as_ref())
             .collect()
+    }
+
+    fn project_tier_dir() -> Option<PathBuf> {
+        std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.join(".agent-hooks/adapters"))
     }
 
     /// Scan one tier directory. Two layouts are accepted, path-sorted:
@@ -1304,7 +1339,12 @@ impl AdapterManifest {
                     .map_err(AdapterError::Io)
                     .and_then(|text| Self::parse(&text))
                 {
-                    Ok(m) => manifests.push(m),
+                    Ok(mut m) => {
+                        for spec in m.history_backfill.values_mut() {
+                            spec.dir = manifest_path.parent().map(Path::to_path_buf);
+                        }
+                        manifests.push(m);
+                    }
                     Err(e) => {
                         tracing::warn!("skipping manifest {}: {e}", manifest_path.display())
                     }
@@ -1328,9 +1368,17 @@ impl AdapterManifest {
     /// as [`Self::tier_dirs`]: higher tiers first) — the env-free core,
     /// unit-testable.
     pub fn load_tiered_from(dirs: &[PathBuf]) -> Vec<AdapterManifest> {
+        let project = Self::project_tier_dir();
         let mut out = Vec::new();
         for dir in dirs {
-            out.extend(Self::scan_tier(dir));
+            let mut tier = Self::scan_tier(dir);
+            if Some(dir) == project.as_ref() {
+                // Like `agent_cli`, a spawned command must not come from a cloned repo.
+                for m in &mut tier {
+                    m.history_backfill.clear();
+                }
+            }
+            out.extend(tier);
         }
         out.extend(Self::load_embedded());
         let mut seen = BTreeSet::new();
@@ -1472,6 +1520,11 @@ impl AdapterManifest {
             // manifest without the flag.
             unverified: local.unverified || base.unverified,
             detect: local.detect.clone().or_else(|| base.detect.clone()),
+            history_backfill: if local.history_backfill.is_empty() {
+                base.history_backfill.clone()
+            } else {
+                local.history_backfill.clone()
+            },
             versions,
         }
     }

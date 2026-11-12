@@ -4,7 +4,6 @@
 //! summaries, and tool inputs/outputs). Payload compression is lossless:
 //! nothing in this crate trims, caps, or truncates captured strings.
 
-mod capture;
 mod error;
 mod payload;
 mod reader;
@@ -14,12 +13,11 @@ mod writer;
 
 use std::path::{Path, PathBuf};
 
-pub use capture::{Capture, CaptureEntry};
 pub use error::HistoryError;
 pub use reader::{HistoryReader, MessagesQuery, SessionsQuery};
 pub use search::MessageSearchQuery;
 pub use store::{init_store, InitReport};
-pub use writer::{HistoryWriter, RecordOutcome};
+pub use writer::{BackfillFile, HistoryWriter, RecordOutcome};
 
 /// `PRAGMA user_version` of the schema this crate reads and writes.
 pub const SCHEMA_VERSION: u32 = 2;

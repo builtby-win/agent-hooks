@@ -1,13 +1,14 @@
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agent_hooks_protocol::{HistoryEntryKind, HistoryToolStatus};
+use agent_hooks_protocol::{stable_hash, Capture, CaptureEntry, HistoryEntryKind, HistoryToolStatus};
 use rusqlite::types::Null;
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, ToSql, Transaction, TransactionBehavior,
 };
 
-use crate::capture::{Capture, CaptureEntry};
 use crate::payload::encode;
 use crate::store::{
     check_existing, configure, harden_files, upgrade, user_version, version_mismatch,
@@ -50,6 +51,101 @@ fn entry_key(capture: &Capture, entry: &CaptureEntry) -> String {
     }
 }
 
+/// Progress of one backfilled transcript file; see [`HistoryWriter::backfill_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillFile {
+    pub origin: String,
+    pub harness: String,
+    pub path: String,
+    pub size: u64,
+    pub mtime_ms: u64,
+    /// End of the last fully imported line.
+    pub byte_offset: u64,
+    /// Fingerprint of the first `min(byte_offset, HEAD_BYTES)` bytes.
+    pub head_hash: String,
+}
+
+/// Bytes of the file head covered by [`BackfillFile::head_hash`].
+const HEAD_BYTES: u64 = 4096;
+
+fn head_hash(path: &Path, len: u64) -> std::io::Result<String> {
+    let mut buf = Vec::new();
+    File::open(path)?.take(len.min(HEAD_BYTES)).read_to_end(&mut buf)?;
+    Ok(format!("{:016x}", stable_hash(&buf)))
+}
+
+impl BackfillFile {
+    /// Record `path` as imported up to `byte_offset`. `observed` must be the
+    /// metadata read *before* importing, so bytes appended during the import
+    /// still make the file look changed next time.
+    pub fn snapshot(
+        origin: &str,
+        harness: &str,
+        path: &Path,
+        observed: &std::fs::Metadata,
+        byte_offset: u64,
+    ) -> Result<Self, HistoryError> {
+        let md = observed;
+        Ok(Self {
+            origin: origin.to_string(),
+            harness: harness.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            size: md.len(),
+            mtime_ms: mtime_ms(md),
+            byte_offset,
+            head_hash: head_hash(path, byte_offset)?,
+        })
+    }
+
+    /// Where to resume reading `path`, or `None` when it is unchanged since
+    /// this record. Append-only growth resumes at `byte_offset`; a shrunken
+    /// file or a changed head is a rewrite and restarts at 0.
+    pub fn resume(&self, path: &Path) -> Result<Option<u64>, HistoryError> {
+        let md = std::fs::metadata(path)?;
+        if md.len() == self.size && mtime_ms(&md) == self.mtime_ms {
+            return Ok(None);
+        }
+        let intact = md.len() >= self.byte_offset
+            && head_hash(path, self.byte_offset)? == self.head_hash;
+        Ok(Some(if intact { self.byte_offset } else { 0 }))
+    }
+}
+
+fn mtime_ms(md: &std::fs::Metadata) -> u64 {
+    md.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Per-file progress of transcript backfills, keyed by
+/// `(origin, harness, path)`. `byte_offset` is the end of the last fully
+/// imported line; `head_hash` fingerprints the first `min(byte_offset, 4096)`
+/// bytes so a rewritten file is detected and re-imported from 0.
+const BACKFILL_FILES_DDL: &str = "
+CREATE TABLE IF NOT EXISTS backfill_files (
+    origin TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mtime_ms INTEGER NOT NULL,
+    byte_offset INTEGER NOT NULL,
+    head_hash TEXT NOT NULL,
+    PRIMARY KEY (origin, harness, path)
+) WITHOUT ROWID;
+";
+
+/// Opaque resume cursor of script-based backfills, keyed by `(origin, harness)`.
+const BACKFILL_CURSORS_DDL: &str = "
+CREATE TABLE IF NOT EXISTS backfill_cursors (
+    origin TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    cursor TEXT NOT NULL,
+    updated_ms INTEGER NOT NULL,
+    PRIMARY KEY (origin, harness)
+) WITHOUT ROWID;
+";
+
 impl HistoryWriter {
     /// Open an already initialized store. A missing store is
     /// [`HistoryError::Disabled`]; an older schema is migrated; a newer one is
@@ -80,6 +176,133 @@ impl HistoryWriter {
     pub fn set_busy_timeout(&self, wait: std::time::Duration) -> Result<(), HistoryError> {
         self.conn.busy_timeout(wait)?;
         Ok(())
+    }
+
+    /// Whether `table` exists. Backfill tables are created lazily by the
+    /// first write that needs them and never bump `user_version`, so older
+    /// binaries keep using the same store.
+    fn table_exists(&self, table: &str) -> Result<bool, HistoryError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Backfill progress recorded for a transcript file, if any.
+    pub fn backfill_file(
+        &self,
+        origin: &str,
+        harness: &str,
+        path: &Path,
+    ) -> Result<Option<BackfillFile>, HistoryError> {
+        if !self.table_exists("backfill_files")? {
+            return Ok(None);
+        }
+        let path = path.to_string_lossy();
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT size, mtime_ms, byte_offset, head_hash FROM backfill_files
+                 WHERE origin = ?1 AND harness = ?2 AND path = ?3",
+                params![origin, harness, path],
+                |r| {
+                    Ok(BackfillFile {
+                        origin: origin.to_string(),
+                        harness: harness.to_string(),
+                        path: path.to_string(),
+                        size: r.get::<_, i64>(0)?.try_into().unwrap_or(0),
+                        mtime_ms: r.get::<_, i64>(1)?.try_into().unwrap_or(0),
+                        byte_offset: r.get::<_, i64>(2)?.try_into().unwrap_or(0),
+                        head_hash: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Insert or replace a file's backfill progress.
+    pub fn save_backfill_file(&self, f: &BackfillFile) -> Result<(), HistoryError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(BACKFILL_FILES_DDL)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO backfill_files
+                 (origin, harness, path, size, mtime_ms, byte_offset, head_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                f.origin,
+                f.harness,
+                f.path,
+                to_i64(f.size),
+                to_i64(f.mtime_ms),
+                to_i64(f.byte_offset),
+                f.head_hash
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Saved resume cursor of a script backfill, if any.
+    pub fn backfill_cursor(
+        &self,
+        origin: &str,
+        harness: &str,
+    ) -> Result<Option<String>, HistoryError> {
+        if !self.table_exists("backfill_cursors")? {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT cursor FROM backfill_cursors WHERE origin = ?1 AND harness = ?2",
+                params![origin, harness],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Insert or replace a script backfill's resume cursor.
+    pub fn save_backfill_cursor(
+        &self,
+        origin: &str,
+        harness: &str,
+        cursor: &str,
+        updated_ms: u64,
+    ) -> Result<(), HistoryError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(BACKFILL_CURSORS_DDL)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO backfill_cursors (origin, harness, cursor, updated_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![origin, harness, cursor, to_i64(updated_ms)],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// True when the session already has a delivery that did not come from a
+    /// backfill (`backfill:` prefix), i.e. live hooks captured it. A session
+    /// that is absent from the store is not live.
+    pub fn session_is_live(
+        &self,
+        origin: &str,
+        harness: &str,
+        session_id: &str,
+    ) -> Result<bool, HistoryError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM deliveries d
+                 WHERE d.session_ref = (SELECT first_seq FROM sessions
+                                        WHERE origin = ?1 AND harness = ?2 AND session_id = ?3)
+                   AND substr(d.delivery_id, 1, 9) <> 'backfill:')",
+            params![origin, harness, session_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Persist one capture atomically. The schema version is re-checked

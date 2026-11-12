@@ -17,6 +17,19 @@
     "min_agent_hooks": { "type": "string" },
     "unverified": { "type": "boolean", "default": false, "description": "Docs-only adapter: built from the harness's published hook contract but never exercised against the live CLI." },
     "detect": { "$ref": "#/$defs/DetectSpec" },
+    "history_backfill": {
+      "type": "object",
+      "description": "Per-OS command for `agent-hooks history backfill`, keyed by Rust std::env::consts::OS (macos, linux, windows). Wins over a builtin Rust importer. argv runs without a shell; `{dir}` in any element is the manifest's directory and a relative executable path is resolved against it. Only the user tier may define it, never the project tier.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command"],
+        "properties": {
+          "command": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "timeout_secs": { "type": "integer", "minimum": 1, "default": 3600 }
+        }
+      }
+    },
     "versions": {
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/VersionSpec" },

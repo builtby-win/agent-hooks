@@ -1625,6 +1625,7 @@ pub struct DeclarativeAdapter {
     manifest: AdapterManifest,
     version: String,
     state: Mutex<EventResponseState>,
+    importer: Option<Box<dyn crate::importer::TranscriptImporter>>,
 }
 
 impl DeclarativeAdapter {
@@ -1636,6 +1637,7 @@ impl DeclarativeAdapter {
             )));
         }
         Ok(Self {
+            importer: crate::importer::builtin(&manifest.id),
             manifest,
             version,
             state: Mutex::new(EventResponseState::default()),
@@ -1983,6 +1985,20 @@ impl std::fmt::Debug for DeclarativeAdapter {
 impl HarnessAdapter for DeclarativeAdapter {
     fn id(&self) -> &str {
         &self.manifest.id
+    }
+
+    fn transcript_importer(&self) -> Option<&dyn crate::importer::TranscriptImporter> {
+        self.importer.as_deref()
+    }
+
+    fn record_source(&self) -> Option<Box<dyn crate::backfill::RecordSource>> {
+        match self.manifest.history_backfill.is_empty() {
+            false => Some(Box::new(crate::backfill::ScriptBackfill::new(
+                &self.manifest.id,
+                &self.manifest.history_backfill,
+            ))),
+            true => crate::backfill::builtin(&self.manifest.id),
+        }
     }
 
     fn display_name(&self) -> &str {

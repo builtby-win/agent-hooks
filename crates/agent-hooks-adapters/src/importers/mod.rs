@@ -1,0 +1,11 @@
+pub(crate) mod claude_code;
+pub(crate) mod codex;
+pub(crate) mod omp;
+pub(crate) mod pi;
+pub(crate) mod antigravity;
+pub(crate) mod gemini_cli;
+pub(crate) mod cursor;
+pub(crate) mod copilot;
+pub(crate) mod kiro;
+pub(crate) mod amp;
+pub(crate) mod muse;

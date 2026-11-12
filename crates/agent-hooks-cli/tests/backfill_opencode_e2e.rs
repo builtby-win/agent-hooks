@@ -45,25 +45,62 @@ fn seed(home: &Path) -> Connection {
         .unwrap();
     };
     message("msg_1", 1000, json!({"role": "user"}));
-    part("prt_1", "msg_1", 1000, json!({"type": "text", "text": "do it"}));
-    part("prt_1b", "msg_1", 1001, json!({"type": "text", "text": "ignored", "synthetic": true}));
+    part(
+        "prt_1",
+        "msg_1",
+        1000,
+        json!({"type": "text", "text": "do it"}),
+    );
+    part(
+        "prt_1b",
+        "msg_1",
+        1001,
+        json!({"type": "text", "text": "ignored", "synthetic": true}),
+    );
     message("msg_2", 2000, json!({"role": "assistant"}));
-    part("prt_2", "msg_2", 2000, json!({"type": "text", "text": "first thought"}));
-    part("prt_3", "msg_2", 2001, json!({"type": "text", "text": "second thought"}));
-    part("prt_4", "msg_2", 2002, json!({"type": "tool", "callID": "c1", "tool": "bash",
+    part(
+        "prt_2",
+        "msg_2",
+        2000,
+        json!({"type": "text", "text": "first thought"}),
+    );
+    part(
+        "prt_3",
+        "msg_2",
+        2001,
+        json!({"type": "text", "text": "second thought"}),
+    );
+    part(
+        "prt_4",
+        "msg_2",
+        2002,
+        json!({"type": "tool", "callID": "c1", "tool": "bash",
         "state": {"status": "completed", "input": {"cmd": "ls"}, "output": "a b",
-                  "time": {"start": 2002, "end": 2003}}}));
-    part("prt_5", "msg_2", 2003, json!({"type": "tool", "callID": "c2", "tool": "read",
+                  "time": {"start": 2002, "end": 2003}}}),
+    );
+    part(
+        "prt_5",
+        "msg_2",
+        2003,
+        json!({"type": "tool", "callID": "c2", "tool": "read",
         "state": {"status": "error", "input": {"path": "x"}, "error": "nope",
-                  "time": {"start": 2004, "end": 2005}}}));
+                  "time": {"start": 2004, "end": 2005}}}),
+    );
     message("msg_3", 3000, json!({"role": "assistant", "summary": true}));
-    part("prt_6", "msg_3", 3000, json!({"type": "text", "text": "compaction summary"}));
+    part(
+        "prt_6",
+        "msg_3",
+        3000,
+        json!({"type": "text", "text": "compaction summary"}),
+    );
     db
 }
 
 fn agent_hooks(home: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent-hooks"));
-    cmd.env("HOME", home).env_remove("XDG_DATA_HOME").current_dir(home);
+    cmd.env("HOME", home)
+        .env_remove("XDG_DATA_HOME")
+        .current_dir(home);
     cmd
 }
 
@@ -83,11 +120,17 @@ fn backfill(home: &Path) -> Value {
 }
 
 fn counts(report: &Value) -> (u64, u64) {
-    (report["new"].as_u64().unwrap(), report["duplicate"].as_u64().unwrap())
+    (
+        report["new"].as_u64().unwrap(),
+        report["duplicate"].as_u64().unwrap(),
+    )
 }
 
 fn rows(home: &Path) -> Vec<(String, String)> {
-    let page = history_cli(home, &["messages", "--session", "ses_1", "--harness", "opencode"]);
+    let page = history_cli(
+        home,
+        &["messages", "--session", "ses_1", "--harness", "opencode"],
+    );
     page["items"]
         .as_array()
         .unwrap()
@@ -95,7 +138,11 @@ fn rows(home: &Path) -> Vec<(String, String)> {
         .map(|i| {
             (
                 i["kind"].as_str().unwrap().to_string(),
-                i["text"].as_str().or(i["tool_output"].as_str()).unwrap_or_default().to_string(),
+                i["text"]
+                    .as_str()
+                    .or(i["tool_output"].as_str())
+                    .unwrap_or_default()
+                    .to_string(),
             )
         })
         .collect()
@@ -128,12 +175,76 @@ fn opencode_backfill_is_incremental_and_keeps_every_row() {
         [],
     )
     .unwrap();
-    db.execute("UPDATE session SET time_updated = 9000", []).unwrap();
+    db.execute("UPDATE session SET time_updated = 9000", [])
+        .unwrap();
     assert_eq!(counts(&backfill(home)), (1, 6));
     let rows = rows(home);
     assert_eq!(rows.len(), 5);
     assert!(rows.iter().any(|(_, t)| t == "revised thought"));
     assert!(!rows.iter().any(|(_, t)| t == "first thought"));
+}
+
+#[test]
+fn widening_since_later_fills_older_sessions() {
+    let home = tempfile::TempDir::new().unwrap();
+    let home = home.path();
+    std::fs::create_dir_all(db_path(home).parent().unwrap()).unwrap();
+    let db = Connection::open(db_path(home)).unwrap();
+    db.execute_batch(DDL).unwrap();
+    // time_updated: 2020-01-01, 2021-01-01, 2022-01-01 (ms).
+    for (id, t) in [
+        ("old", 1_577_836_800_000i64),
+        ("mid", 1_609_459_200_000),
+        ("new", 1_640_995_200_000),
+    ] {
+        db.execute(
+            "INSERT INTO session VALUES (?1,'p',NULL,'slug','/work','Title','1',?2,?2)",
+            params![id, t],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES (?1,?2,?3,?3,?4)",
+            params![
+                format!("msg_{id}"),
+                id,
+                t,
+                json!({"role": "user"}).to_string()
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO part VALUES (?1,?2,?3,?4,?4,?5)",
+            params![
+                format!("prt_{id}"),
+                format!("msg_{id}"),
+                id,
+                t,
+                json!({"type": "text", "text": id}).to_string()
+            ],
+        )
+        .unwrap();
+    }
+    history_cli(home, &["init"]);
+    let since = |date: Option<&str>| {
+        let mut args = vec!["backfill", "--harness", "opencode"];
+        if let Some(date) = date {
+            args.extend(["--since", date]);
+        }
+        counts(&history_cli(home, &args)["harnesses"][0])
+    };
+
+    assert_eq!(since(Some("2021-06-01")), (1, 0), "narrow: only `new`");
+    assert_eq!(
+        since(Some("2020-06-01")),
+        (1, 1),
+        "wider: `mid` is new, `new` only a duplicate"
+    );
+    assert_eq!(
+        since(None),
+        (1, 2),
+        "unbounded: `old` is new, the rest duplicates"
+    );
+    assert_eq!(since(None), (0, 0), "everything covered: cursor reused");
 }
 
 #[test]
@@ -151,5 +262,8 @@ fn absent_database_is_a_successful_no_op_and_bad_schema_is_an_error() {
         .execute_batch("CREATE TABLE session (id text)")
         .unwrap();
     let broken = backfill(home);
-    assert!(broken["error"].as_str().unwrap().contains("SQLite error"), "{broken}");
+    assert!(
+        broken["error"].as_str().unwrap().contains("SQLite error"),
+        "{broken}"
+    );
 }

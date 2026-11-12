@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use agent_hooks_adapters::{parse_line, AdapterRegistry, HarnessAdapter, ParsedLine, RecordSource};
 use agent_hooks_history::{
-    init_store, BackfillFile, HistoryWriter, RecordOutcome, resolve_history_dir, HistoryError, HistoryReader, MessageSearchQuery,
-    MessagesQuery, SessionsQuery,
+    init_store, resolve_history_dir, BackfillFile, HistoryError, HistoryReader, HistoryWriter,
+    MessageSearchQuery, MessagesQuery, RecordOutcome, SessionsQuery,
 };
 use agent_hooks_protocol::{
     HistorySearchPage, HistorySessionKey, HISTORY_API_VERSION, LOCAL_ORIGIN,
@@ -336,8 +336,11 @@ impl Counts {
         let live = match self.live.get(&capture.session_id) {
             Some(&live) => live,
             None => {
-                let live =
-                    writer.session_is_live(&capture.origin, &capture.harness, &capture.session_id)?;
+                let live = writer.session_is_live(
+                    &capture.origin,
+                    &capture.harness,
+                    &capture.session_id,
+                )?;
                 self.live.insert(capture.session_id.clone(), live);
                 self.live_sessions += u64::from(live);
                 live
@@ -354,6 +357,33 @@ impl Counts {
     }
 }
 
+/// The saved cursor is stored as `<coverage>:<cursor>`, `coverage` being the
+/// `--since` (unix ms) it was built under, or `-` for everything. A cursor is
+/// only valid for requests it covers; otherwise a narrower earlier run would
+/// hide older sessions from a later, wider one. Values without the prefix
+/// (older versions) never cover anything.
+fn encode_cursor(coverage: Option<u64>, cursor: &str) -> String {
+    match coverage {
+        Some(ms) => format!("{ms}:{cursor}"),
+        None => format!("-:{cursor}"),
+    }
+}
+
+/// `Some((coverage, bare cursor))` when the saved value covers `since`.
+fn decode_cursor(saved: &str, since: Option<u64>) -> Option<(Option<u64>, &str)> {
+    let (coverage, cursor) = saved.split_once(':')?;
+    let coverage = match coverage {
+        "-" => None,
+        ms => Some(ms.parse::<u64>().ok()?),
+    };
+    let covers = match (coverage, since) {
+        (None, _) => true,
+        (Some(saved), Some(requested)) => requested >= saved,
+        (Some(_), None) => false,
+    };
+    covers.then_some((coverage, cursor))
+}
+
 /// Drive a cursor source and store what it emits. Records already stored stay
 /// on failure; the cursor is saved only when the source succeeds.
 fn backfill_source(
@@ -364,19 +394,23 @@ fn backfill_source(
     since: Option<SystemTime>,
     rescan: bool,
 ) -> Result<BackfillReport, HistoryError> {
-    let cursor = match rescan {
+    let since_ms = since.map(unix_ms);
+    let saved = match rescan {
         true => None,
         false => writer.backfill_cursor(LOCAL_ORIGIN, harness)?,
     };
+    let resumed = saved.as_deref().and_then(|s| decode_cursor(s, since_ms));
+    let coverage = resumed.map_or(since_ms, |(coverage, _)| coverage);
+    let cursor = resumed.map(|(_, cursor)| cursor);
     let mut counts = Counts::default();
     let mut failure = None;
-    let result = source.run(home, since.map(unix_ms), cursor.as_deref(), &mut |capture| {
-        match counts.store(writer, capture) {
-            Ok(()) => ControlFlow::Continue(()),
-            Err(e) => {
-                failure = Some(e);
-                ControlFlow::Break(())
-            }
+    let result = source.run(home, since_ms, cursor, &mut |capture| match counts
+        .store(writer, capture)
+    {
+        Ok(()) => ControlFlow::Continue(()),
+        Err(e) => {
+            failure = Some(e);
+            ControlFlow::Break(())
         }
     });
     if let Some(e) = failure {
@@ -384,7 +418,13 @@ fn backfill_source(
     }
     let error = match result {
         Ok(Some(cursor)) => {
-            writer.save_backfill_cursor(LOCAL_ORIGIN, harness, &cursor, unix_ms(SystemTime::now()))?;
+            let saved = encode_cursor(coverage, &cursor);
+            writer.save_backfill_cursor(
+                LOCAL_ORIGIN,
+                harness,
+                &saved,
+                unix_ms(SystemTime::now()),
+            )?;
             None
         }
         Ok(None) => None,

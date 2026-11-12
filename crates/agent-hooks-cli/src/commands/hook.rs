@@ -466,7 +466,8 @@ const HISTORY_LOCK_WAIT: Duration = Duration::from_millis(200);
 /// store is the off state and stays silent; any other failure is a stderr
 /// warning (never content) and never changes the hook outcome.
 fn record_history(event: Option<&AgentEvent>, origin: Option<&str>) {
-    use agent_hooks_history::{Capture, HistoryError, HistoryWriter, resolve_history_dir};
+    use agent_hooks_history::{HistoryError, HistoryWriter, resolve_history_dir};
+    use agent_hooks_protocol::Capture;
     let Some(event) = event else { return };
     let origin = origin
         .map(str::trim)

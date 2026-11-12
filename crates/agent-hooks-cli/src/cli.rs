@@ -219,6 +219,37 @@ pub enum HistoryCommand {
     Search(HistorySearchArgs),
     /// Schema version, counts and last persisted time
     Status(HistoryDirArgs),
+    /// Import past conversations from harness transcripts (adapters with a built-in importer or a manifest `history_backfill` command)
+    Backfill(HistoryBackfillArgs),
+    /// Store normalized history records read as NDJSON from stdin (the
+    /// `history_backfill` output format), without running any command
+    Import(HistoryImportArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct HistoryImportArgs {
+    /// Harness (adapter id) the records belong to
+    #[arg(long)]
+    pub harness: String,
+    /// History directory (default: $AGENT_HOOKS_HISTORY_DIR, else ~/.agent-hooks/history)
+    #[arg(long = "history-dir", value_name = "PATH")]
+    pub history_dir: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct HistoryBackfillArgs {
+    /// Only this harness (default: every adapter; those without an importer are reported)
+    #[arg(long)]
+    pub harness: Option<String>,
+    /// Only transcripts modified since this RFC 3339 timestamp or YYYY-MM-DD date (UTC)
+    #[arg(long, value_name = "WHEN")]
+    pub since: Option<String>,
+    /// Re-read every transcript from the start instead of resuming (imports stay idempotent)
+    #[arg(long)]
+    pub rescan: bool,
+    /// History directory (default: $AGENT_HOOKS_HISTORY_DIR, else ~/.agent-hooks/history)
+    #[arg(long = "history-dir", value_name = "PATH")]
+    pub history_dir: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]

@@ -813,3 +813,280 @@ fn search_returns_newest_hit_only_for_the_sessions_on_stdin() {
     assert!(!ok);
     assert_eq!(err["error"]["code"], "invalid_argument");
 }
+
+fn claude_line(kind: &str, uuid: &str, ts: &str, content: Value) -> String {
+    json!({
+        "type": kind, "uuid": uuid, "timestamp": ts, "sessionId": "sess-1", "cwd": "/work",
+        "isSidechain": false, "message": {"role": kind, "content": content},
+    })
+    .to_string()
+}
+
+fn backfill(home: &Path, dir: &Path, extra: &[&str]) -> Value {
+    let mut args = vec!["backfill"];
+    args.extend_from_slice(extra);
+    let (ok, out) = history_cli(home, dir, &args);
+    assert!(ok, "backfill failed: {out}");
+    out
+}
+
+fn harness_report<'a>(out: &'a Value, harness: &str) -> &'a Value {
+    out["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["harness"] == harness)
+        .unwrap_or_else(|| panic!("no report for {harness}: {out}"))
+}
+
+#[test]
+fn backfill_imports_claude_transcripts_incrementally_and_idempotently() {
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join("history");
+    assert!(history_cli(home.path(), &dir, &["init"]).0);
+    let project = home.path().join(".claude/projects/-work");
+    std::fs::create_dir_all(&project).unwrap();
+    let transcript = project.join("sess-1.jsonl");
+    // One assistant line carries two text parts and two tool calls; every
+    // part must be stored. Noise lines are ignored; the garbage line is
+    // counted as skipped.
+    let mut lines = vec![
+        claude_line("user", "u1", "2026-01-01T00:00:00Z", json!("fix the bug")),
+        claude_line(
+            "assistant",
+            "a1",
+            "2026-01-01T00:00:01Z",
+            json!([
+                {"type": "thinking", "thinking": "", "signature": "x"},
+                {"type": "text", "text": "looking"},
+                {"type": "text", "text": "reading files"},
+                {"type": "tool_use", "id": "toolu_a", "name": "Bash", "input": {"command": "ls"}},
+                {"type": "tool_use", "id": "toolu_b", "name": "Read", "input": {"path": "x"}},
+            ]),
+        ),
+        claude_line(
+            "user",
+            "r1",
+            "2026-01-01T00:00:02Z",
+            json!([{"type": "tool_result", "tool_use_id": "toolu_a", "content": "file-a"}]),
+        ),
+        claude_line(
+            "user",
+            "r2",
+            "2026-01-01T00:00:03Z",
+            json!([{"type": "tool_result", "tool_use_id": "toolu_b", "is_error": true,
+                    "content": [{"type": "text", "text": "boom"}]}]),
+        ),
+        json!({"type": "attachment", "sessionId": "sess-1"}).to_string(),
+        "not json".to_string(),
+    ];
+    let write = |lines: &[String]| std::fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+    write(&lines);
+
+    let first = backfill(home.path(), &dir, &[]);
+    let claude = harness_report(&first, "claude-code");
+    assert_eq!(claude["status"], "imported");
+    assert_eq!(
+        (claude["files"].as_u64(), claude["new"].as_u64(), claude["skipped"].as_u64()),
+        (Some(1), Some(7), Some(1)),
+        "{first}"
+    );
+    assert_eq!(harness_report(&first, "droid")["status"], "no importer");
+
+    let items = messages(home.path(), &dir, "sess-1");
+    let text = |kind: &str| -> Vec<&str> {
+        items
+            .iter()
+            .filter(|i| i["kind"] == kind)
+            .map(|i| i["text"].as_str().unwrap())
+            .collect()
+    };
+    assert_eq!(items.len(), 5, "{items:?}");
+    assert_eq!(text("user"), ["fix the bug"]);
+    assert_eq!(text("assistant"), ["looking", "reading files"]);
+    let tool = |id: &str| items.iter().find(|i| i["tool_call_id"] == id).unwrap();
+    assert_eq!(tool("toolu_a")["tool_status"], "completed");
+    assert_eq!(tool("toolu_a")["tool_output"], "file-a");
+    assert_eq!(tool("toolu_a")["tool_name"], "Bash");
+    assert_eq!(tool("toolu_b")["tool_status"], "failed");
+    assert_eq!(tool("toolu_b")["tool_output"], "boom");
+    assert_eq!(tool("toolu_b")["tool_input"], r#"{"path":"x"}"#);
+    // Backfill created exactly one session.
+    let (_, sessions) = history_cli(home.path(), &dir, &["sessions"]);
+    assert_eq!(sessions["items"].as_array().unwrap().len(), 1);
+
+    // Unchanged file: not re-read at all.
+    let again = backfill(home.path(), &dir, &[]);
+    let claude = harness_report(&again, "claude-code");
+    assert_eq!((claude["unchanged"].as_u64(), claude["new"].as_u64()), (Some(1), Some(0)));
+
+    // Forced full re-read: every observation is a duplicate, nothing changes.
+    let rescan = backfill(home.path(), &dir, &["--rescan"]);
+    let claude = harness_report(&rescan, "claude-code");
+    assert_eq!((claude["new"].as_u64(), claude["duplicate"].as_u64()), (Some(0), Some(7)));
+    assert_eq!(messages(home.path(), &dir, "sess-1").len(), 5);
+
+    // Append-only growth imports only the new line.
+    lines.push(claude_line("user", "u2", "2026-01-01T00:00:04Z", json!("thanks")));
+    write(&lines);
+    let grown = backfill(home.path(), &dir, &[]);
+    let claude = harness_report(&grown, "claude-code");
+    assert_eq!(
+        (claude["new"].as_u64(), claude["duplicate"].as_u64(), claude["unchanged"].as_u64()),
+        (Some(1), Some(0), Some(0)),
+        "{grown}"
+    );
+    assert_eq!(messages(home.path(), &dir, "sess-1").len(), 6);
+
+    // A rewritten file (new head) is re-read from 0, not resumed.
+    lines[0] = claude_line("user", "u0", "2026-01-01T00:00:00Z", json!("rewritten"));
+    write(&lines);
+    let rewritten = backfill(home.path(), &dir, &[]);
+    let claude = harness_report(&rewritten, "claude-code");
+    let seen = claude["new"].as_u64().unwrap() + claude["duplicate"].as_u64().unwrap();
+    assert_eq!(seen, 8, "{rewritten}");
+}
+
+/// Backfill only fills sessions missing from the store (or ones it backfilled
+/// itself): a session captured by live hooks is left alone entirely.
+#[test]
+fn backfill_skips_live_sessions_and_fills_missing_ones() {
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join("history");
+    assert!(history_cli(home.path(), &dir, &["init"]).0);
+    let project = home.path().join(".claude/projects/-work");
+    std::fs::create_dir_all(&project).unwrap();
+    let line = |session: &str, kind: &str, uuid: &str, ts: &str, text: &str| {
+        json!({
+            "type": kind, "uuid": uuid, "timestamp": ts, "sessionId": session, "cwd": "/work",
+            "isSidechain": false, "message": {"role": kind, "content": text},
+        })
+        .to_string()
+    };
+
+    // (a) A live-captured session: same id as a transcript on disk.
+    assert!(shim(
+        home.path(),
+        &dir,
+        "claude-code",
+        "UserPromptSubmit",
+        json!({"session_id": "live-1", "prompt": "hello live"}),
+    )
+    .status
+    .success());
+    let live_before = messages(home.path(), &dir, "live-1");
+    assert_eq!(live_before.len(), 1);
+    std::fs::write(
+        project.join("live-1.jsonl"),
+        [
+            line("live-1", "user", "u1", "2026-01-01T00:00:00Z", "hello live"),
+            line("live-1", "assistant", "a1", "2026-01-01T00:00:01Z", "hi"),
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    // (c) A session missing from the store imports normally.
+    let new_path = project.join("new-1.jsonl");
+    std::fs::write(
+        &new_path,
+        line("new-1", "user", "n1", "2026-01-01T00:00:00Z", "fresh") + "\n",
+    )
+    .unwrap();
+
+    let first = backfill(home.path(), &dir, &[]);
+    let claude = harness_report(&first, "claude-code");
+    assert_eq!(
+        (
+            claude["new"].as_u64(),
+            claude["duplicate"].as_u64(),
+            claude["skipped"].as_u64(),
+            claude["live_sessions_skipped"].as_u64()
+        ),
+        (Some(1), Some(0), Some(0), Some(1)),
+        "{first}"
+    );
+    assert_eq!(messages(home.path(), &dir, "live-1"), live_before);
+    assert_eq!(messages(home.path(), &dir, "new-1").len(), 1);
+
+    // --rescan still honors the rule.
+    let rescan = backfill(home.path(), &dir, &["--rescan"]);
+    let claude = harness_report(&rescan, "claude-code");
+    assert_eq!(
+        (claude["new"].as_u64(), claude["duplicate"].as_u64(), claude["live_sessions_skipped"].as_u64()),
+        (Some(0), Some(1), Some(1)),
+        "{rescan}"
+    );
+    assert_eq!(messages(home.path(), &dir, "live-1"), live_before);
+
+    // (b) A session that was only backfilled keeps resuming when it grows.
+    let mut grown = std::fs::read_to_string(&new_path).unwrap();
+    grown += &(line("new-1", "user", "n2", "2026-01-01T00:00:05Z", "more") + "\n");
+    std::fs::write(&new_path, grown).unwrap();
+    let again = backfill(home.path(), &dir, &[]);
+    let claude = harness_report(&again, "claude-code");
+    assert_eq!((claude["new"].as_u64(), claude["live_sessions_skipped"].as_u64()), (Some(1), Some(1)), "{again}");
+    assert_eq!(messages(home.path(), &dir, "new-1").len(), 2);
+}
+
+/// Backfill tables are additive: they appear lazily, never change
+/// `user_version`, and a store without them backfills and reads fine.
+#[test]
+fn backfill_tables_never_bump_the_schema_version() {
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join("history");
+    assert!(history_cli(home.path(), &dir, &["init"]).0);
+    let project = home.path().join(".claude/projects/-work");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("sess-1.jsonl"),
+        claude_line("user", "u1", "2026-01-01T00:00:00Z", json!("albuquerque")) + "\n",
+    )
+    .unwrap();
+
+    let db_path = dir.join("history.sqlite3");
+    let raw = || rusqlite::Connection::open(&db_path).unwrap();
+    let version = || -> i64 {
+        raw()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    };
+    let backfill_tables = || -> i64 {
+        raw()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'backfill_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!((version(), backfill_tables()), (2, 0));
+    assert_eq!(i64::from(SCHEMA_VERSION), 2);
+
+    // First backfill on a v2 store without the tables creates them lazily.
+    let first = backfill(home.path(), &dir, &[]);
+    assert_eq!(harness_report(&first, "claude-code")["new"], 1, "{first}");
+    assert_eq!((version(), backfill_tables()), (2, 1));
+
+    // Old-style reads work on a store that has the extra tables.
+    let (ok, sessions) = history_cli(home.path(), &dir, &["sessions"]);
+    assert!(ok, "{sessions}");
+    assert_eq!(sessions["items"].as_array().unwrap().len(), 1);
+    assert_eq!(messages(home.path(), &dir, "sess-1").len(), 1);
+    let key = json!([{"origin": "local", "harness": "claude-code", "session_id": "sess-1"}]);
+    let (ok, hits) = search_cli(home.path(), &dir, "albuquerque", &key);
+    assert!(ok, "{hits}");
+    assert_eq!(hits["items"].as_array().unwrap().len(), 1);
+    let (ok, status) = history_cli(home.path(), &dir, &["status"]);
+    assert!(ok, "{status}");
+    assert_eq!(status["schema_version"], 2);
+
+    // Dropping the tables (an older binary never had them) is harmless.
+    raw()
+        .execute_batch("DROP TABLE backfill_files; DROP TABLE IF EXISTS backfill_cursors;")
+        .unwrap();
+    let again = backfill(home.path(), &dir, &["--rescan"]);
+    let claude = harness_report(&again, "claude-code");
+    assert_eq!((claude["new"].as_u64(), claude["duplicate"].as_u64()), (Some(0), Some(1)), "{again}");
+    assert_eq!(version(), 2);
+}

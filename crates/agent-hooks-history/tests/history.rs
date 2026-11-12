@@ -1,13 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use agent_hooks_history::{
-    init_store, resolve_history_dir, Capture, CaptureEntry, HistoryError, HistoryReader,
-    HistoryWriter, MessageSearchQuery, MessagesQuery, RecordOutcome, SessionsQuery, DB_FILE,
-    SCHEMA_VERSION,
+    init_store, resolve_history_dir, HistoryError, HistoryReader, HistoryWriter,
+    MessageSearchQuery, MessagesQuery, RecordOutcome, SessionsQuery, DB_FILE, SCHEMA_VERSION,
 };
 use agent_hooks_protocol::event::cap_chars;
 use agent_hooks_protocol::{
-    AgentEvent, AgentLifecycle, EventContext, HistoryEntryKind, HistoryErrorCode, HistoryIdentity,
+    AgentEvent, AgentLifecycle, Capture, CaptureEntry, EventContext, HistoryEntryKind, HistoryErrorCode, HistoryIdentity,
     HistoryMessagesPage, HistorySessionKey, HistoryToolStatus, LOCAL_ORIGIN,
 };
 use rusqlite::Connection;

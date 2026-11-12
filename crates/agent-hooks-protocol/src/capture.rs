@@ -1,8 +1,18 @@
-use agent_hooks_protocol::{
-    AgentEvent, AgentLifecycle, HistoryEntryKind, HistoryToolStatus, NormalizedStatus,
-};
+use serde::Deserialize;
 
-/// What the store persists for one hook delivery.
+use crate::{AgentEvent, AgentLifecycle, HistoryEntryKind, HistoryToolStatus, NormalizedStatus};
+
+/// FNV-1a 64-bit. Unlike `DefaultHasher` its output is specified, so ids
+/// derived from it (backfill delivery ids, file fingerprints) stay stable
+/// across Rust releases and processes.
+pub fn stable_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// What the history store persists for one observation: a live hook delivery
+/// or one part of a backfilled transcript line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capture {
     pub origin: String,
@@ -34,6 +44,67 @@ pub struct CaptureEntry {
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
     pub tool_status: Option<HistoryToolStatus>,
+}
+
+/// One observation as an external backfill command emits it on stdout
+/// (`{"record": {...}}`). The harness, origin and status are not part of
+/// the wire shape: the importing process fills them in, so a script can only
+/// write history for the adapter that ran it. Field semantics match
+/// [`Capture`]/[`CaptureEntry`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct BackfillRecord {
+    pub session_id: String,
+    /// Unique per observation within a session; a repeat is a duplicate.
+    /// Must start with `backfill:`: sessions with any other delivery id are
+    /// treated as live-captured and skipped by backfill.
+    pub delivery_id: String,
+    pub timestamp_ms: u64,
+    pub parent_session_id: Option<String>,
+    pub workspace: Option<String>,
+    pub title: Option<String>,
+    pub turn_id: Option<String>,
+    pub entry: Option<BackfillEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BackfillEntry {
+    pub kind: HistoryEntryKind,
+    pub text: Option<String>,
+    pub native_message_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_status: Option<HistoryToolStatus>,
+}
+
+impl BackfillRecord {
+    /// Project into a local, idle capture of `harness`. `None` when the
+    /// session or delivery id is empty: such a record can be neither keyed
+    /// nor de-duplicated.
+    pub fn into_capture(self, harness: &str) -> Option<Capture> {
+        if self.session_id.is_empty() || self.delivery_id.is_empty() {
+            return None;
+        }
+        Some(Capture {
+            origin: crate::LOCAL_ORIGIN.to_string(),
+            harness: harness.to_string(),
+            session_id: self.session_id,
+            parent_session_id: self.parent_session_id,
+            workspace: self.workspace,
+            title: self.title,
+            status: status_str(NormalizedStatus::Idle).to_string(),
+            delivery_id: self.delivery_id,
+            timestamp_ms: self.timestamp_ms,
+            turn_id: self.turn_id,
+            entry: self.entry.map(|e| CaptureEntry {
+                kind: e.kind,
+                text: e.text,
+                native_message_id: e.native_message_id,
+                tool_call_id: e.tool_call_id,
+                tool_name: e.tool_name,
+                tool_status: e.tool_status,
+            }),
+        })
+    }
 }
 
 fn status_str(status: NormalizedStatus) -> &'static str {

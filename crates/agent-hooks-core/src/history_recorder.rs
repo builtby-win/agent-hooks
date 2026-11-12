@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_hooks_history::{Capture, HistoryError, HistoryWriter};
-use agent_hooks_protocol::AgentEvent;
+use agent_hooks_history::{HistoryError, HistoryWriter};
+use agent_hooks_protocol::{AgentEvent, Capture};
 use parking_lot::Mutex;
 use tracing::{debug, error};
 

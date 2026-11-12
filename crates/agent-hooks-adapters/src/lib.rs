@@ -7,10 +7,14 @@
 //! [`AdapterManifest`] (see `builtin/<id>/adapter.json`) and served at
 //! runtime by [`DeclarativeAdapter`] via [`AdapterRegistry`].
 
+pub mod backfill;
 pub mod declarative;
 pub mod error;
+pub mod importer;
+mod importers;
 pub mod manifest;
 pub mod registry;
+mod sources;
 pub mod traits;
 
 // Generated builtin manifests (build.rs)
@@ -181,8 +185,10 @@ mod builtin_tests {
 }
 
 // Re-export primary types
+pub use backfill::{parse_line, BackfillSink, ParsedLine, RecordSource, ScriptBackfill};
 pub use declarative::DeclarativeAdapter;
 pub use error::AdapterError;
+pub use importer::{ImportProgress, TranscriptImporter};
 pub use manifest::{
     AdapterManifest, AgentCliSpec, ResponseMode, ResumeCommandSpec, SessionRefKind,
 };

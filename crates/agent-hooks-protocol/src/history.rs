@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 /// `text`.
 pub const HISTORY_API_VERSION: u32 = 2;
 
-/// Where stored messages come from: hook events only, never transcripts.
+/// Where live capture comes from. Rows imported by `history backfill` come
+/// from harness transcripts instead and merge with live rows by native id.
 pub const HISTORY_CAPTURE_SOURCE: &str = "hooks";
 
 /// Assistant entries hold normalized `TurnEnd.assistant_message` or

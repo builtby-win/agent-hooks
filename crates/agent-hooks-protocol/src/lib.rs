@@ -15,6 +15,7 @@
 //! instead of erroring, while required identity fields (`event_id`, `harness`,
 //! `session_id`, `prompt_id`, `lifecycle`, …) keep erroring loudly.
 
+pub mod capture;
 pub mod context;
 pub mod error;
 pub mod event;
@@ -25,6 +26,7 @@ pub mod prompt;
 pub mod response;
 pub mod rpc;
 
+pub use capture::{stable_hash, BackfillEntry, BackfillRecord, Capture, CaptureEntry};
 pub use context::EventContext;
 pub use error::ProtocolError;
 pub use event::{

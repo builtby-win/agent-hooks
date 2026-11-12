@@ -1117,17 +1117,10 @@ async fn handle_hook_line(
                 .map(|p| crate::session_tracker::is_config_dir_path(p))
                 .unwrap_or(false);
             if event.context.cwd.is_none() || is_config_dir {
-                if let Some(known_cwd) = existing_sess
-                    .last_event
-                    .as_ref()
-                    .and_then(|e| e.context.cwd.clone())
-                {
+                if let Some(known_cwd) = existing_sess.last_event.cwd.clone() {
                     event.context.cwd = Some(known_cwd);
                     if event.context.git_worktree.is_none() {
-                        event.context.git_worktree = existing_sess
-                            .last_event
-                            .as_ref()
-                            .and_then(|e| e.context.git_worktree.clone());
+                        event.context.git_worktree = existing_sess.last_event.git_worktree.clone();
                     }
                 } else if is_config_dir {
                     // First sighting with a config dir (SessionStart from a
@@ -1324,7 +1317,7 @@ async fn dispatch_rpc_line(
                             "event_count": s.event_count,
                             "last_event_at_ms": s.updated_at_ms,
                             "parent_session_id": s.parent_session_id,
-                            "cwd": s.last_event.as_ref().and_then(|e| e.context.cwd.as_ref()).map(|p| p.display().to_string()),
+                            "cwd": s.last_event.cwd.as_ref().map(|p| p.display().to_string()),
                         })
                     })
                     .collect::<Vec<_>>()

@@ -20,7 +20,7 @@ pub use error::CoreError;
 pub use history_recorder::HistoryRecorder;
 pub use plugin::{Plugin, PluginManager};
 pub use prompt_mediator::{ClaimOutcome, ParkedQuestion, PromptMediator, PromptMeta, QueueEntry};
-pub use session_tracker::{SessionInfo, SessionTracker};
+pub use session_tracker::{LastEvent, SessionInfo, SessionTracker};
 
 pub use agent_hooks_adapters;
 pub use agent_hooks_protocol;

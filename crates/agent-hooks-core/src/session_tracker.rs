@@ -1,6 +1,19 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use agent_hooks_protocol::{AgentEvent, AgentLifecycle, NormalizedStatus};
+
+/// What the tracker keeps of a session's most recent event: a fixed set of
+/// small fields, so per-session memory stays bounded however large the
+/// event's payload is (tool output, prompts, extensions, error text).
+#[derive(Debug, Clone)]
+pub struct LastEvent {
+    pub event_id: String,
+    /// `PermissionRequest` holds under its own prompt id, not `event_id`.
+    pub permission_prompt_id: Option<String>,
+    pub cwd: Option<PathBuf>,
+    pub git_worktree: Option<PathBuf>,
+}
 
 /// Per-session state maintained in memory.
 #[derive(Debug, Clone)]
@@ -9,7 +22,7 @@ pub struct SessionInfo {
     pub parent_session_id: Option<String>,
     pub harness: String,
     pub status: NormalizedStatus,
-    pub last_event: Option<AgentEvent>,
+    pub last_event: LastEvent,
     pub last_lifecycle_name: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -39,35 +52,33 @@ pub fn is_config_dir_path(p: &std::path::Path) -> bool {
     })
 }
 
+fn permission_prompt_id(event: &AgentEvent) -> Option<String> {
+    match &event.lifecycle {
+        AgentLifecycle::PermissionRequest { prompt } => Some(prompt.prompt_id.clone()),
+        _ => None,
+    }
+}
+
+fn without_config_dir(path: &Option<PathBuf>) -> Option<PathBuf> {
+    path.clone().filter(|p| !is_config_dir_path(p))
+}
+
 impl SessionInfo {
     fn from_event(event: &AgentEvent) -> Self {
         // Never seed a session with a config dir: SessionStart has no prior
         // event to backfill from, so strip instead of forwarding.
-        let mut stored = event.clone();
-        if stored
-            .context
-            .cwd
-            .as_ref()
-            .map(|p| is_config_dir_path(p))
-            .unwrap_or(false)
-        {
-            stored.context.cwd = None;
-        }
-        if stored
-            .context
-            .git_worktree
-            .as_ref()
-            .map(|p| is_config_dir_path(p))
-            .unwrap_or(false)
-        {
-            stored.context.git_worktree = None;
-        }
+        let last_event = LastEvent {
+            event_id: event.event_id.clone(),
+            permission_prompt_id: permission_prompt_id(event),
+            cwd: without_config_dir(&event.context.cwd),
+            git_worktree: without_config_dir(&event.context.git_worktree),
+        };
         Self {
             session_id: event.session_id.clone(),
             parent_session_id: event.parent_session_id.clone(),
             harness: event.harness.clone(),
             status: event.status,
-            last_event: Some(stored),
+            last_event,
             last_lifecycle_name: Some(event.lifecycle.name().to_string()),
             created_at_ms: event.timestamp_ms,
             updated_at_ms: event.timestamp_ms,
@@ -83,29 +94,32 @@ impl SessionInfo {
             .or(self.parent_session_id.clone());
         self.harness = event.harness.clone();
         self.status = event.status;
-        let mut event_to_store = event.clone();
         let is_config_dir = event
             .context
             .cwd
             .as_ref()
             .map(|p| is_config_dir_path(p))
             .unwrap_or(false);
-        if event_to_store.context.cwd.is_none() || is_config_dir {
-            if let Some(existing_cwd) = self.last_event.as_ref().and_then(|e| e.context.cwd.clone())
-            {
-                event_to_store.context.cwd = Some(existing_cwd);
-                if event_to_store.context.git_worktree.is_none() {
-                    event_to_store.context.git_worktree = self
-                        .last_event
-                        .as_ref()
-                        .and_then(|e| e.context.git_worktree.clone());
-                }
-            } else if is_config_dir {
-                // No known workspace to restore: discard, never store the config dir.
-                event_to_store.context.cwd = None;
+        let worktree = event.context.git_worktree.clone();
+        let (cwd, git_worktree) = if event.context.cwd.is_none() || is_config_dir {
+            // Backfill the known workspace; with none known, a config dir is
+            // discarded rather than stored.
+            match &self.last_event.cwd {
+                Some(known) => (
+                    Some(known.clone()),
+                    worktree.or_else(|| self.last_event.git_worktree.clone()),
+                ),
+                None => (None, worktree),
             }
-        }
-        self.last_event = Some(event_to_store);
+        } else {
+            (event.context.cwd.clone(), worktree)
+        };
+        self.last_event = LastEvent {
+            event_id: event.event_id.clone(),
+            permission_prompt_id: permission_prompt_id(event),
+            cwd,
+            git_worktree,
+        };
         self.last_lifecycle_name = Some(event.lifecycle.name().to_string());
         self.updated_at_ms = event.timestamp_ms;
         self.event_count += 1;
@@ -411,16 +425,12 @@ impl SessionTracker {
     /// `PermissionRequest` (which keeps its own id — same rule as the daemon's
     /// hold key).
     fn is_held(info: &SessionInfo, protected_event_ids: &[String]) -> bool {
-        let Some(last) = info.last_event.as_ref() else {
-            return false;
-        };
-        if protected_event_ids.contains(&last.event_id) {
-            return true;
-        }
-        if let AgentLifecycle::PermissionRequest { prompt } = &last.lifecycle {
-            return protected_event_ids.contains(&prompt.prompt_id);
-        }
-        false
+        let last = &info.last_event;
+        protected_event_ids.contains(&last.event_id)
+            || last
+                .permission_prompt_id
+                .as_ref()
+                .is_some_and(|id| protected_event_ids.contains(id))
     }
 }
 
@@ -492,13 +502,13 @@ mod tests {
         let sess = tracker
             .get("claude-code", "sess-1")
             .expect("session exists");
-        let last_ev = sess.last_event.as_ref().expect("last_event exists");
+        let last_ev = &sess.last_event;
         assert_eq!(
-            last_ev.context.cwd,
+            last_ev.cwd,
             Some(PathBuf::from("/Users/developer/project"))
         );
         assert_eq!(
-            last_ev.context.git_worktree,
+            last_ev.git_worktree,
             Some(PathBuf::from("/Users/developer/project"))
         );
     }
@@ -520,9 +530,9 @@ mod tests {
         let sess = tracker
             .get("claude-code", "sess-config")
             .expect("session exists");
-        let last_ev = sess.last_event.as_ref().expect("last_event exists");
-        assert_eq!(last_ev.context.cwd, None);
-        assert_eq!(last_ev.context.git_worktree, None);
+        let last_ev = &sess.last_event;
+        assert_eq!(last_ev.cwd, None);
+        assert_eq!(last_ev.git_worktree, None);
     }
 
     #[test]
@@ -689,8 +699,6 @@ mod tests {
             .get("claude-code", "held")
             .expect("held session")
             .last_event
-            .as_ref()
-            .expect("last event")
             .event_id
             .clone();
         // Protected while its hold is live.

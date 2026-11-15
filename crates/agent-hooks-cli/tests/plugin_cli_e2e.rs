@@ -5,12 +5,7 @@ use std::process::Command;
 use tempfile::tempdir;
 
 fn agent_hooks_bin() -> std::path::PathBuf {
-    let mut bin = std::env::current_exe().unwrap();
-    bin.pop(); // deps
-    if bin.ends_with("deps") {
-        bin.pop();
-    }
-    bin.join("agent-hooks")
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_agent-hooks"))
 }
 
 #[test]
@@ -176,7 +171,9 @@ fn plugin_hook_execution_e2e() {
     let payload = r#"{"session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
     let mut child = Command::new(&bin)
         .current_dir(&project_dir)
-        .args(["hook", "claude-code", "--event", "PreToolUse"])
+        .args(["hook", "claude-code", "--event", "PreToolUse", "--socket"])
+        .arg(tmp.path().join("none.sock"))
+        .env("HOME", tmp.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

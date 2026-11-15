@@ -25,21 +25,25 @@ pub async fn run(args: DevArgs) -> anyhow::Result<()> {
         .spawn()?;
 
     let client = AgentHooksClient::new(socket.to_string_lossy().into_owned());
-    if !wait_until_ready(&client).await {
-        let _ = daemon.kill().await;
+    if !wait_until_ready(&client, &mut daemon).await {
+        stop_daemon(&mut daemon, &socket).await;
         anyhow::bail!("dev daemon did not become ready at {}", socket.display());
     }
     println!("  status: ✓ ready (ping ok)");
 
     if !args.no_install {
-        crate::commands::install::run(InstallArgs {
-            harness: args.harness,
+        let installed = crate::commands::install::run(InstallArgs {
+            harness: args.harness.clone(),
             binary_path: Some(binary),
             socket: vec![socket.clone()],
             context_cmd: None,
             origin: None,
             adapter_version: None,
-        })?;
+        });
+        if let Err(e) = installed {
+            stop_daemon(&mut daemon, &socket).await;
+            return Err(e);
+        }
         println!("  harness: ✓ installed hooks target the dev socket");
     }
 
@@ -47,6 +51,7 @@ pub async fn run(args: DevArgs) -> anyhow::Result<()> {
     println!("  sessions: {} active", sessions.len());
     println!("  events: waiting for agent activity (Ctrl-C to stop)\n");
 
+    let mut outcome = Ok(());
     let mut events = client.subscribe(None);
     loop {
         tokio::select! {
@@ -60,21 +65,77 @@ pub async fn run(args: DevArgs) -> anyhow::Result<()> {
                 ),
                 None => break,
             },
-            _ = tokio::signal::ctrl_c() => {
+            _ = stop_requested() => {
                 println!("\nagent-hooks dev: stopping daemon");
                 break;
             }
-            result = daemon.wait() => anyhow::bail!("dev daemon exited unexpectedly: {}", result?),
+            result = daemon.wait() => {
+                outcome = match result {
+                    Ok(status) => Err(anyhow::anyhow!("dev daemon exited unexpectedly: {status}")),
+                    Err(e) => Err(e.into()),
+                };
+                break;
+            }
         }
     }
 
-    let _ = daemon.kill().await;
-    let _ = daemon.wait().await;
-    Ok(())
+    stop_daemon(&mut daemon, &socket).await;
+    if !args.no_install {
+        // The installer records no previous state, so the user's real hooks
+        // cannot be restored automatically; `install` rewrites stale hooks.
+        eprintln!(
+            "agent-hooks dev: harness hooks still target {}; restore them with `agent-hooks install --harness {}`",
+            socket.display(),
+            args.harness
+        );
+    }
+    outcome
 }
 
-async fn wait_until_ready(client: &AgentHooksClient) -> bool {
+/// Ctrl-C, or a plain `kill` of the wrapper: either way the daemon it started
+/// must not outlive it.
+async fn stop_requested() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// SIGTERM, a short grace period, then SIGKILL, then remove the socket file.
+/// A daemon that already exited is left alone: it either never owned the path
+/// (another daemon is live on it, or it is not a socket) or cleaned up itself.
+async fn stop_daemon(daemon: &mut tokio::process::Child, socket: &std::path::Path) {
+    if matches!(daemon.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    if let Some(pid) = daemon.id() {
+        let _ = tokio::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .await;
+    }
+    if tokio::time::timeout(Duration::from_secs(3), daemon.wait())
+        .await
+        .is_err()
+    {
+        let _ = daemon.kill().await;
+    }
+    let _ = std::fs::remove_file(socket);
+}
+
+async fn wait_until_ready(client: &AgentHooksClient, daemon: &mut tokio::process::Child) -> bool {
     for _ in 0..50 {
+        if matches!(daemon.try_wait(), Ok(Some(_))) {
+            return false;
+        }
         if matches!(client.ping().await, Ok(true)) {
             return true;
         }

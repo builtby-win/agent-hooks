@@ -163,10 +163,9 @@ fn shim_captures_without_a_daemon_and_stores_tool_bodies() {
     // Prompts without a native session id are never stored.
     let raw = std::fs::read(dir.join("history.sqlite3")).unwrap();
     let wal = std::fs::read(dir.join("history.sqlite3-wal")).unwrap_or_default();
-    for needle in [&b"orphan"[..]] {
-        assert!(!raw.windows(needle.len()).any(|w| w == needle));
-        assert!(!wal.windows(needle.len()).any(|w| w == needle));
-    }
+    let needle = &b"orphan"[..];
+    assert!(!raw.windows(needle.len()).any(|w| w == needle));
+    assert!(!wal.windows(needle.len()).any(|w| w == needle));
 }
 
 /// The messages of one tool call, by native call id.

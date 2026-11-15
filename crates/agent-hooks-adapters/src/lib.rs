@@ -34,6 +34,28 @@ pub fn embedded_asset(harness: &str, key: &str) -> Option<&'static str> {
         .find(|(h, k, _)| *h == harness && *k == key)
         .map(|(_, _, content)| *content)
 }
+// Re-export primary types
+pub use backfill::{parse_line, BackfillSink, ParsedLine, RecordSource, ScriptBackfill};
+pub use declarative::DeclarativeAdapter;
+pub use error::AdapterError;
+pub use importer::{ImportProgress, TranscriptImporter};
+pub use manifest::{
+    AdapterManifest, AgentCliSpec, ResponseMode, ResumeCommandSpec, SessionRefKind,
+};
+pub use registry::AdapterRegistry;
+pub use traits::{HarnessAdapter, HookDefinition, HookEventTarget, HookLocation};
+
+use std::sync::Arc;
+
+/// All adapters as `Arc` (legacy `all_adapters()` returned `Vec<Arc<dyn HarnessAdapter>>`).
+pub fn all_adapters() -> Vec<Arc<dyn HarnessAdapter>> {
+    AdapterRegistry::all().into_iter().map(Arc::from).collect()
+}
+
+/// Resolve an adapter by hint (legacy).
+pub fn adapter_for_hint(hint: &str) -> Option<Arc<dyn HarnessAdapter>> {
+    AdapterRegistry::get(hint).map(Arc::from)
+}
 
 #[cfg(test)]
 mod builtin_tests {
@@ -182,27 +204,4 @@ mod builtin_tests {
         // External-tier manifests have no embedded sources.
         assert!(embedded_asset("acme-cli", "index.ts").is_none());
     }
-}
-
-// Re-export primary types
-pub use backfill::{parse_line, BackfillSink, ParsedLine, RecordSource, ScriptBackfill};
-pub use declarative::DeclarativeAdapter;
-pub use error::AdapterError;
-pub use importer::{ImportProgress, TranscriptImporter};
-pub use manifest::{
-    AdapterManifest, AgentCliSpec, ResponseMode, ResumeCommandSpec, SessionRefKind,
-};
-pub use registry::AdapterRegistry;
-pub use traits::{HarnessAdapter, HookDefinition, HookEventTarget, HookLocation};
-
-use std::sync::Arc;
-
-/// All adapters as `Arc` (legacy `all_adapters()` returned `Vec<Arc<dyn HarnessAdapter>>`).
-pub fn all_adapters() -> Vec<Arc<dyn HarnessAdapter>> {
-    AdapterRegistry::all().into_iter().map(Arc::from).collect()
-}
-
-/// Resolve an adapter by hint (legacy).
-pub fn adapter_for_hint(hint: &str) -> Option<Arc<dyn HarnessAdapter>> {
-    AdapterRegistry::get(hint).map(Arc::from)
 }

@@ -302,7 +302,7 @@ fn extract_session_link(payload: &serde_json::Value, spec: &SessionLinkSpec) -> 
             Some((std::fs::metadata(&log).ok()?.modified().ok()?, log))
         })
         .collect();
-    logs.sort_by(|a, b| b.0.cmp(&a.0));
+    logs.sort_by_key(|b| std::cmp::Reverse(b.0));
     let needle = format!("\"{}\":\"{}\"", spec.link_key, child);
     let needle_spaced = format!("\"{}\": \"{}\"", spec.link_key, child);
     for (_, log) in logs.into_iter().take(MAX_LOGS) {
@@ -1701,8 +1701,8 @@ impl DeclarativeAdapter {
         None
     }
 
-    fn effective_sources<'a>(
-        &'a self,
+    fn effective_sources(
+        &self,
         field: &str,
         host_event_key: &str,
         lifecycle: &LifecycleRef,
@@ -1817,7 +1817,7 @@ impl DeclarativeAdapter {
                 });
                 Ok(AgentLifecycle::PostToolUse {
                     tool_name,
-                    output_preview: output_preview,
+                    output_preview,
                 })
             }
             LifecycleRef::PostToolUseFailure => {
@@ -2028,8 +2028,6 @@ impl HarnessAdapter for DeclarativeAdapter {
                     name: _,
                     fixed_fields: _,
                     entry,
-                    dedupe: _,
-                    entry_overrides: _,
                     ..
                 }
                 | crate::manifest::InstallOp::TomlHooks {

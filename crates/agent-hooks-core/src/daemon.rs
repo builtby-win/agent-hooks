@@ -7,7 +7,7 @@ use agent_hooks_adapters::{
     manifest::{Capability, Verdict},
 };
 use agent_hooks_protocol::event::cap_chars;
-use agent_hooks_protocol::rpc::event_passes_filter;
+use agent_hooks_protocol::rpc::{event_passes_filter, MAX_LINE_BYTES};
 use agent_hooks_protocol::{
     AgentEvent, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, PromptDecision, RawHookInput,
     SubscriptionFilter,
@@ -38,6 +38,68 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Capacity for the broadcast channel that fans events to subscribers.
 const BROADCAST_CAPACITY: usize = 512;
+
+/// A connection that has not sent its first line by then is closed (leaked
+/// task + fd otherwise). Not applied to subscribed or held connections.
+const FIRST_LINE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A subscriber that cannot absorb one event within this window is dropped, so
+/// it stops counting as a decider while holds wait on it.
+const SUBSCRIBER_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Reads newline-delimited lines off a connection's read half on a dedicated
+/// task, so handlers can `select!` on `rx` (cancel-safe, unlike `read_line`)
+/// and a line split across reads is never lost. `rx` yields `None` on EOF, a
+/// read error, or a line over [`MAX_LINE_BYTES`] (logged, connection closed).
+struct LineReader {
+    rx: tokio::sync::mpsc::Receiver<String>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl LineReader {
+    fn spawn<R: tokio::io::AsyncRead + Unpin + Send + 'static>(read_half: R) -> Self {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let task = tokio::spawn(async move {
+            let mut reader = BufReader::new(read_half);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                let n = match (&mut reader)
+                    .take(MAX_LINE_BYTES + 1)
+                    .read_until(b'\n', &mut buf)
+                    .await
+                {
+                    Ok(0) => return,
+                    Ok(n) => n,
+                    Err(e) => {
+                        debug!(error = %e, "read error on connection");
+                        return;
+                    }
+                };
+                if n as u64 > MAX_LINE_BYTES {
+                    warn!(limit = MAX_LINE_BYTES, "client line over limit, closing connection");
+                    return;
+                }
+                let Ok(line) = String::from_utf8(std::mem::take(&mut buf)) else {
+                    debug!("non-UTF-8 line on connection, closing");
+                    return;
+                };
+                if tx.send(line).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Self { rx, task }
+    }
+}
+
+impl Drop for LineReader {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 /// Central daemon that owns the IPC listener, session registry, prompt mediator,
 /// and event broadcast.
@@ -165,15 +227,33 @@ impl AgentHooksDaemon {
         use tokio::net::UnixListener;
 
         // Single-owner: if a live daemon answers, do NOT steal its socket.
-        // Only unlink when nothing is listening (stale file from crash/reboot).
+        // Only unlink when nothing is listening (stale file from crash/reboot):
+        // ECONNREFUSED or a missing file. Any other connect error (EAGAIN from
+        // a busy daemon, EACCES) says nothing about staleness and is fatal.
         if path.exists() {
-            if tokio::net::UnixStream::connect(path).await.is_ok() {
-                return Err(CoreError::Ipc(format!(
-                    "daemon already running on {}: refusing to steal live socket",
-                    path.display()
-                )));
+            match tokio::net::UnixStream::connect(path).await {
+                Ok(_) => {
+                    return Err(CoreError::Ipc(format!(
+                        "daemon already running on {}: refusing to steal live socket",
+                        path.display()
+                    )));
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                    ) =>
+                {
+                    let _ = std::fs::remove_file(path);
+                }
+                Err(e) => {
+                    return Err(CoreError::Ipc(format!(
+                        "cannot probe existing socket {}: {}",
+                        path.display(),
+                        e
+                    )));
+                }
             }
-            let _ = std::fs::remove_file(path);
         }
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -185,10 +265,12 @@ impl AgentHooksDaemon {
             .map_err(|e| CoreError::Ipc(format!("bind {}: {}", path.display(), e)))?;
         info!(path = %path.display(), "daemon listening (unix)");
 
+        // Owner-only: any local user with access could otherwise subscribe,
+        // read every tool input, and answer held permission prompts.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777));
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
         }
 
         // Graceful shutdown signals (best-effort).
@@ -221,7 +303,9 @@ impl AgentHooksDaemon {
                                 });
                             }
                             Err(e) => {
+                                // Back off: EMFILE would otherwise spin at 100% CPU.
                                 error!(error = %e, "accept failed");
+                                tokio::time::sleep(Duration::from_millis(100)).await;
                             }
                         }
                     }
@@ -263,7 +347,10 @@ impl AgentHooksDaemon {
                             .await;
                         });
                     }
-                    Err(e) => error!(error = %e, "accept failed"),
+                    Err(e) => {
+                        error!(error = %e, "accept failed");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
                 }
             }
         }
@@ -635,47 +722,51 @@ async fn handle_unix_connection(
     history: Option<Arc<HistoryRecorder>>,
     conn_id: u64,
 ) -> Result<(), CoreError> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let (read_half, mut write_half) = stream.into_split();
     let _conn_guard = ConnGuard {
         mediator: mediator.clone(),
         conn_id,
     };
-    let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
+    let mut lines = LineReader::spawn(read_half);
+    let mut first_line = true;
 
     // For persistent subscriptions we keep the write_half open and stream events.
     // We need to hold it across the loop.
-    let mut is_subscribed = false;
-    let mut filter: Option<SubscriptionFilter> = None;
-    // Broadcast receiver for this connection's subscription (created on subscribe).
-    let mut sub_rx: Option<broadcast::Receiver<AgentEvent>> = None;
+    let mut sub = Subscription::default();
 
     loop {
         // If subscribed, we need to multiplex: wait for either a new line from client
         // OR a new broadcast event to forward.
-        if is_subscribed {
-            let Some(rx) = sub_rx.as_mut() else {
-                is_subscribed = false;
+        if sub.is_subscribed {
+            let Some(rx) = sub.rx.as_mut() else {
+                sub.is_subscribed = false;
                 continue;
             };
-            line.clear();
             tokio::select! {
                 // New broadcast event
                 ev = rx.recv() => {
                     match ev {
                         Ok(event) => {
-                            if filter.as_ref().map_or(true, |f| event_passes_filter(&event, f)) {
+                            if sub.filter.as_ref().is_none_or(|f| event_passes_filter(&event, f)) {
                                 let notif = subscriber_notification(&event);
                                 let mut out = serde_json::to_string(&notif).unwrap_or_default();
                                 out.push('\n');
-                                if write_half.write_all(out.as_bytes()).await.is_err() {
+                                let sent = tokio::time::timeout(SUBSCRIBER_WRITE_TIMEOUT, async {
+                                    write_half.write_all(out.as_bytes()).await?;
+                                    write_half.flush().await
+                                })
+                                .await;
+                                if !matches!(sent, Ok(Ok(()))) {
+                                    warn!("subscriber stalled or write failed, disconnecting");
                                     break;
                                 }
-                                let _ = write_half.flush().await;
                             }
                         }
+                        // Lag only drops events. Disconnecting would deny every hold this
+                        // decider is showing; a decider that is truly stuck is caught by
+                        // the write timeout above.
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             warn!(skipped = n, "subscriber lagged");
                         }
@@ -685,46 +776,44 @@ async fn handle_unix_connection(
                     }
                     continue;
                 }
-                // New client line
-                res = reader.read_line(&mut line) => {
-                    match res {
-                        Ok(0) => break, // client closed
-                        Ok(_) => {
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() { continue; }
-                            // Client may send further RPCs (e.g., prompt.respond) on same conn.
-                            let response = dispatch_rpc_line(trimmed, &tracker, &mediator, &broadcaster, &mut is_subscribed, &mut filter, &mut sub_rx, conn_id, history.is_some()).await;
-                            if let Some(resp) = response {
-                                let mut out = resp;
-                                if !out.ends_with('\n') { out.push('\n'); }
-                                if write_half.write_all(out.as_bytes()).await.is_err() { break; }
-                                let _ = write_half.flush().await;
-                            }
-                            // If client unsubscribed or sent ping, loop continues.
-                            continue;
-                        }
-                        Err(e) => {
-                            debug!(error = %e, "read error on subscribed conn");
-                            break;
-                        }
+                // New client line (channel recv is cancel-safe, unlike read_line)
+                line = lines.rx.recv() => {
+                    let Some(line) = line else { break }; // closed, errored, or oversized
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() { continue; }
+                    // Client may send further RPCs (e.g., prompt.respond) on same conn.
+                    let response = dispatch_rpc_line(trimmed, &tracker, &mediator, &broadcaster, &mut sub, conn_id, history.is_some()).await;
+                    if let Some(resp) = response {
+                        let mut out = resp;
+                        if !out.ends_with('\n') { out.push('\n'); }
+                        if write_half.write_all(out.as_bytes()).await.is_err() { break; }
+                        let _ = write_half.flush().await;
                     }
+                    // If client unsubscribed or sent ping, loop continues.
+                    continue;
                 }
             }
         }
 
-        // Not yet subscribed: blocking read for next request (one-shot or subscribe initiation).
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| CoreError::Ipc(e.to_string()))?;
-        if n == 0 {
-            break;
-        }
+        // Not yet subscribed: wait for next request (one-shot or subscribe initiation).
+        // Only the first line of a not-yet-subscribed connection is bounded in time.
+        let next = if first_line {
+            match tokio::time::timeout(FIRST_LINE_TIMEOUT, lines.rx.recv()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    debug!("connection sent nothing, closing");
+                    break;
+                }
+            }
+        } else {
+            lines.rx.recv().await
+        };
+        let Some(line) = next else { break };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
+        first_line = false;
 
         // Try to dispatch as RPC. If handled, continue loop (for persistent).
         // If it was a subscribe, the next iteration will enter the subscribed multiplex above.
@@ -734,9 +823,7 @@ async fn handle_unix_connection(
             &mediator,
             &broadcaster,
             &mut write_half,
-            &mut is_subscribed,
-            &mut filter,
-            &mut sub_rx,
+            &mut sub,
             conn_id,
             history.is_some(),
         )
@@ -746,7 +833,7 @@ async fn handle_unix_connection(
             // If subscribe just started, next loop will multiplex.
             // Otherwise (ping, prompt.respond, etc.) we keep the connection open for more RPCs.
             // For unary RPCs the client typically closes after one response, but we allow persistence.
-            if is_subscribed {
+            if sub.is_subscribed {
                 continue;
             }
             // For non-subscribe RPCs, continue to allow pipelining; client may reuse connection.
@@ -760,6 +847,7 @@ async fn handle_unix_connection(
             &broadcaster,
             &enricher,
             &history,
+            unix_peer_gone(&mut lines.rx, &write_half),
         )
         .await;
         let out = hook_response.unwrap_or_else(|| r#"{"decision":"defer"}"#.to_string());
@@ -790,6 +878,36 @@ async fn handle_unix_connection(
     Ok(())
 }
 
+/// How often a half-closed hook connection is re-checked for a hangup.
+#[cfg(unix)]
+const HANGUP_POLL: Duration = Duration::from_millis(250);
+
+/// Resolves once a held hook client is gone. End of input alone is not that:
+/// a client may half-close after sending its line (`nc -U`, `socket.end()`)
+/// and still be waiting for the verdict, so from then on the write side is
+/// watched for the hangup a dead peer leaves behind.
+#[cfg(unix)]
+async fn unix_peer_gone(
+    lines: &mut tokio::sync::mpsc::Receiver<String>,
+    write_half: &tokio::net::unix::OwnedWriteHalf,
+) {
+    while lines.recv().await.is_some() {}
+    while let Ok(ready) = write_half.ready(tokio::io::Interest::WRITABLE).await {
+        if ready.is_write_closed() {
+            return;
+        }
+        tokio::time::sleep(HANGUP_POLL).await;
+    }
+}
+
+/// Per-connection subscription state.
+#[derive(Default)]
+struct Subscription {
+    is_subscribed: bool,
+    filter: Option<SubscriptionFilter>,
+    /// Broadcast receiver for this connection's subscription (created on subscribe).
+    rx: Option<broadcast::Receiver<AgentEvent>>,
+}
 /// Removes the connection's decider flag on every exit path (including `?`).
 struct ConnGuard {
     mediator: Arc<PromptMediator>,
@@ -810,9 +928,7 @@ async fn try_handle_as_rpc(
     mediator: &Arc<PromptMediator>,
     broadcaster: &broadcast::Sender<AgentEvent>,
     write_half: &mut tokio::net::unix::OwnedWriteHalf,
-    is_subscribed: &mut bool,
-    filter: &mut Option<SubscriptionFilter>,
-    sub_rx: &mut Option<broadcast::Receiver<AgentEvent>>,
+    sub: &mut Subscription,
     conn_id: u64,
     history_enabled: bool,
 ) -> Result<bool, CoreError> {
@@ -835,9 +951,7 @@ async fn try_handle_as_rpc(
         tracker,
         mediator,
         broadcaster,
-        is_subscribed,
-        filter,
-        sub_rx,
+        sub,
         conn_id,
         history_enabled,
     )
@@ -872,78 +986,84 @@ async fn handle_interprocess_connection(
     history: Option<Arc<HistoryRecorder>>,
     conn_id: u64,
 ) -> Result<(), CoreError> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     let _conn_guard = ConnGuard {
         mediator: mediator.clone(),
         conn_id,
     };
     let (read_half, mut write_half) = tokio::io::split(stream);
-    let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
-    let mut is_subscribed = false;
-    let mut filter: Option<SubscriptionFilter> = None;
-    let mut sub_rx: Option<broadcast::Receiver<AgentEvent>> = None;
+    let mut lines = LineReader::spawn(read_half);
+    let mut sub = Subscription::default();
+    let mut first_line = true;
 
     loop {
-        if is_subscribed {
-            let Some(rx) = sub_rx.as_mut() else {
-                is_subscribed = false;
+        if sub.is_subscribed {
+            let Some(rx) = sub.rx.as_mut() else {
+                sub.is_subscribed = false;
                 continue;
             };
-            line.clear();
             tokio::select! {
                 ev = rx.recv() => {
                     match ev {
                         Ok(event) => {
-                            if filter.as_ref().map_or(true, |f| event_passes_filter(&event, f)) {
+                            if sub.filter.as_ref().is_none_or(|f| event_passes_filter(&event, f)) {
                                 let notif = subscriber_notification(&event);
                                 let mut out = serde_json::to_string(&notif).unwrap_or_default();
                                 out.push('\n');
-                                if write_half.write_all(out.as_bytes()).await.is_err() { break; }
-                                let _ = write_half.flush().await;
+                                let sent = tokio::time::timeout(SUBSCRIBER_WRITE_TIMEOUT, async {
+                                    write_half.write_all(out.as_bytes()).await?;
+                                    write_half.flush().await
+                                })
+                                .await;
+                                if !matches!(sent, Ok(Ok(()))) {
+                                    warn!("subscriber stalled or write failed, disconnecting");
+                                    break;
+                                }
                             }
                         }
+                        // Lag only drops events; see the unix handler.
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!(skipped = n, "lagged");
+                            warn!(skipped = n, "subscriber lagged");
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                     continue;
                 }
-                res = reader.read_line(&mut line) => {
-                    match res {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() { continue; }
-                            let resp = dispatch_rpc_line(trimmed, &tracker, &mediator, &broadcaster, &mut is_subscribed, &mut filter, &mut sub_rx, conn_id, history.is_some()).await;
-                            if let Some(r) = resp {
-                                let mut out = r;
-                                if !out.ends_with('\n') { out.push('\n'); }
-                                if write_half.write_all(out.as_bytes()).await.is_err() { break; }
-                                let _ = write_half.flush().await;
-                            }
-                            continue;
-                        }
-                        Err(e) => { debug!(error=%e, "read error"); break; }
+                line = lines.rx.recv() => {
+                    let Some(line) = line else { break };
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() { continue; }
+                    let resp = dispatch_rpc_line(trimmed, &tracker, &mediator, &broadcaster, &mut sub, conn_id, history.is_some()).await;
+                    if let Some(r) = resp {
+                        let mut out = r;
+                        if !out.ends_with('\n') { out.push('\n'); }
+                        if write_half.write_all(out.as_bytes()).await.is_err() { break; }
+                        let _ = write_half.flush().await;
                     }
+                    continue;
                 }
             }
         }
 
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| CoreError::Ipc(e.to_string()))?;
-        if n == 0 {
-            break;
-        }
+        // Only the first line of a not-yet-subscribed connection is bounded in time.
+        let next = if first_line {
+            match tokio::time::timeout(FIRST_LINE_TIMEOUT, lines.rx.recv()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    debug!("connection sent nothing, closing");
+                    break;
+                }
+            }
+        } else {
+            lines.rx.recv().await
+        };
+        let Some(line) = next else { break };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
+        first_line = false;
 
         // Try RPC first
         if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
@@ -953,9 +1073,7 @@ async fn handle_interprocess_connection(
                     &tracker,
                     &mediator,
                     &broadcaster,
-                    &mut is_subscribed,
-                    &mut filter,
-                    &mut sub_rx,
+                    &mut sub,
                     conn_id,
                     history.is_some(),
                 )
@@ -973,7 +1091,7 @@ async fn handle_interprocess_connection(
                         .flush()
                         .await
                         .map_err(|e| CoreError::Ipc(e.to_string()))?;
-                    if is_subscribed {
+                    if sub.is_subscribed {
                         continue;
                     }
                     continue;
@@ -988,6 +1106,8 @@ async fn handle_interprocess_connection(
             &broadcaster,
             &enricher,
             &history,
+            // A pipe has no half-close: end of input is the client leaving.
+            async { while lines.rx.recv().await.is_some() {} },
         )
         .await;
         let out = hook_response.unwrap_or_else(|| r#"{"decision":"defer"}"#.to_string());
@@ -1027,6 +1147,7 @@ async fn handle_hook_line(
     broadcaster: &broadcast::Sender<AgentEvent>,
     enricher: &Arc<dyn crate::enricher::EventEnricher>,
     history: &Option<Arc<HistoryRecorder>>,
+    peer_gone: impl std::future::Future<Output = ()>,
 ) -> Option<String> {
     // Additive-only wire rule: a schema_version mismatch only warns, never drops.
     let line_value = serde_json::from_str::<Value>(line).ok();
@@ -1162,7 +1283,19 @@ async fn handle_hook_line(
         let prompt_id = hold_prompt_id(&event);
         let interactive = event.is_interactive();
         info!(prompt_id = %prompt_id, "awaiting decider verdict");
-        let decision = await_verdict(mediator, prompt_id, rx, hold_for, interactive).await;
+        // Watch the hook connection while holding: if the harness killed the
+        // shim, cancel the hold instead of leaving it answerable to nobody.
+        let verdict = tokio::select! {
+            d = await_verdict(mediator, prompt_id.clone(), rx, hold_for, interactive) => Some(d),
+            _ = peer_gone => None,
+        };
+        // The select is over, so this connection's receiver is dropped: the
+        // prompt itself survives while another connection still waits on it.
+        let Some(decision) = verdict else {
+            info!(prompt_id = %prompt_id, "hook client gone mid-hold, cancelling");
+            mediator.remove_prompt(&prompt_id).await;
+            return None;
+        };
         let mut response = serde_json::to_value(&decision).expect("PromptDecision serializes");
         response["decision"] = serde_json::json!(if decision.defer {
             "defer"
@@ -1189,9 +1322,7 @@ async fn dispatch_rpc_line(
     tracker: &Arc<RwLock<SessionTracker>>,
     mediator: &Arc<PromptMediator>,
     broadcaster: &broadcast::Sender<AgentEvent>,
-    is_subscribed: &mut bool,
-    filter: &mut Option<SubscriptionFilter>,
-    sub_rx: &mut Option<broadcast::Receiver<AgentEvent>>,
+    sub: &mut Subscription,
     conn_id: u64,
     history_enabled: bool,
 ) -> Option<String> {
@@ -1229,11 +1360,29 @@ async fn dispatch_rpc_line(
             Some(serde_json::to_string(&resp).unwrap_or_default())
         }
         "subscribe" => {
-            // Parse filter from params if present.
-            let f: Option<SubscriptionFilter> = req
-                .params
-                .as_ref()
-                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            // Parse filter from params if present. A filter this daemon cannot
+            // parse is an error: silently subscribing unfiltered would leak
+            // every session's events and drop `decide`.
+            let f: Option<SubscriptionFilter> = match req.params.as_ref().filter(|v| !v.is_null())
+            {
+                None => None,
+                Some(v) => match serde_json::from_value(v.clone()) {
+                    Ok(f) => Some(f),
+                    Err(e) => {
+                        let resp = JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id,
+                            result: None,
+                            error: Some(agent_hooks_protocol::rpc::JsonRpcError {
+                                code: -32602,
+                                message: format!("invalid subscribe params: {e}"),
+                                data: None,
+                            }),
+                        };
+                        return Some(serde_json::to_string(&resp).unwrap_or_default());
+                    }
+                },
+            };
 
             // `decide` is a declaration of what this subscriber will answer,
             // resolved against the subscription itself: `true` inherits the
@@ -1250,9 +1399,9 @@ async fn dispatch_rpc_line(
                     .map(|f| f.passthrough_env.clone())
                     .unwrap_or_default(),
             );
-            *filter = f.clone();
-            *sub_rx = Some(broadcaster.subscribe());
-            *is_subscribed = true;
+            sub.filter = f.clone();
+            sub.rx = Some(broadcaster.subscribe());
+            sub.is_subscribed = true;
             // Ack
             let resp = JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
@@ -1365,8 +1514,8 @@ async fn dispatch_rpc_line(
             // A departing decider fails its orphaned holds closed instead of
             // leaving them dangling until the hold timeout.
             deny_orphaned_holds(mediator).await;
-            *is_subscribed = false;
-            *sub_rx = None;
+            sub.is_subscribed = false;
+            sub.rx = None;
             let resp = JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 id,

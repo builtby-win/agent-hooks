@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use agent_hooks_adapters::{parse_line, AdapterRegistry, HarnessAdapter, ParsedLine, RecordSource};
+use agent_hooks_adapters::{
+    parse_line, AdapterRegistry, HarnessAdapter, ParsedLine, RecordSource, TranscriptImporter,
+};
 use agent_hooks_history::{
     init_store, resolve_history_dir, BackfillFile, HistoryError, HistoryReader, HistoryWriter,
     MessageSearchQuery, MessagesQuery, RecordOutcome, SessionsQuery,
@@ -167,6 +169,9 @@ struct BackfillReport {
     /// Files skipped because nothing changed since the last backfill.
     #[serde(skip_serializing_if = "Option::is_none")]
     unchanged: Option<u64>,
+    /// Transcripts that failed to import (logged to stderr); the run goes on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed_files: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     new: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -257,55 +262,77 @@ fn backfill_adapter(
             ..Default::default()
         });
     }
-    let (mut files, mut unchanged) = (0, 0);
+    let (mut files, mut unchanged, mut failed) = (0, 0, 0);
     let mut counts = Counts::default();
     for path in importer.discover(home, since) {
         files += 1;
-        let observed = std::fs::metadata(&path)?;
-        let from = match writer.backfill_file(LOCAL_ORIGIN, harness, &path)? {
-            Some(saved) if !rescan => match saved.resume(&path)? {
-                Some(offset) => offset,
-                None => {
-                    unchanged += 1;
-                    continue;
-                }
-            },
-            _ => 0,
-        };
-        let mut failure = None;
-        let progress = importer
-            .import_file(&path, from, &mut |capture| {
-                if failure.is_some() {
-                    return;
-                }
-                if let Err(e) = counts.store(writer, Some(capture)) {
-                    failure = Some(e);
-                }
-            })
-            .map_err(|e| HistoryError::Io(std::io::Error::other(e.to_string())))?;
-        if let Some(e) = failure {
-            return Err(e);
+        // One unreadable or corrupt transcript must not block the rest. A
+        // store error (locked, full, corrupt) would fail every file the same
+        // way, so it ends the run instead of reporting an import.
+        match backfill_file(writer, importer, harness, &path, rescan, &mut counts) {
+            Ok(true) => unchanged += 1,
+            Ok(false) => {}
+            Err(e @ (HistoryError::Io(_) | HistoryError::Payload(_))) => {
+                eprintln!("history backfill ({harness}): {}: {e}", path.display());
+                failed += 1;
+            }
+            Err(e) => return Err(e),
         }
-        counts.skipped += progress.skipped;
-        writer.save_backfill_file(&BackfillFile::snapshot(
-            LOCAL_ORIGIN,
-            harness,
-            &path,
-            &observed,
-            progress.offset,
-        )?)?;
     }
     Ok(BackfillReport {
         harness: harness.to_string(),
         status: "imported",
         files: Some(files),
         unchanged: Some(unchanged),
+        failed_files: (failed > 0).then_some(failed),
         new: Some(counts.new),
         duplicate: Some(counts.duplicate),
         skipped: Some(counts.skipped),
         live_sessions_skipped: Some(counts.live_sessions),
         ..Default::default()
     })
+}
+
+/// Import one transcript; `Ok(true)` when nothing changed since the last run.
+fn backfill_file(
+    writer: &mut HistoryWriter,
+    importer: &dyn TranscriptImporter,
+    harness: &str,
+    path: &Path,
+    rescan: bool,
+    counts: &mut Counts,
+) -> Result<bool, HistoryError> {
+    let observed = std::fs::metadata(path)?;
+    let from = match writer.backfill_file(LOCAL_ORIGIN, harness, path)? {
+        Some(saved) if !rescan => match saved.resume(path)? {
+            Some(offset) => offset,
+            None => return Ok(true),
+        },
+        _ => 0,
+    };
+    let mut failure = None;
+    let progress = importer
+        .import_file(path, from, &mut |capture| {
+            if failure.is_some() {
+                return;
+            }
+            if let Err(e) = counts.store(writer, Some(capture)) {
+                failure = Some(e);
+            }
+        })
+        .map_err(|e| HistoryError::Io(std::io::Error::other(e.to_string())))?;
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    counts.skipped += progress.skipped;
+    writer.save_backfill_file(&BackfillFile::snapshot(
+        LOCAL_ORIGIN,
+        harness,
+        path,
+        &observed,
+        progress.offset,
+    )?)?;
+    Ok(false)
 }
 
 #[derive(Default)]
@@ -470,7 +497,7 @@ fn import(args: HistoryImportArgs) -> Result<String, HistoryError> {
     let mut counts = Counts::default();
     for line in std::io::stdin().lock().split(b'\n') {
         match parse_line(adapter.id(), &line?) {
-            ParsedLine::Capture(capture) => counts.store(&mut writer, Some(capture))?,
+            ParsedLine::Capture(capture) => counts.store(&mut writer, Some(*capture))?,
             ParsedLine::Cursor(_) => {}
             ParsedLine::Skipped => counts.store(&mut writer, None)?,
         }

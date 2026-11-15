@@ -9,12 +9,7 @@ use std::process::{Command, Output};
 use tempfile::{tempdir, TempDir};
 
 fn agent_hooks_bin() -> PathBuf {
-    let mut bin = std::env::current_exe().unwrap();
-    bin.pop();
-    if bin.ends_with("deps") {
-        bin.pop();
-    }
-    bin.join("agent-hooks")
+    PathBuf::from(env!("CARGO_BIN_EXE_agent-hooks"))
 }
 
 fn write_script(path: &Path, body: &str) {

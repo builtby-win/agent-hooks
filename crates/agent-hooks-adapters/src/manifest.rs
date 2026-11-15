@@ -153,9 +153,10 @@ pub enum EditMode {
 // Transcript extraction
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptExtract {
+    #[default]
     FirstPrompt,
     LatestPrompt,
     LatestAssistant,
@@ -166,12 +167,6 @@ pub enum TranscriptExtract {
 #[serde(deny_unknown_fields)]
 pub struct TranscriptRef {
     pub transcript: TranscriptExtract,
-}
-
-impl Default for TranscriptExtract {
-    fn default() -> Self {
-        Self::FirstPrompt
-    }
 }
 
 /// Resolve a child session's parent from the harness's own on-disk session
@@ -207,7 +202,7 @@ pub enum ExtractionSource {
     SessionLink(SessionLinkRef),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct ExtractionSpec {
     #[serde(default)]
@@ -388,28 +383,6 @@ impl ExtractionSpec {
             .iter()
             .map(|p| ExtractionSource::Path(p.to_string()))
             .collect()
-    }
-}
-
-impl Default for ExtractionSpec {
-    fn default() -> Self {
-        Self {
-            session_id: Vec::new(),
-            parent_session_id: Vec::new(),
-            prompt: Vec::new(),
-            tool_name: Vec::new(),
-            tool_input: Vec::new(),
-            tool_output: Vec::new(),
-            error: Vec::new(),
-            success: Vec::new(),
-            cwd: Vec::new(),
-            summary: None,
-            assistant_message: Vec::new(),
-            session_title: Vec::new(),
-            flavor_text: Vec::new(),
-            message_id: Vec::new(),
-            tool_call_id: Vec::new(),
-        }
     }
 }
 

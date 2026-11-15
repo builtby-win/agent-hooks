@@ -3,10 +3,28 @@ mod commands;
 mod paths;
 
 use clap::Parser;
+use std::io::Write;
 use cli::{Cli, Commands};
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            // clap exits 2 on a parse error, which harnesses treat as a
+            // BLOCKING hook error: an installed hook line with a flag this
+            // binary does not know must fail open instead. `--help` and
+            // `--version` are not errors and print as usual.
+            let is_hook = std::env::args_os()
+                .skip(1)
+                .find(|arg| !arg.to_string_lossy().starts_with('-'))
+                .is_some_and(|arg| arg == "hook");
+            if is_hook && error.use_stderr() {
+                let _ = writeln!(std::io::stderr(), "agent-hooks: {error}");
+                std::process::exit(0);
+            }
+            error.exit()
+        }
+    };
 
     match cli.command {
         Commands::Hook(args) => commands::hook::run(args),

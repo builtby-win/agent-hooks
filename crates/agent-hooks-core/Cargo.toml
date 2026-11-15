@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description.workspace = true
 
 [dependencies]
@@ -14,17 +15,15 @@ agent-hooks-history = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
-async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-toml_edit = { workspace = true }
-json5 = { workspace = true }
-interprocess = { workspace = true }
-futures = { workspace = true }
 parking_lot = "0.12"
+
+# The daemon listens on a named pipe there; unix uses tokio's UnixListener.
+[target.'cfg(windows)'.dependencies]
+interprocess = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

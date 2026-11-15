@@ -148,7 +148,7 @@ fn accept_decision(event: &AgentEvent, decision: PromptDecision, source: &str) -
         }
         Err(e) => {
             let reason = format!("invalid local hook response from {source}: {e}");
-            eprintln!("agent-hooks: {reason}");
+            let _ = writeln!(std::io::stderr(), "agent-hooks: {reason}");
             PromptDecision::deny(Some(cap_chars(&reason, MAX_REASON_LEN)))
         }
     }
@@ -582,7 +582,10 @@ pub fn run_local_hooks(
     let stdin_json = match serde_json::to_string_pretty(event) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("agent-hooks: cannot serialize event for local hooks: {e}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "agent-hooks: cannot serialize event for local hooks: {e}"
+            );
             return None;
         }
     };
@@ -673,7 +676,7 @@ pub fn run_local_hooks(
             (_, Some(RunOutcome::Deny(reason))) => PromptDecision::deny(reason),
             (_, Some(RunOutcome::Ask(question))) => PromptDecision::ask(question),
             (_, Some(RunOutcome::Ignored(warn))) => {
-                eprintln!("agent-hooks: local hook ignored: {warn}");
+                let _ = writeln!(std::io::stderr(), "agent-hooks: local hook ignored: {warn}");
                 continue;
             }
             (_, Some(RunOutcome::Context(text))) => {
@@ -809,7 +812,7 @@ enum RunOutcome {
 }
 
 /// Fail-open audit (this file): every infrastructure failure resolves to
-/// allow/skip — spawn failure, stdin-write failure, non-2/3 exits, timeouts,
+/// allow/skip — spawn failure, non-2/3 exits, timeouts,
 /// wait errors, `AGENT_HOOKS_NO_LOCAL=1`, empty commands, unreadable config
 /// tiers, and non-UTF8 stderr (lossy-decoded, never an error). Deny/ask arise
 /// ONLY from exit 2/3, a canned `respond`, or an explicit canonical stdout
@@ -857,31 +860,48 @@ fn run_one(command: &str, timeout_secs: u64, stdin_json: &str, event: &AgentEven
             let _ = stdout_tx.send((String::from_utf8_lossy(&kept).into_owned(), overflow));
         });
     }
-    // Feed stdin, then close it so the script sees EOF.
+    // Same for stderr: keeps the head (the deny reason) and drains the rest
+    // so a chatty hook is never stalled into a timeout. The head is shared as
+    // it arrives, not handed over at EOF: a grandchild holding the pipe open
+    // past exit never delivers one, and the reason is already in hand.
+    let stderr_head = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let (stderr_eof_tx, stderr_eof_rx) = std::sync::mpsc::channel::<()>();
+    if let Some(mut err) = child.stderr.take() {
+        let head = stderr_head.clone();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            // 4x headroom covers worst-case UTF-8 expansion; capped on
+            // chars by the caller.
+            let cap = MAX_REASON_LEN * 4 + 1;
+            let mut chunk = [0u8; 4096];
+            while let Ok(n @ 1..) = err.read(&mut chunk) {
+                let mut head = head.lock().unwrap_or_else(|e| e.into_inner());
+                let room = cap.saturating_sub(head.len());
+                head.extend_from_slice(&chunk[..n.min(room)]);
+            }
+            let _ = stderr_eof_tx.send(());
+        });
+    }
+    // Feed stdin on its own thread so a hook that never reads cannot block
+    // the shim before the timeout is armed; dropping the handle closes it.
+    // A write error (hook exited or closed stdin early) is not a failure.
     if let Some(mut stdin) = child.stdin.take() {
-        if stdin.write_all(stdin_json.as_bytes()).is_err() {
-            let _ = child.kill();
-            return RunOutcome::Ignored(format!("cannot write stdin to '{command}'"));
-        }
+        let payload = stdin_json.to_owned();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(payload.as_bytes());
+        });
     }
     let timeout = Duration::from_secs(timeout_secs.max(1));
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                // Reap stderr for deny reasons (bounded read).
-                let mut stderr = String::new();
-                if let Some(mut err) = child.stderr.take() {
-                    use std::io::Read;
-                    // 4x headroom covers worst-case UTF-8 expansion; capped
-                    // on chars below.
-                    let mut buf = vec![0u8; MAX_REASON_LEN * 4 + 1];
-                    if let Ok(n) = err.read(&mut buf) {
-                        stderr = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    }
-                }
                 if status.code() == Some(2) || status.code() == Some(3) {
-                    let text = stderr.trim().to_string();
+                    // Deny reason from stderr; a grandchild holding the pipe
+                    // open past exit must not stall the shim.
+                    let _ = stderr_eof_rx.recv_timeout(Duration::from_millis(200));
+                    let head = stderr_head.lock().unwrap_or_else(|e| e.into_inner());
+                    let text = String::from_utf8_lossy(&head).trim().to_string();
                     let text = if text.is_empty() {
                         None
                     } else {
@@ -906,7 +926,7 @@ fn run_one(command: &str, timeout_secs: u64, stdin_json: &str, event: &AgentEven
                             "local hook '{command}' wrote more than {MAX_STDOUT_BYTES} bytes to stdout; \
                              a decision that large cannot be read exactly"
                         );
-                        eprintln!("agent-hooks: {reason}");
+                        let _ = writeln!(std::io::stderr(), "agent-hooks: {reason}");
                         return RunOutcome::Decision(PromptDecision::deny(Some(cap_chars(
                             &reason,
                             MAX_REASON_LEN,
@@ -926,7 +946,7 @@ fn run_one(command: &str, timeout_secs: u64, stdin_json: &str, event: &AgentEven
                         Stdout::Verdict(Err(e)) => {
                             let reason =
                                 format!("invalid local hook verdict on stdout of '{command}': {e}");
-                            eprintln!("agent-hooks: {reason}");
+                            let _ = writeln!(std::io::stderr(), "agent-hooks: {reason}");
                             RunOutcome::Decision(PromptDecision::deny(Some(cap_chars(
                                 &reason,
                                 MAX_REASON_LEN,
@@ -941,21 +961,7 @@ fn run_one(command: &str, timeout_secs: u64, stdin_json: &str, event: &AgentEven
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     // Timeout is fail-open allow + stderr warning, never deny.
-                    #[cfg(unix)]
-                    {
-                        // Whole-group SIGKILL: backgrounded grandchildren
-                        // (`sleep 300 &`, SIGTERM-ignoring scripts) die with
-                        // the hook. Direct-child kill is the fallback.
-                        kill_process_group(child.id());
-                        let _ = child.kill();
-                    }
-                    // PLATFORM GAP (Windows): std has no process-group kill,
-                    // so this is best-effort on the direct child only;
-                    // detached grandchildren may survive. Unix reaps the
-                    // whole group (see kill_process_group).
-                    #[cfg(not(unix))]
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_and_reap(&mut child);
                     return RunOutcome::Ignored(format!(
                         "'{command}' exceeded {timeout_secs}s, killed (fail-open)"
                     ));
@@ -963,12 +969,24 @@ fn run_one(command: &str, timeout_secs: u64, stdin_json: &str, event: &AgentEven
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(e) => {
-                let _ = child.kill();
+                kill_and_reap(&mut child);
                 return RunOutcome::Ignored(format!("wait on '{command}' failed: {e}"));
             }
         }
     }
 }
+
+/// Kill the hook (whole process group on unix, so backgrounded grandchildren
+/// die too) and reap it. Used on every path where the hook is abandoned.
+fn kill_and_reap(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    kill_process_group(child.id());
+    // Direct-child kill is the fallback (and the only option off unix:
+    // std has no process-group kill, so detached grandchildren may survive).
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// SIGKILL the whole process group `pgid` (the timed-out hook's group: the
 /// leader's pid == `pgid` via `process_group(0)`). Raw FFI keeps this
 /// dependency-free — libc links by default on unix. Failure is ignored: the
@@ -1020,6 +1038,34 @@ pub fn scaffold_json() -> String {
         }
     }))
     .unwrap_or_default()
+}
+
+/// `agent-hooks init [--project]`: scaffold a user-hooks file.
+pub fn cmd_init(args: InitArgs) -> anyhow::Result<()> {
+    let dest = if args.project {
+        project_config_path()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine current directory"))?
+    } else {
+        user_config_path().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
+    };
+    if dest.exists() {
+        anyhow::bail!("{} already exists — refusing to overwrite", dest.display());
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&dest, format!("{}\n", scaffold_json()))?;
+    println!("wrote {}", dest.display());
+    println!("next steps:");
+    println!("  1. edit the commands for the lifecycle events you care about");
+    println!("     (keys: {})", KNOWN_LIFECYCLES.join(", "));
+    println!("  2. scripts get the normalized event JSON on stdin +");
+    println!("     AGENT_HOOKS_EVENT / AGENT_HOOKS_SESSION / AGENT_HOOKS_HARNESS env");
+    println!(
+        "  3. exit 0 = allow, exit 2 = deny (stderr = reason), exit 3 = ask; no daemon needed"
+    );
+    println!("     (exit-0 stdout may also be a PromptDecision JSON, e.g. {{\"allow\":true}})");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1110,7 +1156,7 @@ mod tests {
         .unwrap();
         let (merged, warnings) = load_merged_from(
             Some(&user),
-            &[project.clone()],
+            std::slice::from_ref(&project),
             &mut EnvCapturePolicy::default(),
         );
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -1160,7 +1206,7 @@ mod tests {
         std::fs::write(&user, r#"{"version":1,"passthrough_env":["USER_ALWAYS"],"allowed_passthrough_env":["USER_REQUESTED"]}"#).unwrap();
         std::fs::write(&project, r#"{"version":1,"passthrough_env":["PROJECT_SECRET"],"allowed_passthrough_env":["PROJECT_REQUESTED"]}"#).unwrap();
         let mut policy = EnvCapturePolicy::default();
-        let (_, warnings) = load_merged_from(Some(&user), &[project.clone()], &mut policy);
+        let (_, warnings) = load_merged_from(Some(&user), std::slice::from_ref(&project), &mut policy);
         assert_eq!(policy.always, ["USER_ALWAYS"]);
         assert!(
             warnings
@@ -2031,32 +2077,4 @@ mod tests {
             "{reason}"
         );
     }
-}
-
-/// `agent-hooks init [--project]`: scaffold a user-hooks file.
-pub fn cmd_init(args: InitArgs) -> anyhow::Result<()> {
-    let dest = if args.project {
-        project_config_path()
-            .ok_or_else(|| anyhow::anyhow!("cannot determine current directory"))?
-    } else {
-        user_config_path().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?
-    };
-    if dest.exists() {
-        anyhow::bail!("{} already exists — refusing to overwrite", dest.display());
-    }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&dest, format!("{}\n", scaffold_json()))?;
-    println!("wrote {}", dest.display());
-    println!("next steps:");
-    println!("  1. edit the commands for the lifecycle events you care about");
-    println!("     (keys: {})", KNOWN_LIFECYCLES.join(", "));
-    println!("  2. scripts get the normalized event JSON on stdin +");
-    println!("     AGENT_HOOKS_EVENT / AGENT_HOOKS_SESSION / AGENT_HOOKS_HARNESS env");
-    println!(
-        "  3. exit 0 = allow, exit 2 = deny (stderr = reason), exit 3 = ask; no daemon needed"
-    );
-    println!("     (exit-0 stdout may also be a PromptDecision JSON, e.g. {{\"allow\":true}})");
-    Ok(())
 }

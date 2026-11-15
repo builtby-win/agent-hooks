@@ -1,4 +1,5 @@
 use crate::cli::UninstallArgs;
+use crate::commands::install::write_atomic;
 use crate::paths::expand_op_path;
 use agent_hooks_adapters::manifest::{AdapterManifest, InstallOp};
 use agent_hooks_adapters::traits::normalize_hint;
@@ -296,24 +297,37 @@ fn run_undo(command: &str, display_name: &str) {
 // Shared installer-contract helpers
 // ---------------------------------------------------------------------------
 
-/// Installer-contract removal predicate: a command is ours when it contains
-/// `agent-hooks` AND the harness id or any manifest alias (case-insensitive,
-/// normalized via `normalize_hint`, with a raw-lowercase fallback so `_` /
-/// space / `-` separator variants match nothing foreign and miss nothing
-/// of ours).
+/// Installer-contract removal predicate. The installer writes
+/// `<agent-hooks binary> hook <harness> --event ...` (binary quoted when its
+/// path has whitespace), so a command is ours only when its program's
+/// basename starts with `agent-hooks` (any directory; covers `.exe` and
+/// release names like `agent-hooks-aarch64-apple-darwin`, since the installer
+/// writes whatever `--binary-path` it was given), the subcommand is `hook`,
+/// and the harness argument is the id or a manifest alias (compared via
+/// `normalize_hint`). A path that merely contains `agent-hooks` in a
+/// directory never matches.
 pub(crate) fn command_is_ours(cmd: &str, harness_id: &str, aliases: &[String]) -> bool {
-    let lower = cmd.to_ascii_lowercase();
-    if !lower.contains("agent-hooks") {
+    let cmd = cmd.trim_start();
+    let (program, rest) = match cmd.chars().next() {
+        Some(quote @ ('"' | '\'')) => match cmd[1..].split_once(quote) {
+            Some(split) => split,
+            None => return false,
+        },
+        _ => cmd.split_once(char::is_whitespace).unwrap_or((cmd, "")),
+    };
+    let basename = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    if !basename.to_ascii_lowercase().starts_with("agent-hooks") {
         return false;
     }
-    std::iter::once(harness_id)
-        .chain(aliases.iter().map(String::as_str))
-        .filter(|a| !a.trim().is_empty())
-        .any(|a| {
-            let norm = normalize_hint(a);
-            let raw = a.to_ascii_lowercase();
-            (!norm.is_empty() && lower.contains(&norm)) || (!raw.is_empty() && lower.contains(&raw))
-        })
+    let mut args = rest.split_whitespace();
+    let (Some("hook"), Some(harness)) = (args.next(), args.next()) else {
+        return false;
+    };
+    let harness = normalize_hint(harness.trim_matches(['"', '\'']));
+    !harness.is_empty()
+        && std::iter::once(harness_id)
+            .chain(aliases.iter().map(String::as_str))
+            .any(|a| normalize_hint(a) == harness)
 }
 
 /// Strip `//` line comments, `/* */` block comments, and trailing commas
@@ -405,14 +419,6 @@ fn strip_jsonc(data: &str) -> String {
     cleaned
 }
 
-/// Atomic config write: temp file + rename in the same dir, never a direct
-/// truncate-write (crash/power-loss safe: the old config survives).
-fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp-agent-hooks");
-    std::fs::write(&tmp, contents)?;
-    std::fs::rename(&tmp, path)
-}
-
 // ---------------------------------------------------------------------------
 // JSON removal (reverse of install dedupe)
 // ---------------------------------------------------------------------------
@@ -460,7 +466,7 @@ fn remove_json_hooks(
     }
     if removed > 0 {
         let pretty = serde_json::to_string_pretty(&root)?;
-        atomic_write(path, &(pretty + "\n"))?;
+        write_atomic(path, &(pretty + "\n"))?;
     }
     Ok(removed)
 }
@@ -542,81 +548,97 @@ fn is_ours(entry: &serde_json::Value, harness_id: &str, aliases: &[String]) -> b
 // TOML removal
 // ---------------------------------------------------------------------------
 
-/// Remove `[[hooks.<event>]]` blocks (and their `[[hooks.<event>.hooks]]`
-/// children) whose command lines match the installer contract (`agent-hooks`
-/// plus the harness id or any manifest alias). Returns the number of hook
-/// blocks removed. The config file itself is never deleted.
+/// Remove hook entries whose command matches the installer contract (see
+/// [`command_is_ours`]), structurally via `toml_edit`: `[hooks.<event>]`
+/// tables, `[[hooks.<event>]]` rows (and their `[[...hooks]]` children, with
+/// the matcher group dropped once empty), and bare `<event> = "<command>"`
+/// strings. Tables left empty are dropped; everything else — keys, comments,
+/// formatting — is untouched. Returns the number of commands removed.
+/// Invalid TOML is an error, never a silent no-op. The config file itself is
+/// never deleted.
 pub(crate) fn remove_toml_hooks(
     path: &PathBuf,
     harness_id: &str,
     aliases: &[String],
 ) -> anyhow::Result<usize> {
     let data = std::fs::read_to_string(path)?;
-    if !command_is_ours(&data, harness_id, aliases) {
-        return Ok(0);
-    }
-    let lines: Vec<&str> = data.lines().collect();
-    let mut out_lines: Vec<String> = Vec::new();
-    let mut removed = 0usize;
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        // Only real command lines count — `# Added by agent-hooks` marker
-        // comments name the harness too but are handled separately below.
-        if !line.trim_start().starts_with('#') && command_is_ours(line, harness_id, aliases) {
-            // Drop the surrounding block: look back for the section header.
-            if !out_lines.is_empty() {
-                let prev = out_lines.last().cloned().unwrap_or_default();
-                if prev.trim().starts_with("[hooks.") || prev.trim().starts_with("[[hooks.") {
-                    out_lines.pop();
-                    if out_lines
-                        .last()
-                        .is_some_and(|l| l.contains("Added by agent-hooks"))
-                    {
-                        out_lines.pop();
-                    }
-                }
-            }
-            removed += 1;
-            i += 1;
-            while i < lines.len() {
-                let next = lines[i].trim();
-                if next.is_empty() || next.starts_with('[') || next.starts_with('#') {
-                    break;
-                }
-                if next.starts_with("type")
-                    || next.starts_with("timeout")
-                    || next.starts_with("command")
-                    || next.starts_with("matcher")
-                {
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            continue;
-        }
-        out_lines.push(line.to_string());
-        i += 1;
-    }
-
+    let mut doc: toml_edit::Document = data
+        .parse()
+        .map_err(|e| anyhow::anyhow!("{}: invalid TOML: {e}", path.display()))?;
+    let removed = prune_toml_hooks(doc.as_table_mut(), harness_id, aliases);
     if removed > 0 {
-        let out = out_lines.join("\n");
-        let cleaned = out
-            .lines()
-            .filter(|l| !l.contains("Added by agent-hooks"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let final_out = if cleaned.trim().is_empty() {
-            String::new()
-        } else {
-            cleaned + "\n"
-        };
-        // Never remove the config file itself: an emptied config stays as
-        // an empty file.
-        atomic_write(path, &final_out)?;
+        write_atomic(path, &doc.to_string())?;
     }
     Ok(removed)
+}
+
+/// In-memory core of [`remove_toml_hooks`].
+pub(crate) fn prune_toml_hooks(
+    table: &mut toml_edit::Table,
+    harness_id: &str,
+    aliases: &[String],
+) -> usize {
+    use toml_edit::Item;
+    let is_ours = |c: &str| command_is_ours(c, harness_id, aliases);
+    let mut removed = 0usize;
+    let keys: Vec<String> = table.iter().map(|(k, _)| k.to_string()).collect();
+    for key in keys {
+        let Some(item) = table.get_mut(&key) else {
+            continue;
+        };
+        let drop_key = match item {
+            Item::Value(v) => {
+                let ours = v.as_str().is_some_and(is_ours);
+                removed += usize::from(ours);
+                ours
+            }
+            Item::Table(t) => {
+                if t.get("command")
+                    .and_then(Item::as_str)
+                    .is_some_and(is_ours)
+                {
+                    removed += 1;
+                    true
+                } else {
+                    let n = prune_toml_hooks(t, harness_id, aliases);
+                    removed += n;
+                    n > 0 && t.is_empty()
+                }
+            }
+            Item::ArrayOfTables(rows) => {
+                let mut drop_rows = Vec::new();
+                let mut n = 0usize;
+                for (i, row) in rows.iter_mut().enumerate() {
+                    if row
+                        .get("command")
+                        .and_then(Item::as_str)
+                        .is_some_and(is_ours)
+                    {
+                        n += 1;
+                        drop_rows.push(i);
+                        continue;
+                    }
+                    let had_hooks = row.contains_key("hooks");
+                    let k = prune_toml_hooks(row, harness_id, aliases);
+                    n += k;
+                    // A matcher group whose inner hooks were all ours is dropped.
+                    if k > 0 && (row.is_empty() || (had_hooks && !row.contains_key("hooks"))) {
+                        drop_rows.push(i);
+                    }
+                }
+                for i in drop_rows.into_iter().rev() {
+                    rows.remove(i);
+                }
+                removed += n;
+                n > 0 && rows.is_empty()
+            }
+            Item::None => false,
+        };
+        if drop_key {
+            table.remove(&key);
+        }
+    }
+    removed
 }
 
 /// Remove flat `[[<list_key>]]` rows (e.g. Kimi Code / Mistral Vibe
@@ -632,17 +654,28 @@ pub(crate) fn remove_toml_list_hooks(
     aliases: &[String],
 ) -> anyhow::Result<usize> {
     let data = std::fs::read_to_string(path)?;
-    if !data.contains("agent-hooks") {
-        return Ok(0);
-    }
     let mut doc: toml_edit::Document = data
         .parse()
         .map_err(|e| anyhow::anyhow!("{}: invalid TOML: {e}", path.display()))?;
-    let Some(rows) = doc
+    let removed = prune_toml_list_hooks(doc.as_table_mut(), list_key, harness_id, aliases);
+    if removed > 0 {
+        write_atomic(path, &doc.to_string())?;
+    }
+    Ok(removed)
+}
+
+/// In-memory core of [`remove_toml_list_hooks`].
+pub(crate) fn prune_toml_list_hooks(
+    table: &mut toml_edit::Table,
+    list_key: &str,
+    harness_id: &str,
+    aliases: &[String],
+) -> usize {
+    let Some(rows) = table
         .get_mut(list_key)
         .and_then(toml_edit::Item::as_array_of_tables_mut)
     else {
-        return Ok(0);
+        return 0;
     };
     let ours: Vec<usize> = rows
         .iter()
@@ -657,13 +690,10 @@ pub(crate) fn remove_toml_list_hooks(
     for &i in ours.iter().rev() {
         rows.remove(i);
     }
-    if !ours.is_empty() {
-        if rows.is_empty() {
-            doc.remove(list_key);
-        }
-        atomic_write(path, &doc.to_string())?;
+    if !ours.is_empty() && rows.is_empty() {
+        table.remove(list_key);
     }
-    Ok(ours.len())
+    ours.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -750,7 +780,7 @@ fn prune_json_key(path: &std::path::Path, pointer: &str) -> bool {
     }
     node.as_object_mut().map(|m| m.remove(last));
     match serde_json::to_string_pretty(&root) {
-        Ok(pretty) => atomic_write(path, &(pretty + "\n")).is_ok(),
+        Ok(pretty) => write_atomic(path, &(pretty + "\n")).is_ok(),
         Err(_) => false,
     }
 }

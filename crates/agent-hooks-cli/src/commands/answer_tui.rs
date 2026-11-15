@@ -564,12 +564,10 @@ async fn run_loop(client: &AgentHooksClient, out: &mut Stdout) -> anyhow::Result
                     KeyCode::Char('d') => {
                         d.focus = Focus::Deny;
                     }
-                    KeyCode::Enter => {
-                        if try_submit_allow(client, d).await {
-                            detail = None;
-                            backlog = refresh(client).await;
-                            last_refresh = Instant::now();
-                        }
+                    KeyCode::Enter if try_submit_allow(client, d).await => {
+                        detail = None;
+                        backlog = refresh(client).await;
+                        last_refresh = Instant::now();
                     }
                     _ => {}
                 },

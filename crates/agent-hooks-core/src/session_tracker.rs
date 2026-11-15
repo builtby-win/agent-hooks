@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use agent_hooks_protocol::{AgentEvent, AgentLifecycle, NormalizedStatus};
 
@@ -80,8 +81,8 @@ impl SessionInfo {
             status: event.status,
             last_event,
             last_lifecycle_name: Some(event.lifecycle.name().to_string()),
-            created_at_ms: event.timestamp_ms,
-            updated_at_ms: event.timestamp_ms,
+            created_at_ms: event.timestamp_ms.min(SessionTracker::now_ms()),
+            updated_at_ms: event.timestamp_ms.min(SessionTracker::now_ms()),
             event_count: 1,
         }
     }
@@ -121,10 +122,12 @@ impl SessionInfo {
             git_worktree,
         };
         self.last_lifecycle_name = Some(event.lifecycle.name().to_string());
-        self.updated_at_ms = event.timestamp_ms;
+        // Clamp to now: a future-dated event must not make a session immortal.
+        let timestamp_ms = event.timestamp_ms.min(SessionTracker::now_ms());
+        self.updated_at_ms = timestamp_ms;
         self.event_count += 1;
         if self.created_at_ms == 0 {
-            self.created_at_ms = event.timestamp_ms;
+            self.created_at_ms = timestamp_ms;
         }
     }
 }
@@ -133,6 +136,10 @@ impl SessionInfo {
 /// insert (`track`) and on `sessions.list`, so tracker memory stays bounded
 /// no matter how many sessions ever connect.
 pub const SESSION_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Minimum spacing between insert-triggered expiry sweeps (a sweep scans every
+/// session under the write lock). `evict_idle_expired` always sweeps.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Composite session identity: a `session_id` is only unique within its
 /// harness. Two harnesses reusing one `session_id` are two independent
@@ -164,6 +171,8 @@ pub struct SessionTracker {
     sessions: HashMap<SessionKey, SessionInfo>,
     /// parent session key -> child session keys (same-harness parentage)
     children: HashMap<SessionKey, HashSet<SessionKey>>,
+    /// When the insert sweep last ran; it is rate-limited to `SWEEP_INTERVAL`.
+    last_sweep: Option<Instant>,
 }
 
 impl SessionTracker {
@@ -261,7 +270,12 @@ impl SessionTracker {
         // stays bounded. The session just written is never expired by its own
         // insert, and sessions with live holds are protected while held.
         // Cleanup on SessionEnd / terminal Stop if desired — we keep the record but mark inactive.
-        self.sweep_expired(Self::now_ms(), protected_event_ids, Some(&key));
+        if self
+            .last_sweep
+            .is_none_or(|at| at.elapsed() >= SWEEP_INTERVAL)
+        {
+            self.sweep_expired(Self::now_ms(), protected_event_ids, Some(&key));
+        }
     }
 
     /// Get a snapshot of a single session, addressed by composite identity.
@@ -347,11 +361,13 @@ impl SessionTracker {
     pub fn remove(&mut self, harness: &str, session_id: &str) -> Option<SessionInfo> {
         let key = SessionKey::new(harness, session_id);
         let info = self.sessions.remove(&key)?;
-        // Remove from children maps where it appears as child.
-        for set in self.children.values_mut() {
+        // Remove from children maps where it appears as child, dropping sets
+        // that become empty, and drop its own children entry (orphans remain
+        // as roots).
+        self.children.retain(|_, set| {
             set.remove(&key);
-        }
-        // Remove its own children entry (orphans remain as roots).
+            !set.is_empty()
+        });
         self.children.remove(&key);
         // Clean parent entry if this session was a parent with empty set already handled.
         Some(info)
@@ -399,6 +415,7 @@ impl SessionTracker {
         protected_event_ids: &[String],
         keep: Option<&SessionKey>,
     ) -> usize {
+        self.last_sweep = Some(Instant::now());
         let expired: Vec<SessionKey> = self
             .sessions
             .iter()
@@ -671,14 +688,21 @@ mod tests {
         tracker.track(&old);
         // The session just written is never expired by its own insert.
         assert!(tracker.get("claude-code", "old").is_some());
-        // The next insert sweeps it once it is idle past the TTL.
-        tracker.track(&mk_event(
-            "fresh",
-            None,
-            AgentLifecycle::SessionStart {
-                resume_command: None,
-            },
-        ));
+        let fresh = || {
+            mk_event(
+                "fresh",
+                None,
+                AgentLifecycle::SessionStart {
+                    resume_command: None,
+                },
+            )
+        };
+        // The insert sweep is rate-limited: an insert right after one sweeps nothing.
+        tracker.track(&fresh());
+        assert!(tracker.get("claude-code", "old").is_some());
+        // Once the interval has elapsed the next insert sweeps it (idle past the TTL).
+        tracker.last_sweep = None;
+        tracker.track(&fresh());
         assert!(tracker.get("claude-code", "old").is_none());
         assert!(tracker.get("claude-code", "fresh").is_some());
     }

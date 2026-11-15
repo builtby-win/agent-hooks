@@ -103,8 +103,8 @@ fn list(args: PluginListArgs) -> Result<()> {
     }
 
     println!(
-        "{:<24} {:<10} {:<10} {:<10} {}",
-        "NAME", "VERSION", "SCOPE", "STATUS", "DESCRIPTION"
+        "{:<24} {:<10} {:<10} {:<10} DESCRIPTION",
+        "NAME", "VERSION", "SCOPE", "STATUS"
     );
     println!(
         "{:-<24} {:-<10} {:-<10} {:-<10} {:-<30}",

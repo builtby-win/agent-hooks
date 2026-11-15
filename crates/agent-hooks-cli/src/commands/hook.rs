@@ -75,8 +75,14 @@ pub fn default_socket_path() -> PathBuf {
     PathBuf::from(agent_hooks_protocol::default_socket_path())
 }
 
-/// Entry point for `agent-hooks hook`.
+/// Entry point for `agent-hooks hook`. An internal panic must never reach the
+/// harness as exit 101: fail open with no verdict instead.
 pub fn run(args: HookArgs) -> anyhow::Result<()> {
+    let _ = std::panic::catch_unwind(|| run_inner(args));
+    Ok(())
+}
+
+fn run_inner(args: HookArgs) -> anyhow::Result<()> {
     // Resolve harness_hint / raw_payload with JSON-first-arg quirk handling.
     // See `resolve_harness_and_payload`.
     let (harness_hint, raw_payload) = resolve_harness_and_payload(&args);
@@ -130,7 +136,7 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
     // (no event, no match), best-effort daemon forward, observe/empty dialect
     // below, exit 0. Never error-exit on unknown events.
     if let Some(msg) = parse_failure_warning(parsed.as_ref(), args.event.as_deref()) {
-        eprintln!("{msg}");
+        let _ = writeln!(std::io::stderr(), "{msg}");
     }
     let event = parsed.and_then(|r| r.ok());
 
@@ -147,7 +153,7 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
             super::user_hooks::load_merged(&mut Default::default(), Some(root));
     }
     for warning in &cfg_warnings {
-        eprintln!("agent-hooks: {warning}");
+        let _ = writeln!(std::io::stderr(), "agent-hooks: {warning}");
     }
 
     // 4. Deterministic local hooks from ~/.agent-hooks/hooks.json overlaid with
@@ -183,7 +189,7 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
     //    everything else gets exactly 1 attempt (fail fast). A received
     //    verdict is final, never re-requested. Exhaustion fails open to the
     //    local decision with one stderr warning — never block the agent.
-    let gate = is_gate_event(adapter.as_ref(), event.as_ref());
+    let gate = is_gate_event(adapter.as_deref(), event.as_ref());
     let attempts = if gate { GATE_MAX_ATTEMPTS } else { 1 };
     // Consumer context (`--context-cmd`) only matters when a daemon send will
     // happen: skipped once the budget is gone or no daemon socket exists.
@@ -231,18 +237,24 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
     }
     // Whatever the scripts (and context command) already spent comes out of
     // the daemon's share.
-    let wait = forward_timeout(adapter.as_ref(), event.as_ref(), budget);
+    let wait = forward_timeout(adapter.as_deref(), event.as_ref(), budget);
     // Budget already gone to local scripts: skip the daemon rather than
     // overrun the harness and have the whole decision discarded. Whatever the
     // scripts returned still stands; nothing returned still means proceed.
     let daemon_raw: Option<String> = if budget.spent() {
-        eprintln!("agent-hooks: harness budget spent by local hooks; skipping daemon forward");
+        let _ = writeln!(
+            std::io::stderr(),
+            "agent-hooks: harness budget spent by local hooks; skipping daemon forward"
+        );
         None
     } else {
         match agent_hooks_protocol::hook_line_with_extensions(&input, &extensions) {
             Ok(line) => forward_to_all(&sockets, &line, wait, attempts, gate),
             Err(e) => {
-                eprintln!("agent-hooks: cannot serialize hook input: {e}; skipping daemon forward");
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "agent-hooks: cannot serialize hook input: {e}; skipping daemon forward"
+                );
                 None
             }
         }
@@ -271,14 +283,14 @@ pub fn run(args: HookArgs) -> anyhow::Result<()> {
             {
                 if let Some(reason) = decision.custom_input.clone() {
                     if !reason.is_empty() {
-                        eprintln!("{}", reason);
+                        let _ = writeln!(std::io::stderr(), "{reason}");
                     }
                 }
                 std::process::exit(2);
             }
             let daemon_stdout = extract_daemon_stdout(daemon_raw.as_deref());
-            let out_str = if decision.allow && daemon_stdout.is_some() {
-                daemon_stdout.unwrap()
+            let out_str = if let (true, Some(stdout)) = (decision.allow, daemon_stdout) {
+                stdout
             } else {
                 let formatted = adapter.format_response(&decision);
                 serde_json::to_string(&formatted).unwrap_or_else(|_| {
@@ -480,7 +492,7 @@ fn record_history(event: Option<&AgentEvent>, origin: Option<&str>) {
         Ok(w) => w,
         Err(HistoryError::Disabled(_)) => return,
         Err(e) => {
-            eprintln!("agent-hooks: history capture skipped: {e}");
+            let _ = writeln!(std::io::stderr(), "agent-hooks: history capture skipped: {e}");
             return;
         }
     };
@@ -488,7 +500,7 @@ fn record_history(event: Option<&AgentEvent>, origin: Option<&str>) {
         .set_busy_timeout(HISTORY_LOCK_WAIT)
         .and_then(|()| writer.record(&capture).map(drop));
     if let Err(e) = result {
-        eprintln!("agent-hooks: history write failed: {e}");
+        let _ = writeln!(std::io::stderr(), "agent-hooks: history write failed: {e}");
     }
 }
 
@@ -582,6 +594,8 @@ fn collect_payload(trailing: &[String], read_stdin: &mut dyn FnMut() -> Option<S
     }
 }
 
+const MAX_STDIN_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Production stdin source: terminal (interactive, no pipe) yields `None`
 /// instead of blocking; otherwise read the pipe fully as bytes and decode
 /// lossily — invalid UTF-8 never panics, it degrades to U+FFFD and the
@@ -591,8 +605,10 @@ fn read_piped_stdin() -> Option<String> {
     if stdin.is_terminal() {
         return None;
     }
+    // Capped so a runaway writer cannot exhaust memory; beyond the cap the
+    // payload is truncated, fails to parse, and the event fails open.
     let mut buf = Vec::new();
-    let mut handle = stdin.lock();
+    let mut handle = stdin.lock().take(MAX_STDIN_BYTES);
     match handle.read_to_end(&mut buf) {
         Ok(_) => Some(String::from_utf8_lossy(&buf).into_owned()),
         Err(_) => Some(String::new()),
@@ -927,7 +943,8 @@ fn run_context_cmd(
     let start = Instant::now();
     let result = context_cmd_output(cmd, harness, event, session, timeout);
     if debug_enabled() {
-        eprintln!(
+        let _ = writeln!(
+            std::io::stderr(),
             "agent-hooks: context-cmd {} took {:?} ({})",
             cmd.display(),
             start.elapsed(),
@@ -937,7 +954,8 @@ fn run_context_cmd(
     match result {
         Ok(map) => map,
         Err(reason) => {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr(),
                 "agent-hooks: context-cmd {}: {reason}; continuing without context",
                 cmd.display()
             );
@@ -1045,7 +1063,7 @@ fn parse_context_output(out: &[u8]) -> Result<serde_json::Map<String, serde_json
 /// only gate events (`PreToolUse`, `PermissionRequest`, …) may wait long and
 /// retry; observe/continue (and unparseable inputs) fail fast with 1 attempt.
 fn is_gate_event(
-    adapter: Option<&Box<dyn agent_hooks_adapters::HarnessAdapter>>,
+    adapter: Option<&dyn agent_hooks_adapters::HarnessAdapter>,
     event: Option<&AgentEvent>,
 ) -> bool {
     match (adapter, event) {
@@ -1063,7 +1081,7 @@ fn is_gate_event(
 /// open for a human verdict, so they out-wait the daemon's own prompt
 /// timeout; observe/continue (and unparseable inputs) fail fast.
 fn forward_timeout(
-    adapter: Option<&Box<dyn agent_hooks_adapters::HarnessAdapter>>,
+    adapter: Option<&dyn agent_hooks_adapters::HarnessAdapter>,
     event: Option<&AgentEvent>,
     budget: Budget,
 ) -> Duration {
@@ -1163,7 +1181,8 @@ fn forward_with_retries(
             }
         }
     }
-    eprintln!(
+    let _ = writeln!(
+        std::io::stderr(),
         "agent-hooks: daemon unreachable after {attempts} attempt(s); failing open to local decision"
     );
     None
@@ -1282,11 +1301,31 @@ fn try_forward_unix(
 ) -> anyhow::Result<Option<String>> {
     use std::os::unix::net::UnixStream;
 
-    let mut stream = UnixStream::connect(socket_path).map_err(|e| anyhow::anyhow!(e))?;
+    // Zero budget left: no deadline can be armed (a zero timeout is
+    // rejected), so fail open without touching the socket.
+    if wait.is_zero() {
+        return Ok(None);
+    }
+    // Connect on a thread so a full backlog cannot outlast the budget. A
+    // late connection is dropped by the thread when nobody is listening.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = socket_path.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(UnixStream::connect(path));
+    });
+    let started = Instant::now();
+    let Ok(connected) = rx.recv_timeout(wait) else {
+        return Ok(None);
+    };
+    let mut stream = connected.map_err(|e| anyhow::anyhow!(e))?;
+    let wait = wait.saturating_sub(started.elapsed());
+    if wait.is_zero() {
+        return Ok(None);
+    }
     // Write budget stays short; the read budget is capability-aware
     // (FAST_WAIT for observe, GATE_WAIT for human permission dialogs).
-    stream.set_read_timeout(Some(wait)).ok();
-    stream.set_write_timeout(Some(FAST_WAIT)).ok();
+    stream.set_read_timeout(Some(wait))?;
+    stream.set_write_timeout(Some(FAST_WAIT))?;
 
     // NDJSON framing: one JSON line.
     let mut to_send = payload.to_string();
@@ -1383,20 +1422,6 @@ fn try_forward_windows(
     }
 }
 
-#[cfg(unix)]
-#[allow(dead_code)]
-fn _connect_with_timeout(
-    path: &Path,
-    timeout: Duration,
-) -> std::io::Result<std::os::unix::net::UnixStream> {
-    use std::os::unix::net::UnixStream;
-    // UnixStream::connect_timeout not stable; emulate with non-blocking connect.
-    // For now use blocking connect with set timeout via alarm-like approach:
-    // just use connect (fast failure if missing) — timeout matters only when
-    // daemon is overloaded and backlog full.
-    let _ = timeout;
-    UnixStream::connect(path)
-}
 #[cfg(test)]
 mod tests {
 
@@ -1753,7 +1778,7 @@ mod tests {
         );
         let unbudgeted = Budget::new(None);
         assert_eq!(
-            forward_timeout(Some(&adapter), Some(&gate), unbudgeted),
+            forward_timeout(Some(adapter.as_ref()), Some(&gate), unbudgeted),
             GATE_WAIT
         );
         assert!(GATE_WAIT > Duration::from_secs(300));
@@ -1767,7 +1792,7 @@ mod tests {
             Some(agent_hooks_adapters::manifest::Capability::Observe)
         );
         assert_eq!(
-            forward_timeout(Some(&adapter), Some(&observe), unbudgeted),
+            forward_timeout(Some(adapter.as_ref()), Some(&observe), unbudgeted),
             FAST_WAIT
         );
 
@@ -1779,7 +1804,7 @@ mod tests {
         let adapter = wait_test_adapter();
         let gate = adapter.parse_event(&wait_test_input("preToolUse")).unwrap();
         let budgeted = Budget::new(Some(Duration::from_secs(30)));
-        let capped = forward_timeout(Some(&adapter), Some(&gate), budgeted);
+        let capped = forward_timeout(Some(adapter.as_ref()), Some(&gate), budgeted);
         assert!(
             capped <= Duration::from_secs(28) && capped >= Duration::from_secs(27),
             "30s harness budget should cap the gate wait near 28s, got {capped:?}"

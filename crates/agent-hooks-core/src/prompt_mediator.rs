@@ -366,8 +366,22 @@ impl PromptMediator {
         }
     }
 
-    /// Remove a prompt and its key/claim index rows. Idempotent.
-    async fn remove_prompt(&self, prompt_id: &str) {
+    /// Every hold exit (answer, timeout, cancel) converges here, after the
+    /// exiting waiter dropped its receiver. A prompt goes with its last
+    /// waiter: while a joined waiter (a shim retry, a duplicate delivery) is
+    /// still listening, only the closed senders are dropped. Idempotent.
+    pub(crate) async fn remove_prompt(&self, prompt_id: &str) {
+        // pending is taken first, matching the documented pending → info order.
+        {
+            let mut pending = self.pending.lock().await;
+            if let Some(waiters) = pending.get_mut(prompt_id) {
+                waiters.retain(|tx| !tx.is_closed());
+                if !waiters.is_empty() {
+                    return;
+                }
+                pending.remove(prompt_id);
+            }
+        }
         if let Some((session_id, key)) = self.prompt_key.lock().await.remove(prompt_id) {
             let mut index = self.key_index.lock().await;
             if index.get(&(session_id.clone(), key.clone())) == Some(&prompt_id.to_string()) {

@@ -35,7 +35,7 @@ fn folder_and_flat_layouts_are_discovered() {
     write_folder(&tier, "acme-cli", "Acme Folder");
     write_flat(&tier, "flat-co", "Flat Co");
 
-    let loaded = AdapterManifest::load_tiered_from(&[tier.clone()]);
+    let loaded = AdapterManifest::load_tiered_from(std::slice::from_ref(&tier));
     let ids = ids(&loaded);
     assert!(
         ids.contains(&"acme-cli".to_string()),
@@ -89,7 +89,7 @@ fn meta_sidecars_and_broken_manifests_are_skipped() {
     fs::write(tier.join("good.meta.json"), r#"{"source":"somewhere"}"#).unwrap();
     fs::write(tier.join("broken.json"), r#"{"id": 12345}"#).unwrap();
 
-    let loaded = AdapterManifest::load_tiered_from(&[tier.clone()]);
+    let loaded = AdapterManifest::load_tiered_from(std::slice::from_ref(&tier));
     let ids = ids(&loaded);
     // Only the good tier manifest precedes embedded; sidecar and broken
     // files are skipped with a warning, never fatal.
@@ -114,7 +114,7 @@ fn extends_across_tiers_inherits_embedded_base() {
     )
     .unwrap();
 
-    let loaded = AdapterManifest::load_tiered_from(&[project.clone()]);
+    let loaded = AdapterManifest::load_tiered_from(std::slice::from_ref(&project));
     let resolved = AdapterManifest::resolve_all(&loaded).unwrap();
     let mine = resolved.iter().find(|m| m.id == "my-antigravity").unwrap();
     assert_eq!(mine.display_name, "My Antigravity");

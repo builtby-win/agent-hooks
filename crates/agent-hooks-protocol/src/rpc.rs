@@ -282,6 +282,11 @@ pub struct PromptRespondParams {
     pub decision: PromptDecision,
 }
 
+/// Longest line either side of the socket accepts. Hook payloads carry full
+/// tool input/output, so this is generous; it only exists so a peer cannot
+/// grow memory unboundedly. Shared so daemon and client can never disagree.
+pub const MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Default Unix Domain Socket path.
 pub const DEFAULT_UNIX_SOCKET_PATH: &str = "/tmp/agent-hooks.sock";
 

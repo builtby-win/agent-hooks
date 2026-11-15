@@ -4,14 +4,14 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use agent_hooks_protocol::rpc::event_passes_filter;
+use agent_hooks_protocol::rpc::{event_passes_filter, MAX_LINE_BYTES};
 use agent_hooks_protocol::{
     AgentEvent, Decide, DecideScope, NormalizedStatus, PromptDecision, SubscriptionFilter,
 };
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::error::ClientError;
@@ -269,7 +269,7 @@ impl AgentHooksClient {
         &self,
         input: &agent_hooks_protocol::RawHookInput,
     ) -> Result<Option<String>, ClientError> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::io::{AsyncWriteExt, BufReader};
         let mut stream = connect_stream(&self.path).await?;
         let mut line = agent_hooks_protocol::hook_line_with_extensions(input, &Default::default())
             .map_err(ClientError::Serialization)?;
@@ -283,7 +283,7 @@ impl AgentHooksClient {
 
         let mut reader = BufReader::new(stream);
         let mut buf = String::new();
-        let n = reader.read_line(&mut buf).await.map_err(ClientError::Io)?;
+        let n = read_line_bounded(&mut reader, &mut buf).await?;
         if n == 0 {
             Ok(None)
         } else {
@@ -298,7 +298,8 @@ impl AgentHooksClient {
     /// Returns a `Stream<Item = AgentEvent>` that resiliently reconnects
     /// on disconnect with exponential back-off.  The optional `filter` is sent
     /// to the server (if supported) and also applied client-side as a
-    /// fallback.
+    /// fallback.  A daemon that rejects the subscription (e.g. a filter it
+    /// cannot parse) ends the stream: retrying would be refused again.
     ///
     /// The stream is lazy: the background task is spawned on call and the
     /// first poll will trigger a connection attempt.  Dropping the stream
@@ -313,6 +314,7 @@ impl AgentHooksClient {
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_millis(200);
+            let mut failures = 0u32;
             const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
             loop {
@@ -321,29 +323,43 @@ impl AgentHooksClient {
                     break;
                 }
 
+                let started = std::time::Instant::now();
                 match subscribe_once(&path, filter_for_task.clone(), &tx).await {
                     Ok(()) => {
                         tracing::debug!("event stream ended cleanly, reconnecting");
                     }
-                    Err(ClientError::InvalidResponse(_)) => {
-                        // Parse-level errors are not retryable at transport level
-                        // but the stream itself should still reconnect.
-                        tracing::warn!("event stream parse error, reconnecting");
+                    // The daemon answered and refused this subscription;
+                    // the same request would be refused again, so the stream
+                    // ends instead of going silent behind endless retries.
+                    Err(e @ ClientError::Rpc { .. }) => {
+                        tracing::error!("event stream rejected by daemon: {e}");
+                        break;
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "event stream disconnected: {e}, reconnecting in {backoff:?}"
-                        );
+                        // Warn on the first failure only; a dead daemon would
+                        // otherwise log every few seconds forever.
+                        if failures == 0 {
+                            tracing::warn!("event stream disconnected: {e}, reconnecting");
+                        } else {
+                            tracing::debug!("event stream disconnected: {e}, reconnecting");
+                        }
+                        failures += 1;
                     }
                 }
 
                 if tx.is_closed() {
                     break;
                 }
-                tokio::time::sleep(backoff).await;
+                // A session that outlived the cap was healthy: start over.
+                if started.elapsed() > MAX_BACKOFF {
+                    backoff = Duration::from_millis(200);
+                    failures = 0;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = tx.closed() => break,
+                }
                 backoff = (backoff * 2).min(MAX_BACKOFF);
-                // Jitter could be added here; simple capped exponential is
-                // sufficient for resilience without panics.
             }
         });
 
@@ -462,7 +478,14 @@ impl AgentHooksClient {
     // -- internal RPC helpers -------------------------------------------------
 
     async fn rpc_call(&self, method: &str, params: Option<Value>) -> Result<Value, ClientError> {
-        self.rpc_call_with_retry(method, params, 3).await
+        // prompt.respond is not idempotent: a retry after a lost reply would
+        // come back PromptNotFound and report a delivered answer as an error.
+        let attempts = if matches!(method, "prompt.respond" | "respond_prompt") {
+            1
+        } else {
+            3
+        };
+        self.rpc_call_with_retry(method, params, attempts).await
     }
 
     async fn rpc_call_with_fallback(
@@ -554,6 +577,23 @@ async fn connect_stream(
     Ok(stream)
 }
 
+async fn read_line_bounded<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut String,
+) -> Result<usize, ClientError> {
+    let n = (&mut *reader)
+        .take(MAX_LINE_BYTES + 1)
+        .read_line(buf)
+        .await
+        .map_err(ClientError::Io)?;
+    if n as u64 > MAX_LINE_BYTES {
+        return Err(ClientError::InvalidResponse(format!(
+            "line exceeds {MAX_LINE_BYTES} bytes"
+        )));
+    }
+    Ok(n)
+}
+
 async fn try_rpc_call(
     path: &str,
     id: u64,
@@ -581,10 +621,9 @@ async fn try_rpc_call(
     // Read one line response with timeout
     let mut reader = BufReader::new(stream);
     let mut buf = String::new();
-    let n = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut buf))
+    let n = tokio::time::timeout(Duration::from_secs(5), read_line_bounded(&mut reader, &mut buf))
         .await
-        .map_err(|_| ClientError::Timeout)?
-        .map_err(ClientError::Io)?;
+        .map_err(|_| ClientError::Timeout)??;
 
     if n == 0 {
         return Err(ClientError::Disconnected);
@@ -647,12 +686,13 @@ async fn subscribe_once(
     loop {
         buf.clear();
 
-        // Check if receiver still wants data before blocking on read.
-        if tx.is_closed() {
-            return Ok(());
-        }
-
-        let n = reader.read_line(&mut buf).await.map_err(ClientError::Io)?;
+        // Return as soon as the consumer drops the stream, even if the daemon
+        // is quiet. Cancelling the read is fine: we exit rather than resume
+        // with a partial line.
+        let n = tokio::select! {
+            read = read_line_bounded(&mut reader, &mut buf) => read?,
+            _ = tx.closed() => return Ok(()),
+        };
         if n == 0 {
             return Err(ClientError::Disconnected);
         }
@@ -665,7 +705,7 @@ async fn subscribe_once(
         if let Ok(event) = serde_json::from_str::<AgentEvent>(trimmed) {
             if filter
                 .as_ref()
-                .map_or(true, |f| event_passes_filter(&event, f))
+                .is_none_or(|f| event_passes_filter(&event, f))
                 && tx.send(event).await.is_err()
             {
                 return Ok(());
@@ -679,7 +719,7 @@ async fn subscribe_once(
                 if let Ok(event) = serde_json::from_value::<AgentEvent>(notif.params.clone()) {
                     if filter
                         .as_ref()
-                        .map_or(true, |f| event_passes_filter(&event, f))
+                        .is_none_or(|f| event_passes_filter(&event, f))
                         && tx.send(event).await.is_err()
                     {
                         return Ok(());
@@ -692,7 +732,7 @@ async fn subscribe_once(
                         if let Ok(event) = serde_json::from_value::<AgentEvent>(inner.clone()) {
                             if filter
                                 .as_ref()
-                                .map_or(true, |f| event_passes_filter(&event, f))
+                                .is_none_or(|f| event_passes_filter(&event, f))
                                 && tx.send(event).await.is_err()
                             {
                                 return Ok(());
@@ -727,7 +767,7 @@ async fn subscribe_once(
                     if let Ok(event) = serde_json::from_value::<AgentEvent>(ev.clone()) {
                         if filter
                             .as_ref()
-                            .map_or(true, |f| event_passes_filter(&event, f))
+                            .is_none_or(|f| event_passes_filter(&event, f))
                             && tx.send(event).await.is_err()
                         {
                             return Ok(());

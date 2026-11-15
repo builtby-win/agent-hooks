@@ -76,7 +76,7 @@ fn backfill_imports_muse_sessions_incrementally_and_idempotently() {
     std::fs::write(view.join("session.jsonl"), "{\"payload_type\":\"x\"}\n").unwrap();
     let log = session_dir.join("session.jsonl");
 
-    let mut lines: Vec<String> = vec![
+    let mut lines: Vec<String> = [
         frame(&[
             record(1, "runtime.session.metadata", json!({"kind": "metadata", "record": {"workspace_root": "/work/proj"}})),
             record(2, "runtime.session.permission_format_declared", json!({"format": "profile_v1"})),

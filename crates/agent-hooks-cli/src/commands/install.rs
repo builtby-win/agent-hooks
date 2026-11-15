@@ -217,7 +217,17 @@ fn strip_jsonc(input: &str) -> String {
 /// the path and reason) when the content is still unparseable — callers MUST
 /// skip the file, never overwrite user content with `{}`.
 fn load_json_doc(path: &Path) -> Option<serde_json::Value> {
-    let data = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
+    let data = match read_config(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "  warning: {}: skipping unreadable config ({})",
+                path.display(),
+                e
+            );
+            return None;
+        }
+    };
     match serde_json::from_str(&strip_jsonc(&data)) {
         Ok(v) => Some(v),
         Err(e) => {
@@ -231,33 +241,54 @@ fn load_json_doc(path: &Path) -> Option<serde_json::Value> {
     }
 }
 
+/// Read a config file. Only a missing file reads as empty; any other error
+/// (EACCES, EISDIR, non-UTF-8) is returned so an unreadable config is never
+/// treated as empty and overwritten.
+fn read_config(path: &Path) -> std::io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        result => result,
+    }
+}
+
 /// Atomically write `contents` to `path`: temp file in the same directory +
-/// rename, so a crash mid-write never leaves a truncated config behind.
-fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+/// rename, so a crash mid-write never leaves a truncated config behind. A
+/// symlinked config is edited through the link (the link stays a link) and
+/// the existing file's permissions carry over to the new file.
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let tmp = PathBuf::from(format!("{}.tmp-{}", path.display(), std::process::id()));
-    std::fs::write(&tmp, contents)?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(path.file_name().unwrap_or_default());
+    name.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let tmp = path.with_file_name(name);
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            file.set_permissions(meta.permissions())?;
+        }
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &path)
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
-        return Err(e);
     }
-    Ok(())
-}
-
-/// True when a hook `command` string is one of ours: it invokes agent-hooks
-/// for this harness id or one of its manifest aliases. Comparisons use
-/// [`normalize_hint`] (case-insensitive, `_`/space/`-` equivalent).
-fn entry_is_ours(command: &str, id_norm: &str, alias_norms: &[String]) -> bool {
-    let norm = normalize_hint(command);
-    norm.contains("agent-hooks")
-        && (norm.contains(id_norm)
-            || alias_norms
-                .iter()
-                .any(|a| !a.is_empty() && norm.contains(a.as_str())))
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +353,6 @@ pub fn run_collect(args: InstallArgs, user_only: bool) -> anyhow::Result<Vec<Har
             manifest,
             version,
             &binary,
-            &args.socket,
             args.adapter_version.as_deref(),
             !is_all,
             user_only,
@@ -488,7 +518,6 @@ fn install_for_manifest(
     manifest: &AdapterManifest,
     version: &str,
     binary: &Path,
-    sockets: &[PathBuf],
     adapter_version: Option<&str>,
     explicit: bool,
     user_only: bool,
@@ -500,7 +529,7 @@ fn install_for_manifest(
         .ok_or_else(|| anyhow::anyhow!("version '{}' not found", version))?;
     let mut ctx = Ctx {
         binary,
-        sockets,
+        sockets: vars.sockets,
         context_cmd: vars.context_cmd,
         origin: vars.origin,
         adapter_version,
@@ -781,9 +810,7 @@ fn remove_stale_ours(
     harness_id: &str,
     aliases: &[String],
 ) -> bool {
-    let id_norm = normalize_hint(harness_id);
-    let alias_norms: Vec<String> = aliases.iter().map(|a| normalize_hint(a)).collect();
-    let is_ours = |s: &str| entry_is_ours(s, &id_norm, &alias_norms);
+    let is_ours = |s: &str| crate::commands::uninstall::command_is_ours(s, harness_id, aliases);
     let mut removed = false;
     entries.retain_mut(|entry| {
         if let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
@@ -1063,30 +1090,25 @@ fn op_json_hooks(
 
 /// Reconcile our TOML hook rows with the commands this install would write.
 /// `None`: the file already holds exactly `commands` (idempotent no-op).
-/// `Some(text)`: the file content with every row of ours removed (stale
+/// `Some(doc)`: the parsed file with every row of ours removed (stale
 /// binary, socket, or context from an earlier install, including quoted
-/// paths with spaces), ready for a fresh block to be appended.
+/// paths with spaces), ready for a fresh block to be appended. Unparseable
+/// TOML is an error: nothing is written.
 fn reconcile_toml_commands(
     target: &Path,
-    existing: String,
+    existing: &str,
     manifest: &AdapterManifest,
     commands: &[String],
-    remove_ours: impl FnOnce(&PathBuf) -> anyhow::Result<usize>,
-) -> anyhow::Result<Option<String>> {
-    let count_ours = |text: &str| {
-        text.lines()
-            .filter(|l| {
-                !l.trim_start().starts_with('#')
-                    && l.contains("--event")
-                    && crate::commands::uninstall::command_is_ours(
-                        l,
-                        &manifest.id,
-                        &manifest.aliases,
-                    )
-            })
-            .count()
-    };
-    let ours = count_ours(&existing);
+    remove_ours: impl FnOnce(&mut toml_edit::Table) -> usize,
+) -> anyhow::Result<Option<toml_edit::Document>> {
+    let mut doc: toml_edit::Document = existing.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "{}: invalid TOML, not modifying it for '{}' ({e})",
+            target.display(),
+            manifest.id
+        )
+    })?;
+    let ours = remove_ours(doc.as_table_mut());
     // Quote-delimited so a command that is a prefix of a stale one
     // (e.g. one that gained `--socket`) does not read as current.
     if ours == commands.len()
@@ -1096,19 +1118,42 @@ fn reconcile_toml_commands(
     {
         return Ok(None);
     }
-    if ours == 0 {
-        return Ok(Some(existing));
+    Ok(Some(doc))
+}
+
+/// Refuse to append `[<dotted>]` / `[[<dotted>]]` when the document already
+/// defines that path in a way the append would make invalid TOML (a plain
+/// table or value of the same name). Existing arrays of tables may be
+/// appended to when `array_of_tables` is set.
+fn ensure_toml_path_appendable(
+    doc: &toml_edit::Document,
+    target: &Path,
+    dotted: &str,
+    array_of_tables: bool,
+) -> anyhow::Result<()> {
+    let mut table = doc.as_table();
+    let mut segs = dotted.split('.').peekable();
+    while let Some(seg) = segs.next() {
+        let Some(item) = table.get(seg) else {
+            return Ok(());
+        };
+        if segs.peek().is_none() {
+            anyhow::ensure!(
+                array_of_tables && item.is_array_of_tables(),
+                "{}: '{dotted}' already exists; refusing to append a duplicate table (merge the hook by hand)",
+                target.display()
+            );
+            return Ok(());
+        }
+        let Some(next) = item.as_table() else {
+            anyhow::bail!(
+                "{}: '{seg}' (in '{dotted}') is not a table; refusing to write invalid TOML",
+                target.display()
+            );
+        };
+        table = next;
     }
-    remove_ours(&target.to_path_buf())?;
-    let remaining = std::fs::read_to_string(target)?;
-    // Appending beside rows we failed to remove is the duplicate bug; refuse.
-    anyhow::ensure!(
-        count_ours(&remaining) == 0,
-        "{}: could not remove stale agent-hooks rows for '{}'; fix or delete them and retry",
-        target.display(),
-        manifest.id
-    );
-    Ok(Some(remaining))
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1130,11 +1175,7 @@ fn op_toml_hooks(
         return toml_command_hooks(manifest, version, &target, root, ctx);
     }
 
-    let existing = if target.exists() {
-        std::fs::read_to_string(&target).unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let existing = read_config(&target).map_err(|e| anyhow::anyhow!("{}: {e}", target.display()))?;
     let host_events = version_events(manifest, version);
     let commands: Vec<String> = host_events
         .iter()
@@ -1150,12 +1191,22 @@ fn op_toml_hooks(
             )
         })
         .collect();
-    let Some(mut out) = reconcile_toml_commands(&target, existing, manifest, &commands, |p| {
-        crate::commands::uninstall::remove_toml_hooks(p, &manifest.id, &manifest.aliases)
+    let Some(doc) = reconcile_toml_commands(&target, &existing, manifest, &commands, |t| {
+        crate::commands::uninstall::prune_toml_hooks(t, &manifest.id, &manifest.aliases)
     })?
     else {
         return Ok((0, true));
     };
+    for host_event in &host_events {
+        let event_shape = event_entry_shape(manifest, version, entry_shape, host_event);
+        ensure_toml_path_appendable(
+            &doc,
+            &target,
+            &root.replace("{event}", host_event),
+            matches!(event_shape, EntryShape::MatcherGroup | EntryShape::Named),
+        )?;
+    }
+    let mut out = doc.to_string();
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
@@ -1176,7 +1227,7 @@ fn op_toml_hooks(
             // Only reachable through a per-event override; the bare-string
             // form still beats a table jcode-style harnesses can't parse.
             EntryShape::Command => {
-                out.push_str(&format!("{} = \"{}\"\n", dotted, toml_escape(&command)));
+                out.push_str(&format!("{} = \"{}\"\n", dotted, toml_escape(command)));
             }
             EntryShape::MatcherGroup | EntryShape::Named => {
                 out.push_str(&format!("[[{}]]\nmatcher = \"*\"\n", dotted));
@@ -1214,11 +1265,7 @@ fn op_toml_list_hooks(
         return Ok((0, false));
     };
 
-    let existing = if target.exists() {
-        std::fs::read_to_string(&target).unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let existing = read_config(&target).map_err(|e| anyhow::anyhow!("{}: {e}", target.display()))?;
     let host_events = version_events(manifest, version);
     let commands: Vec<String> = host_events
         .iter()
@@ -1234,9 +1281,9 @@ fn op_toml_list_hooks(
             )
         })
         .collect();
-    let Some(mut out) = reconcile_toml_commands(&target, existing, manifest, &commands, |p| {
-        crate::commands::uninstall::remove_toml_list_hooks(
-            p,
+    let Some(doc) = reconcile_toml_commands(&target, &existing, manifest, &commands, |t| {
+        crate::commands::uninstall::prune_toml_list_hooks(
+            t,
             list_key,
             &manifest.id,
             &manifest.aliases,
@@ -1245,6 +1292,8 @@ fn op_toml_list_hooks(
     else {
         return Ok((0, true));
     };
+    ensure_toml_path_appendable(&doc, &target, list_key, true)?;
+    let mut out = doc.to_string();
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
@@ -1294,8 +1343,6 @@ fn toml_command_hooks(
             return Ok((0, existed));
         }
     };
-    let id_norm = normalize_hint(&manifest.id);
-    let alias_norms: Vec<String> = manifest.aliases.iter().map(|a| normalize_hint(a)).collect();
     let mut changed = 0usize;
     let mut present = 0usize;
     for host_event in version_events(manifest, version) {
@@ -1336,7 +1383,12 @@ fn toml_command_hooks(
                 present += 1;
                 continue;
             }
-            Some(cur) if !entry_is_ours(cur, &id_norm, &alias_norms) => {
+            Some(cur)
+                if !crate::commands::uninstall::command_is_ours(
+                    cur,
+                    &manifest.id,
+                    &manifest.aliases,
+                ) => {
                 eprintln!(
                     "  warning: {}: {dotted} already runs another command (one per event); left unchanged",
                     target.display()
@@ -1381,7 +1433,9 @@ fn toml_command_hooks(
         if table
             .get(key)
             .and_then(|i| i.as_str())
-            .is_some_and(|cur| entry_is_ours(cur, &id_norm, &alias_norms))
+            .is_some_and(|cur| {
+                crate::commands::uninstall::command_is_ours(cur, &manifest.id, &manifest.aliases)
+            })
         {
             table.remove(key);
             changed += 1;
@@ -1716,7 +1770,13 @@ fn op_json_edit(
             }
             write_atomic(&path, "{}\n")?;
         }
-        let data = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
+        let data = match read_config(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("  warning: {}: unreadable, skipping ({})", path.display(), e);
+                continue;
+            }
+        };
         let mut doc: serde_json::Value = match serde_json::from_str(&strip_jsonc(&data)) {
             Ok(v) => v,
             Err(e) => {
@@ -1780,12 +1840,21 @@ fn json_edit_backup_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-fn read_json_edit_state(path: &Path) -> serde_json::Map<String, serde_json::Value> {
-    std::fs::read_to_string(json_edit_state_path(path))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default()
+/// Missing sidecar reads as empty; an unreadable or corrupt one is an error
+/// so the recorded originals are never silently overwritten.
+fn read_json_edit_state(
+    path: &Path,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let state_path = json_edit_state_path(path);
+    let data =
+        read_config(&state_path).map_err(|e| anyhow::anyhow!("{}: {e}", state_path.display()))?;
+    if data.trim().is_empty() {
+        return Ok(Default::default());
+    }
+    match serde_json::from_str(&data) {
+        Ok(serde_json::Value::Object(map)) => Ok(map),
+        _ => anyhow::bail!("{}: not a JSON object; fix or delete it", state_path.display()),
+    }
 }
 
 /// First install wins: a reinstall must not overwrite the user's original
@@ -1796,7 +1865,7 @@ fn record_json_edit_state(
     previous: Option<&serde_json::Value>,
     ours: &serde_json::Value,
 ) -> anyhow::Result<()> {
-    let mut state = read_json_edit_state(path);
+    let mut state = read_json_edit_state(path)?;
     if state.contains_key(pointer) {
         return Ok(());
     }
@@ -1832,7 +1901,7 @@ pub(crate) fn revert_json_edit(
             eprintln!("  warning: {}: not JSON, leaving {pointer}", path.display());
             continue;
         };
-        let mut state = read_json_edit_state(&path);
+        let mut state = read_json_edit_state(&path)?;
         let recorded = state.remove(pointer);
         let ours = recorded
             .as_ref()
@@ -2915,7 +2984,6 @@ const SINGLE = '__AGENT_HOOKS_BIN__';
             &manifest,
             &version,
             Path::new("/usr/local/bin/agent-hooks"),
-            &[],
             None,
             true,
             false,

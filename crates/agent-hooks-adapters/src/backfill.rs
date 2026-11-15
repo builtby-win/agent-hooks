@@ -103,13 +103,13 @@ impl ScriptBackfill {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ScriptLine {
-    Record(BackfillRecord),
+    Record(Box<BackfillRecord>),
     Cursor(String),
 }
 
 /// What a script line turned into.
 pub enum ParsedLine {
-    Capture(Capture),
+    Capture(Box<Capture>),
     Cursor(String),
     /// Unparseable, or a record without a session or delivery id.
     Skipped,
@@ -121,7 +121,7 @@ pub fn parse_line(harness: &str, line: &[u8]) -> ParsedLine {
         Ok(ScriptLine::Cursor(cursor)) => ParsedLine::Cursor(cursor),
         Ok(ScriptLine::Record(record)) => record
             .into_capture(harness)
-            .map_or(ParsedLine::Skipped, ParsedLine::Capture),
+            .map_or(ParsedLine::Skipped, |c| ParsedLine::Capture(Box::new(c))),
         Err(_) => ParsedLine::Skipped,
     }
 }
@@ -169,7 +169,7 @@ impl RecordSource for ScriptBackfill {
                 Ok(line) => match parse_line(&self.harness, &line) {
                     ParsedLine::Cursor(c) => new_cursor = Some(c),
                     ParsedLine::Capture(c) => {
-                        if sink(Some(c)).is_break() {
+                        if sink(Some(*c)).is_break() {
                             stopped = Some(None);
                             break;
                         }

@@ -288,7 +288,7 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
                 exists = true;
                 found_path.get_or_insert_with(|| p.clone());
                 existing_files.push(p.clone());
-                let (inst, count) = count_hooks_in_file(p);
+                let (inst, count) = count_hooks_in_file(p, &m.id, &m.aliases);
                 if inst {
                     installed = true;
                     hook_count += count;
@@ -383,49 +383,16 @@ fn count_staged_assets(dir: &Path) -> usize {
     count
 }
 
-fn count_hooks_in_file(path: &Path) -> (bool, usize) {
-    let data = match std::fs::read_to_string(path) {
-        Ok(d) => d,
-        Err(_) => return (false, 0),
-    };
-    // Try JSON: recursively count `command` strings referencing agent-hooks.
-    // Covers flat, matcher_group, and named-bundle shapes.
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&data) {
-        let mut count = 0usize;
-        count_commands(&val, &mut count);
-        if count > 0 {
-            return (true, count);
-        }
-        // Fallback: raw marker search.
-        let raw = data.matches("agent-hooks").count();
-        return (raw > 0, raw);
-    }
-    // Plain/TOML
-    let count = data.matches("agent-hooks").count();
+/// Count the hook commands in `path` that this harness's `install` wrote,
+/// by the same contract `uninstall` removes them with. Another tool's hooks
+/// that merely mention `agent-hooks` (a directory, a script name) are not
+/// ours: counting them reported the harness installed after an uninstall.
+fn count_hooks_in_file(path: &Path, harness_id: &str, aliases: &[String]) -> (bool, usize) {
+    let count = collect_hook_commands_from_file(path)
+        .iter()
+        .filter(|cmd| super::uninstall::command_is_ours(cmd, harness_id, aliases))
+        .count();
     (count > 0, count)
-}
-
-fn count_commands(value: &serde_json::Value, count: &mut usize) {
-    match value {
-        serde_json::Value::Object(map) => {
-            if map
-                .get("command")
-                .and_then(|c| c.as_str())
-                .is_some_and(|s| s.contains("agent-hooks"))
-            {
-                *count += 1;
-            }
-            for v in map.values() {
-                count_commands(v, count);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                count_commands(v, count);
-            }
-        }
-        _ => {}
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +904,30 @@ mod tests {
             .iter()
             .any(|w| w.starts_with("socket-mismatch")));
         assert_eq!(embedded_sockets(&files), ["/tmp/a.sock", "/tmp/b.sock"]);
+    }
+
+    #[test]
+    fn another_tools_hook_under_an_agent_hooks_directory_is_not_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let write = |commands: &[&str]| {
+            let hooks: Vec<_> = commands
+                .iter()
+                .map(|c| serde_json::json!({"type": "command", "command": c}))
+                .collect();
+            std::fs::write(
+                &config,
+                serde_json::json!({"hooks": {"Stop": [{"hooks": hooks}]}}).to_string(),
+            )
+            .unwrap();
+        };
+        let foreign = "/bin/sh '/Users/me/.orca/agent-hooks/claude-hook.sh'";
+
+        write(&[foreign]);
+        assert_eq!(count_hooks_in_file(&config, "claude-code", &[]), (false, 0));
+
+        write(&[foreign, "/b/agent-hooks hook claude-code --event Stop"]);
+        assert_eq!(count_hooks_in_file(&config, "claude-code", &[]), (true, 1));
     }
 
     #[test]

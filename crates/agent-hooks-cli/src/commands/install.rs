@@ -1175,7 +1175,8 @@ fn op_toml_hooks(
         return toml_command_hooks(manifest, version, &target, root, ctx);
     }
 
-    let existing = read_config(&target).map_err(|e| anyhow::anyhow!("{}: {e}", target.display()))?;
+    let existing =
+        read_config(&target).map_err(|e| anyhow::anyhow!("{}: {e}", target.display()))?;
     let host_events = version_events(manifest, version);
     let commands: Vec<String> = host_events
         .iter()
@@ -1265,7 +1266,8 @@ fn op_toml_list_hooks(
         return Ok((0, false));
     };
 
-    let existing = read_config(&target).map_err(|e| anyhow::anyhow!("{}: {e}", target.display()))?;
+    let existing =
+        read_config(&target).map_err(|e| anyhow::anyhow!("{}: {e}", target.display()))?;
     let host_events = version_events(manifest, version);
     let commands: Vec<String> = host_events
         .iter()
@@ -1388,7 +1390,8 @@ fn toml_command_hooks(
                     cur,
                     &manifest.id,
                     &manifest.aliases,
-                ) => {
+                ) =>
+            {
                 eprintln!(
                     "  warning: {}: {dotted} already runs another command (one per event); left unchanged",
                     target.display()
@@ -1430,13 +1433,9 @@ fn toml_command_hooks(
         let Some(table) = toml_table_get_mut(doc.as_table_mut(), parents) else {
             continue;
         };
-        if table
-            .get(key)
-            .and_then(|i| i.as_str())
-            .is_some_and(|cur| {
-                crate::commands::uninstall::command_is_ours(cur, &manifest.id, &manifest.aliases)
-            })
-        {
+        if table.get(key).and_then(|i| i.as_str()).is_some_and(|cur| {
+            crate::commands::uninstall::command_is_ours(cur, &manifest.id, &manifest.aliases)
+        }) {
             table.remove(key);
             changed += 1;
         }
@@ -1533,40 +1532,11 @@ fn op_stage_assets(
     std::fs::create_dir_all(&dir)?;
     let mut written = 0usize;
     for asset in assets {
-        let mut content = if let Some(key) = asset.embedded.as_deref() {
-            agent_hooks_adapters::embedded_asset(harness, key)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown embedded asset '{harness}/{key}' — expected a file under \
-                         crates/agent-hooks-adapters/builtin/{harness}/assets/{key}"
-                    )
-                })?
-                .to_string()
-        } else if let Some(t) = asset.template.as_ref() {
-            match t {
-                serde_json::Value::String(s) => s.clone(),
-                _ => serde_json::to_string_pretty(t)?,
-            }
-        } else {
-            anyhow::bail!("asset '{}' has neither embedded nor template", asset.path);
-        };
-        // Managed marker is a source comment (`//! ...`, `// ...`). Only valid
-        // in code assets — prepending it to JSON (package.json) corrupts the
-        // file and breaks consumers that parse it (`omp plugin install` ->
-        // `SyntaxError: Failed to parse JSON`). Skip JSON assets.
-        let is_json = std::path::Path::new(&asset.path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+        let mut content = staged_asset_source(harness, asset, managed_marker)?;
         // Always rendered from the embedded template, so a reinstall with
         // different settings rewrites the file cleanly.
         if is_code_asset(&asset.path) {
             content = substitute_install_placeholders(&content, vars);
-        }
-        if let Some(marker) = managed_marker {
-            if !is_json && !content.starts_with(marker) {
-                content = format!("{}\n{}", marker, content);
-            }
         }
         let dest = dir.join(&asset.path);
         if let Some(parent) = dest.parent() {
@@ -1581,6 +1551,45 @@ fn op_stage_assets(
         }
     }
     Ok((dir, written))
+}
+
+/// What `install` stages for `asset` before its install placeholders are
+/// filled in. `status` compares installed plugins against this to spot assets
+/// left behind by an older binary.
+pub(crate) fn staged_asset_source(
+    harness: &str,
+    asset: &agent_hooks_adapters::manifest::AssetSpec,
+    managed_marker: Option<&str>,
+) -> anyhow::Result<String> {
+    let content = if let Some(key) = asset.embedded.as_deref() {
+        agent_hooks_adapters::embedded_asset(harness, key)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown embedded asset '{harness}/{key}' — expected a file under \
+                     crates/agent-hooks-adapters/builtin/{harness}/assets/{key}"
+                )
+            })?
+            .to_string()
+    } else if let Some(t) = asset.template.as_ref() {
+        match t {
+            serde_json::Value::String(s) => s.clone(),
+            _ => serde_json::to_string_pretty(t)?,
+        }
+    } else {
+        anyhow::bail!("asset '{}' has neither embedded nor template", asset.path);
+    };
+    // Managed marker is a source comment (`//! ...`, `// ...`). Only valid
+    // in code assets — prepending it to JSON (package.json) corrupts the
+    // file and breaks consumers that parse it (`omp plugin install` ->
+    // `SyntaxError: Failed to parse JSON`). Skip JSON assets.
+    let is_json = std::path::Path::new(&asset.path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    Ok(match managed_marker {
+        Some(marker) if !is_json && !content.starts_with(marker) => format!("{marker}\n{content}"),
+        _ => content,
+    })
 }
 
 /// Script assets that carry install placeholders. JSON/markdown assets are
@@ -1773,7 +1782,11 @@ fn op_json_edit(
         let data = match read_config(&path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("  warning: {}: unreadable, skipping ({})", path.display(), e);
+                eprintln!(
+                    "  warning: {}: unreadable, skipping ({})",
+                    path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -1842,9 +1855,7 @@ fn json_edit_backup_path(path: &Path) -> PathBuf {
 
 /// Missing sidecar reads as empty; an unreadable or corrupt one is an error
 /// so the recorded originals are never silently overwritten.
-fn read_json_edit_state(
-    path: &Path,
-) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+fn read_json_edit_state(path: &Path) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
     let state_path = json_edit_state_path(path);
     let data =
         read_config(&state_path).map_err(|e| anyhow::anyhow!("{}: {e}", state_path.display()))?;
@@ -1853,7 +1864,10 @@ fn read_json_edit_state(
     }
     match serde_json::from_str(&data) {
         Ok(serde_json::Value::Object(map)) => Ok(map),
-        _ => anyhow::bail!("{}: not a JSON object; fix or delete it", state_path.display()),
+        _ => anyhow::bail!(
+            "{}: not a JSON object; fix or delete it",
+            state_path.display()
+        ),
     }
 }
 

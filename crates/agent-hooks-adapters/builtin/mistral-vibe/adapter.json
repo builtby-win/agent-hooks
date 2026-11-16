@@ -2,6 +2,7 @@
   "id": "mistral-vibe",
   "display_name": "Mistral Vibe",
   "aliases": ["mistral", "vibe", "mistral-vibe-cli", "vibe-code"],
+  "presence": {"paths": ["~/.vibe"], "binaries": ["vibe"]},
   "default_version": "v1",
   "unverified": true,
   "detect": {

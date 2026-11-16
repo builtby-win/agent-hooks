@@ -2,6 +2,7 @@
   "id": "amp",
   "display_name": "Amp",
   "aliases": ["ampcode", "sourcegraph-amp", "sourcegraph_amp", "amp"],
+  "presence": {"paths": ["~/.config/amp"], "binaries": ["amp"]},
   "default_version": "v1",
   "detect": {
     "harness_hint": ["amp", "ampcode", "sourcegraph-amp"],

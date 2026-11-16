@@ -2,6 +2,7 @@
   "id": "kiro",
   "display_name": "Kiro",
   "aliases": ["kiro-cli", "kiro_cli", "kiro"],
+  "presence": {"paths": ["~/.kiro"], "binaries": ["kiro-cli", "kiro"]},
   "default_version": "v1",
   "detect": {
     "harness_hint": ["kiro"],

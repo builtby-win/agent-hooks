@@ -2,6 +2,7 @@
   "id": "hermes",
   "display_name": "Hermes",
   "aliases": ["hermes-agent", "hermes_agent", "hermes"],
+  "presence": {"paths": ["~/.hermes"], "binaries": ["hermes"]},
   "default_version": "v1",
   "detect": {
     "harness_hint": ["hermes"],

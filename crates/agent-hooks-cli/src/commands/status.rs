@@ -98,10 +98,10 @@ pub fn run(args: StatusArgs) -> anyhow::Result<()> {
                 any_installed = true;
                 format!("{} hook(s) in {}", h.hook_count, h.config_path)
             } else {
-                format!("config exists but no hooks — {}", h.config_path)
+                format!("detected, no hooks — {}", h.config_path)
             }
         } else {
-            format!("no config — {}", h.config_path)
+            format!("not detected — {}", h.config_path)
         };
         let name = if h.unverified {
             format!("{} [unverified contract]", h.display_name)
@@ -308,6 +308,14 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
             }
         }
 
+        // Plugin harnesses install into paths we create, so those prove nothing
+        // about the agent itself; its own dirs and executable do.
+        if let Some(presence) = &m.presence {
+            exists = exists
+                || presence.paths.iter().any(|raw| expand_op_path(raw).is_dir())
+                || presence.binaries.iter().any(|name| binary_on_user_path(name));
+        }
+
         let display_path = found_path
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| {
@@ -356,6 +364,22 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
         });
     }
     out
+}
+
+/// Whether `name` is an executable on PATH or in the dirs user-installed CLIs
+/// live in, which a GUI-launched process's PATH usually lacks.
+fn binary_on_user_path(name: &str) -> bool {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        for rel in [".local/bin", ".bun/bin", ".cargo/bin", "Library/pnpm"] {
+            dirs.push(home.join(rel));
+        }
+    }
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    dirs.iter().any(|dir| dir.join(name).is_file())
 }
 
 /// Count staged asset files that look managed (marker or agent-hooks

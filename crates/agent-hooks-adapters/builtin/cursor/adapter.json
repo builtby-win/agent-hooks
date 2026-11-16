@@ -2,6 +2,7 @@
   "id": "cursor",
   "display_name": "Cursor",
   "aliases": ["cursor-agent", "cursor-cli"],
+  "presence": {"paths": ["~/.cursor"], "binaries": ["cursor", "cursor-agent"]},
   "default_version": "v1",
   "detect": {
     "harness_hint": ["cursor"],

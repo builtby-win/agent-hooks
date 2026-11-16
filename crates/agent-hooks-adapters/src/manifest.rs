@@ -497,6 +497,17 @@ impl ResponseSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
+pub struct PresenceSpec {
+    /// The agent's own directories (`~` and env vars expand); any existing one counts.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// The agent's executables, looked up on PATH and the usual user bin dirs.
+    #[serde(default)]
+    pub binaries: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
 pub struct DetectSpec {
     #[serde(default)]
     pub harness_hint: Vec<String>,
@@ -1095,6 +1106,11 @@ pub struct AdapterManifest {
     pub unverified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detect: Option<DetectSpec>,
+    /// How `status` tells the agent itself is on this machine, for harnesses
+    /// whose install targets are files or dirs agent-hooks creates (a staged
+    /// plugin, a hooks file), so those paths only exist after install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<PresenceSpec>,
     /// Per-OS (`std::env::consts::OS`: `macos`, `linux`, `windows`) command
     /// that backfills history. Wins over a builtin Rust importer.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1493,6 +1509,7 @@ impl AdapterManifest {
             // manifest without the flag.
             unverified: local.unverified || base.unverified,
             detect: local.detect.clone().or_else(|| base.detect.clone()),
+            presence: local.presence.clone().or_else(|| base.presence.clone()),
             history_backfill: if local.history_backfill.is_empty() {
                 base.history_backfill.clone()
             } else {

@@ -2,6 +2,7 @@
   "id": "omp",
   "display_name": "Oh My Pi",
   "aliases": ["oh-my-pi", "oh_my_pi"],
+  "presence": {"paths": ["~/.omp"], "binaries": ["omp"]},
   "default_version": "v1",
   "detect": {
     "harness_hint": ["omp", "oh-my-pi", "oh_my_pi"],

@@ -2,6 +2,7 @@
   "id": "pi",
   "display_name": "Pi",
   "aliases": ["pi-agent", "pi_agent"],
+  "presence": {"paths": ["~/.pi"], "binaries": ["pi"]},
   "default_version": "v1",
   "detect": {
     "harness_hint": ["pi", "pi-agent", "pi_agent"],

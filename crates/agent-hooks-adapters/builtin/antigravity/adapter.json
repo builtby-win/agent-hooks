@@ -2,6 +2,7 @@
   "id": "antigravity",
   "display_name": "Google Antigravity",
   "aliases": ["google-antigravity", "antigravity-cli"],
+  "presence": {"paths": [], "binaries": ["agy"]},
   "default_version": "v1",
   "detect": {
     "harness_hint": ["antigravity"],

@@ -4,6 +4,7 @@
   "aliases": [
     "opencode-ai"
   ],
+  "presence": {"paths": ["~/.config/opencode"], "binaries": ["opencode"]},
   "default_version": "v1",
   "detect": {
     "harness_hint": [

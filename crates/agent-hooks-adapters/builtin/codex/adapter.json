@@ -2,6 +2,7 @@
   "id": "codex",
   "display_name": "Codex",
   "aliases": ["openai-codex", "codex-cli"],
+  "presence": {"paths": ["~/.codex"], "binaries": ["codex"]},
   "default_version": "v1",
   "detect": {
     "harness_hint": ["codex", "openai-codex"],

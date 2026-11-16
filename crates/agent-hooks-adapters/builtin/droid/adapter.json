@@ -2,6 +2,7 @@
   "id": "droid",
   "display_name": "Factory Droid",
   "aliases": ["factory-droid", "factory_droid", "factory"],
+  "presence": {"paths": ["~/.factory"], "binaries": ["droid"]},
   "default_version": "v1",
   "unverified": true,
   "detect": {

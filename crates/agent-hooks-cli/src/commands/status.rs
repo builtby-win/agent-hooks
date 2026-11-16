@@ -1,6 +1,6 @@
 use crate::cli::StatusArgs;
 use crate::paths::{expand_env_vars, expand_op_path, expand_tilde};
-use agent_hooks_adapters::manifest::{AdapterManifest, InstallOp};
+use agent_hooks_adapters::manifest::{AdapterManifest, AssetSpec, InstallOp};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::time::Duration;
@@ -248,6 +248,7 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
         // Candidate locations in op order: config files first, then stage dirs.
         let mut file_paths: Vec<PathBuf> = Vec::new();
         let mut stage_dirs: Vec<PathBuf> = Vec::new();
+        let mut staged_ops: Vec<(PathBuf, &[AssetSpec], Option<&str>)> = Vec::new();
         for op in &vs.install {
             match op {
                 InstallOp::JsonHooks { paths, .. }
@@ -261,8 +262,13 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
                         }
                     }
                 }
-                InstallOp::StageAssets { stage_dir, .. } => {
+                InstallOp::StageAssets {
+                    stage_dir,
+                    assets,
+                    managed_marker,
+                } => {
                     let d = expand_op_path(stage_dir);
+                    staged_ops.push((d.clone(), assets, managed_marker.as_deref()));
                     if !stage_dirs.contains(&d) {
                         stage_dirs.push(d);
                     }
@@ -282,7 +288,7 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
                 exists = true;
                 found_path.get_or_insert_with(|| p.clone());
                 existing_files.push(p.clone());
-                let (inst, count) = count_hooks_in_file(p);
+                let (inst, count) = count_hooks_in_file(p, &m.id, &m.aliases);
                 if inst {
                     installed = true;
                     hook_count += count;
@@ -338,6 +344,13 @@ fn check_installed_hooks(checked_socket: &Path) -> Vec<HarnessStatus> {
                         push_unique(&mut warnings, w);
                     }
                 }
+                for (dir, assets, marker) in &staged_ops {
+                    if count_staged_assets(dir) > 0 {
+                        for w in stale_asset_warnings(&m.id, dir, assets, *marker) {
+                            push_unique(&mut warnings, w);
+                        }
+                    }
+                }
                 warnings
             },
         });
@@ -370,49 +383,16 @@ fn count_staged_assets(dir: &Path) -> usize {
     count
 }
 
-fn count_hooks_in_file(path: &Path) -> (bool, usize) {
-    let data = match std::fs::read_to_string(path) {
-        Ok(d) => d,
-        Err(_) => return (false, 0),
-    };
-    // Try JSON: recursively count `command` strings referencing agent-hooks.
-    // Covers flat, matcher_group, and named-bundle shapes.
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&data) {
-        let mut count = 0usize;
-        count_commands(&val, &mut count);
-        if count > 0 {
-            return (true, count);
-        }
-        // Fallback: raw marker search.
-        let raw = data.matches("agent-hooks").count();
-        return (raw > 0, raw);
-    }
-    // Plain/TOML
-    let count = data.matches("agent-hooks").count();
+/// Count the hook commands in `path` that this harness's `install` wrote,
+/// by the same contract `uninstall` removes them with. Another tool's hooks
+/// that merely mention `agent-hooks` (a directory, a script name) are not
+/// ours: counting them reported the harness installed after an uninstall.
+fn count_hooks_in_file(path: &Path, harness_id: &str, aliases: &[String]) -> (bool, usize) {
+    let count = collect_hook_commands_from_file(path)
+        .iter()
+        .filter(|cmd| super::uninstall::command_is_ours(cmd, harness_id, aliases))
+        .count();
     (count > 0, count)
-}
-
-fn count_commands(value: &serde_json::Value, count: &mut usize) {
-    match value {
-        serde_json::Value::Object(map) => {
-            if map
-                .get("command")
-                .and_then(|c| c.as_str())
-                .is_some_and(|s| s.contains("agent-hooks"))
-            {
-                *count += 1;
-            }
-            for v in map.values() {
-                count_commands(v, count);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                count_commands(v, count);
-            }
-        }
-        _ => {}
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -486,6 +466,46 @@ fn socket_mismatch_warning(sockets: &[String], checked_socket: &Path) -> Option<
             checked_socket.display()
         )
     })
+}
+
+/// One `stale-asset` warning per staged asset under `dir` that is not what
+/// this binary's `install` would write. A binary upgrade does not rewrite
+/// plugins it staged earlier, so without this an old plugin keeps running
+/// while `status` reports the harness healthy.
+fn stale_asset_warnings(
+    harness: &str,
+    dir: &Path,
+    assets: &[AssetSpec],
+    managed_marker: Option<&str>,
+) -> Vec<String> {
+    assets
+        .iter()
+        .filter(|asset| {
+            let Ok(source) = super::install::staged_asset_source(harness, asset, managed_marker)
+            else {
+                return false;
+            };
+            let installed = std::fs::read_to_string(dir.join(&asset.path)).unwrap_or_default();
+            !renders_asset_source(&source, &installed)
+        })
+        .map(|asset| {
+            format!(
+                "stale-asset: '{}' differs from the asset this binary installs",
+                dir.join(&asset.path).display()
+            )
+        })
+        .collect()
+}
+
+/// Whether `installed` is `source` with only its install placeholders filled
+/// in. Placeholders are single-line literals, so every other line must match.
+fn renders_asset_source(source: &str, installed: &str) -> bool {
+    let mut installed = installed.lines();
+    source.lines().all(|expected| {
+        installed
+            .next()
+            .is_some_and(|line| expected.contains("__AGENT_HOOKS_") || expected == line)
+    }) && installed.next().is_none()
 }
 
 /// Sockets baked into each managed plugin asset under `dir`, one entry per
@@ -884,6 +904,57 @@ mod tests {
             .iter()
             .any(|w| w.starts_with("socket-mismatch")));
         assert_eq!(embedded_sockets(&files), ["/tmp/a.sock", "/tmp/b.sock"]);
+    }
+
+    #[test]
+    fn another_tools_hook_under_an_agent_hooks_directory_is_not_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("settings.json");
+        let write = |commands: &[&str]| {
+            let hooks: Vec<_> = commands
+                .iter()
+                .map(|c| serde_json::json!({"type": "command", "command": c}))
+                .collect();
+            std::fs::write(
+                &config,
+                serde_json::json!({"hooks": {"Stop": [{"hooks": hooks}]}}).to_string(),
+            )
+            .unwrap();
+        };
+        let foreign = "/bin/sh '/Users/me/.orca/agent-hooks/claude-hook.sh'";
+
+        write(&[foreign]);
+        assert_eq!(count_hooks_in_file(&config, "claude-code", &[]), (false, 0));
+
+        write(&[foreign, "/b/agent-hooks hook claude-code --event Stop"]);
+        assert_eq!(count_hooks_in_file(&config, "claude-code", &[]), (true, 1));
+    }
+
+    #[test]
+    fn a_plugin_staged_by_an_older_binary_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset = AssetSpec {
+            path: "index.ts".into(),
+            embedded: None,
+            template: Some(serde_json::json!(
+                "const INSTALL_SOCKET = \"__AGENT_HOOKS_SOCKET__\";\nforward();\n"
+            )),
+        };
+        let marker = Some("//! managed by agent-hooks");
+        let warnings =
+            || stale_asset_warnings("omp", dir.path(), std::slice::from_ref(&asset), marker);
+
+        let current =
+            "//! managed by agent-hooks\nconst INSTALL_SOCKET = \"/tmp/a.sock\";\nforward();\n";
+        std::fs::write(dir.path().join("index.ts"), current).unwrap();
+        assert!(warnings().is_empty());
+
+        std::fs::write(
+            dir.path().join("index.ts"),
+            current.replace("forward()", "forwardAll()"),
+        )
+        .unwrap();
+        assert!(warnings()[0].starts_with("stale-asset"));
     }
 
     #[test]

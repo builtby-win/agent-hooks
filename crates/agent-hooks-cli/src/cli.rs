@@ -199,6 +199,12 @@ pub struct DaemonArgs {
     /// History directory (default: $AGENT_HOOKS_HISTORY_DIR, else ~/.agent-hooks/history)
     #[arg(long = "history-dir", value_name = "PATH", requires = "history")]
     pub history_dir: Option<PathBuf>,
+
+    /// Shut down gracefully when stdin reaches EOF. For supervisors that spawn
+    /// the daemon with a piped stdin and hold the write end: the daemon then
+    /// never outlives them, even if they crash.
+    #[arg(long)]
+    pub exit_on_stdin_eof: bool,
 }
 
 #[derive(Parser, Debug)]

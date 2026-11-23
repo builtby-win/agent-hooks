@@ -31,7 +31,12 @@ pub async fn run(args: DaemonArgs) -> anyhow::Result<()> {
         daemon = daemon.with_history(Arc::new(recorder));
     }
     let history = args.history;
-    daemon.run(Some(socket_path)).await.map_err(|e| {
+    let exit_on_stdin_eof = args.exit_on_stdin_eof;
+    if exit_on_stdin_eof {
+        daemon = daemon.with_exit_on_stdin_eof();
+    }
+    let result = daemon.run(Some(socket_path)).await;
+    result.map_err(|e| {
         let msg = e.to_string();
         if history && msg.contains("already running") {
             // One daemon owns the socket for every agent. If it was started

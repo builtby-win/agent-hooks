@@ -115,12 +115,29 @@ pub struct AgentHooksDaemon {
     /// Opt-in durable history of *forwarded* hook observations (events that
     /// carry an origin label); `None` unless the CLI enabled it explicitly.
     history: Option<Arc<HistoryRecorder>>,
+    /// Shut down (gracefully, removing the socket) when stdin reaches EOF. A
+    /// supervisor that spawns the daemon with a piped stdin and holds the write
+    /// end gets cleanup on any exit of its own, including a crash.
+    exit_on_stdin_eof: bool,
 }
 
 impl Default for AgentHooksDaemon {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Resolves when stdin hits EOF or errors; any bytes written to it are ignored. A plain thread,
+/// not tokio's blocking pool, so a read still parked at shutdown cannot stall runtime drop.
+fn watch_stdin_eof() -> tokio::sync::oneshot::Receiver<()> {
+    use std::io::Read;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 256];
+        while matches!(std::io::stdin().read(&mut buf), Ok(n) if n > 0) {}
+        let _ = tx.send(());
+    });
+    rx
 }
 
 impl AgentHooksDaemon {
@@ -132,6 +149,7 @@ impl AgentHooksDaemon {
             broadcaster: tx,
             enricher: Arc::new(crate::enricher::NoopEnricher),
             history: None,
+            exit_on_stdin_eof: false,
         }
     }
 
@@ -146,6 +164,7 @@ impl AgentHooksDaemon {
             broadcaster: tx,
             enricher,
             history: None,
+            exit_on_stdin_eof: false,
         }
     }
 
@@ -160,6 +179,7 @@ impl AgentHooksDaemon {
             broadcaster,
             enricher: Arc::new(crate::enricher::NoopEnricher),
             history: None,
+            exit_on_stdin_eof: false,
         }
     }
 
@@ -169,6 +189,12 @@ impl AgentHooksDaemon {
     /// daemon serves anything.
     pub fn with_history(mut self, history: Arc<HistoryRecorder>) -> Self {
         self.history = Some(history);
+        self
+    }
+
+    /// Shut down gracefully when stdin reaches EOF; see the field doc.
+    pub fn with_exit_on_stdin_eof(mut self) -> Self {
+        self.exit_on_stdin_eof = true;
         self
     }
 
@@ -281,6 +307,11 @@ impl AgentHooksDaemon {
         let mut sigint =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
 
+        // One watcher for the daemon's lifetime; a per-iteration read would strand a blocking
+        // thread on every accepted connection.
+        #[cfg(unix)]
+        let mut stdin_eof = self.exit_on_stdin_eof.then(watch_stdin_eof);
+
         loop {
             let accept = listener.accept();
 
@@ -319,6 +350,15 @@ impl AgentHooksDaemon {
                         if let Some(ref mut s) = sigint { let _ = s.recv().await; } else { std::future::pending::<()>().await }
                     } => {
                         info!("received SIGINT, shutting down");
+                        break;
+                    }
+                    _ = async {
+                        match stdin_eof.as_mut() {
+                            Some(rx) => { let _ = rx.await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        info!("stdin closed, shutting down");
                         break;
                     }
                 }

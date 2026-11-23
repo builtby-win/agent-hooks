@@ -465,6 +465,19 @@ impl AgentHooksDaemon {
         // Preserve shim passthrough for client-side enrichment — daemon never interprets it.
         event.passthrough_env = input.passthrough_env.clone();
         self.enricher.enrich(&mut event, &input);
+        // Defer any pending hold that this event proves is already past (e.g.
+        // Claude Code leaving a PermissionRequest hook alive after the user
+        // answered in the terminal) BEFORE tracking or broadcasting so
+        // subscribers reconciling on this event immediately see it gone.
+        let superseded = self.mediator.defer_superseded(&event).await;
+        for prompt_id in &superseded {
+            info!(
+                prompt_id = %prompt_id,
+                session = %event.session_id,
+                lifecycle = %event.lifecycle.name(),
+                "deferred superseded prompt hold"
+            );
+        }
         // Sweep-on-insert: expire sessions idle past the TTL (bounded memory).
         // Holds on live prompts are protected while held.
         let held = self.mediator.pending_ids().await;
@@ -536,6 +549,7 @@ async fn open_hold(
         .register_with_info(
             prompt_id.clone(),
             crate::prompt_mediator::PromptMeta {
+                harness: event.harness.clone(),
                 session_id,
                 key,
                 question,
@@ -1260,6 +1274,20 @@ async fn handle_hook_line(
         lifecycle = %event.lifecycle.name(),
         "hook event parsed"
     );
+
+    // Defer any pending hold that this event proves is already past (e.g.
+    // Claude Code leaving a PermissionRequest hook alive after the user
+    // answered in the terminal) BEFORE tracking or broadcasting so
+    // subscribers reconciling on this event immediately see it gone.
+    let superseded = mediator.defer_superseded(&event).await;
+    for prompt_id in &superseded {
+        info!(
+            prompt_id = %prompt_id,
+            session = %event.session_id,
+            lifecycle = %event.lifecycle.name(),
+            "deferred superseded prompt hold"
+        );
+    }
 
     // Sweep-on-insert: expire sessions idle past the TTL (bounded memory).
     // Holds on live prompts are protected while held.

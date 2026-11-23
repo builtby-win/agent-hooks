@@ -87,6 +87,7 @@ pub struct PromptMediator {
 /// Display metadata for one held prompt (powers `prompt.list`).
 #[derive(Debug, Clone)]
 pub struct PromptMeta {
+    pub harness: String,
     pub session_id: String,
     pub key: String,
     pub question: Option<String>,
@@ -167,6 +168,7 @@ impl PromptMediator {
         self.info.lock().await.insert(
             prompt_id.clone(),
             PromptMeta {
+                harness: String::new(),
                 session_id: session_id.clone(),
                 key: key.clone(),
                 question: question.clone(),
@@ -408,6 +410,77 @@ impl PromptMediator {
     /// List all currently pending prompt IDs.
     pub async fn pending_ids(&self) -> Vec<String> {
         self.pending.lock().await.keys().cloned().collect()
+    }
+
+    /// Resolve and remove pending holds that a subsequent event on the same
+    /// `(harness, session_id)` proves are already past — e.g. when a harness
+    /// lets the user answer a permission/question prompt in its own TUI without
+    /// killing the `PermissionRequest` hook process.
+    ///
+    /// Superseded holds resolve with [`PromptDecision::defer`] so the lingering
+    /// hook exits cleanly without approving or denying anything on the user's
+    /// behalf. Returns the deferred `prompt_id`s.
+    pub async fn defer_superseded(&self, event: &AgentEvent) -> Vec<String> {
+        enum Scope<'a> {
+            Tool(&'a str),
+            Session,
+        }
+        let scope = match &event.lifecycle {
+            agent_hooks_protocol::AgentLifecycle::PostToolUse { tool_name, .. }
+            | agent_hooks_protocol::AgentLifecycle::PostToolUseFailure { tool_name, .. } => {
+                Scope::Tool(tool_name.as_str())
+            }
+            agent_hooks_protocol::AgentLifecycle::UserPromptSubmit { .. }
+            | agent_hooks_protocol::AgentLifecycle::Interrupt
+            | agent_hooks_protocol::AgentLifecycle::SessionEnd { .. } => Scope::Session,
+            _ => return Vec::new(),
+        };
+
+        // Lock order: pending first, then info (matches register_with_info /
+        // pending_prompts / respond).
+        let ids: Vec<String> = {
+            let pending = self.pending.lock().await;
+            if pending.is_empty() {
+                return Vec::new();
+            }
+            let info = self.info.lock().await;
+            pending
+                .keys()
+                .filter(|prompt_id| {
+                    let Some(meta) = info.get(*prompt_id) else {
+                        return false;
+                    };
+                    if meta.session_id != event.session_id {
+                        return false;
+                    }
+                    if !meta.harness.is_empty() && meta.harness != event.harness {
+                        return false;
+                    }
+                    match scope {
+                        Scope::Session => true,
+                        Scope::Tool(tool_name) => {
+                            meta.prompt.as_ref().and_then(|p| p.tool_name.as_deref())
+                                == Some(tool_name)
+                                || meta.key.strip_prefix("permission:") == Some(tool_name)
+                                || meta.key.strip_prefix("tool:") == Some(tool_name)
+                        }
+                    }
+                })
+                .cloned()
+                .collect()
+        };
+
+        let mut deferred = Vec::with_capacity(ids.len());
+        for prompt_id in ids {
+            if self
+                .respond(&prompt_id, PromptDecision::defer())
+                .await
+                .is_ok()
+            {
+                deferred.push(prompt_id);
+            }
+        }
+        deferred
     }
 
     /// Register a new connection; returns its id for decider bookkeeping.
@@ -691,6 +764,7 @@ mod tests {
     /// Hold metadata with the given prompt payload.
     fn meta(prompt: Option<agent_hooks_protocol::PromptRequest>) -> PromptMeta {
         PromptMeta {
+            harness: "claude-code".to_string(),
             session_id: "ses".to_string(),
             key: "tool:Ask".to_string(),
             question: None,
@@ -706,6 +780,7 @@ mod tests {
             .register_with_info(
                 "bp".to_string(),
                 PromptMeta {
+                    harness: "claude-code".to_string(),
                     session_id: "ses1".to_string(),
                     key: "tool:Bash".to_string(),
                     question: Some("Bash rm -rf?".to_string()),
@@ -1115,5 +1190,145 @@ mod tests {
         // Idempotent teardown never panics.
         mediator.disconnect(a);
         mediator.clear_env_requested(a);
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_defers_matching_tool_hold_only() {
+        use agent_hooks_protocol::{AgentLifecycle, EventContext, PromptKind, PromptRequest};
+
+        let mediator = PromptMediator::new();
+        let rx_ask = mediator
+            .register_with_info(
+                "p-ask".to_string(),
+                PromptMeta {
+                    harness: "claude-code".to_string(),
+                    session_id: "s1".to_string(),
+                    key: "permission:AskUserQuestion".to_string(),
+                    question: Some("AskUserQuestion".to_string()),
+                    prompt: Some(PromptRequest {
+                        prompt_id: "p-ask".to_string(),
+                        kind: PromptKind::Permission,
+                        tool_name: Some("AskUserQuestion".to_string()),
+                        command: None,
+                        file_path: None,
+                        description: None,
+                        questions: Vec::new(),
+                        suggestions: Vec::new(),
+                    }),
+                    created_at: Instant::now(),
+                },
+            )
+            .await;
+        let mut rx_bash = mediator
+            .register_with_info(
+                "p-bash".to_string(),
+                PromptMeta {
+                    harness: "claude-code".to_string(),
+                    session_id: "s1".to_string(),
+                    key: "permission:Bash".to_string(),
+                    question: Some("Bash".to_string()),
+                    prompt: None,
+                    created_at: Instant::now(),
+                },
+            )
+            .await;
+        let mut rx_other_session = mediator
+            .register_with_info(
+                "p-other-ses".to_string(),
+                PromptMeta {
+                    harness: "claude-code".to_string(),
+                    session_id: "s2".to_string(),
+                    key: "permission:AskUserQuestion".to_string(),
+                    question: None,
+                    prompt: None,
+                    created_at: Instant::now(),
+                },
+            )
+            .await;
+        let mut rx_other_harness = mediator
+            .register_with_info(
+                "p-other-harness".to_string(),
+                PromptMeta {
+                    harness: "opencode".to_string(),
+                    session_id: "s1".to_string(),
+                    key: "permission:AskUserQuestion".to_string(),
+                    question: None,
+                    prompt: None,
+                    created_at: Instant::now(),
+                },
+            )
+            .await;
+
+        let post = AgentEvent::new(
+            "claude-code",
+            "s1",
+            AgentLifecycle::PostToolUse {
+                tool_name: "AskUserQuestion".to_string(),
+                output_preview: None,
+            },
+            EventContext::default(),
+        );
+        let deferred = mediator.defer_superseded(&post).await;
+        assert_eq!(deferred, vec!["p-ask".to_string()]);
+        let decision = rx_ask.await.expect("matching hold resolved");
+        assert!(decision.defer);
+        assert!(!decision.allow);
+
+        // Unrelated tool, session, and harness holds stay pending.
+        assert!(rx_bash.try_recv().is_err());
+        assert!(rx_other_session.try_recv().is_err());
+        assert!(rx_other_harness.try_recv().is_err());
+        let mut remaining = mediator.pending_ids().await;
+        remaining.sort();
+        assert_eq!(remaining, vec!["p-bash", "p-other-harness", "p-other-ses"]);
+    }
+
+    #[tokio::test]
+    async fn session_boundary_events_defer_all_holds_but_stop_does_not() {
+        use agent_hooks_protocol::{AgentLifecycle, EventContext};
+
+        let mediator = PromptMediator::new();
+        let mut rx = mediator
+            .register_with_info(
+                "p1".to_string(),
+                PromptMeta {
+                    harness: "claude-code".to_string(),
+                    session_id: "s1".to_string(),
+                    key: "permission:Bash".to_string(),
+                    question: None,
+                    prompt: None,
+                    created_at: Instant::now(),
+                },
+            )
+            .await;
+
+        // Stop and Notification must NOT drop a live hold.
+        let stop = AgentEvent::new(
+            "claude-code",
+            "s1",
+            AgentLifecycle::Stop {
+                summary: None,
+                success: true,
+            },
+            EventContext::default(),
+        );
+        assert!(mediator.defer_superseded(&stop).await.is_empty());
+        assert!(rx.try_recv().is_err());
+
+        // UserPromptSubmit proves any earlier turn's hold is over.
+        let submit = AgentEvent::new(
+            "claude-code",
+            "s1",
+            AgentLifecycle::UserPromptSubmit {
+                user_prompt: Some("next".to_string()),
+            },
+            EventContext::default(),
+        );
+        assert_eq!(
+            mediator.defer_superseded(&submit).await,
+            vec!["p1".to_string()]
+        );
+        assert!(rx.await.expect("deferred on UserPromptSubmit").defer);
+        assert!(mediator.pending_ids().await.is_empty());
     }
 }

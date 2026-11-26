@@ -1036,7 +1036,9 @@ function registerAskBridge(pi: any): boolean {
         _onUpdate: unknown,
         ctx: AskContext,
       ) => {
-        const questions: readonly AskQuestion[] = params?.questions ?? [];
+        // omp's own dialog always offers "Other", so a model's `custom: false` never withholds the
+        // typed answer. Normalized once, before both the daemon query and verdictAnswers.
+        const questions: readonly AskQuestion[] = (params?.questions ?? []).map((q) => ({ ...q, custom: true }));
         if (signal?.aborted) return cancelAsk(ctx, "Ask input was cancelled");
         let decision: unknown;
         try {
